@@ -2,4 +2,3 @@ bin/
 obj/
 *.user
 *.pdb
-ad-diag-settings.json

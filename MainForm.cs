@@ -10,7 +10,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Principal;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -66,12 +65,16 @@ class MainForm : Form
     static readonly Font TabFontActive = new("Segoe UI", 8.5f, FontStyle.Bold);
     static readonly Font TabFontInactive = new("Segoe UI", 8.5f);
 
-    readonly ComboBox _txtDomain, _txtDc;
+    readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnExport, _btnClear, _btnTabResults, _btnTabGuide;
+    readonly Button _btnRun, _btnExport, _btnClear, _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
+    readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
+    readonly CheckBox _chkGpForce;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
-    readonly Panel _summaryPanel, _resultsCanvas, _resultsScrollPanel, _historyPanel;
-    readonly RichTextBox _guideBox;
+    readonly Panel _summaryPanel, _resultsCanvas, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
+    readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
+    bool _gpRunning;
+    bool _showingExplainer;
     List<TestGroup>? _lastResults;
     List<TestGroup>? _renderedGroups;
     bool _renderRunning;
@@ -80,8 +83,6 @@ class MainForm : Form
     int _selectedRunIndex = -1;
     CancellationTokenSource? _runCts;
 
-    static string SettingsPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ad-diag", "settings.json");
 
     public MainForm()
     {
@@ -93,8 +94,9 @@ class MainForm : Form
         ForeColor = TextColor;
         Font = new Font("Segoe UI", 9f);
         DoubleBuffered = true;
-        var icoPath = Path.Combine(AppContext.BaseDirectory, "app.ico");
-        if (File.Exists(icoPath)) Icon = new Icon(icoPath);
+        var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
+        var extracted = Icon.ExtractAssociatedIcon(exePath);
+        if (extracted != null) Icon = extracted;
 
         var mainPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = Padding.Empty };
         var layout = new TableLayoutPanel
@@ -190,7 +192,15 @@ class MainForm : Form
         _btnTabGuide.FlatAppearance.BorderColor = BorderColor;
         _btnTabGuide.FlatAppearance.BorderSize = 1;
         _btnTabGuide.Click += (s, e) => SwitchTab("guide");
-        tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide]);
+        _btnTabGp = new Button { Text = "Group Policy", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(110, 26), Location = new Point(178, 2), Cursor = Cursors.Hand };
+        _btnTabGp.FlatAppearance.BorderColor = BorderColor;
+        _btnTabGp.FlatAppearance.BorderSize = 1;
+        _btnTabGp.Click += (s, e) => { SwitchTab("gp"); RefreshGpTab(); };
+        _btnTabTickets = new Button { Text = "Kerberos Tickets", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(130, 26), Location = new Point(292, 2), Cursor = Cursors.Hand };
+        _btnTabTickets.FlatAppearance.BorderColor = BorderColor;
+        _btnTabTickets.FlatAppearance.BorderSize = 1;
+        _btnTabTickets.Click += (s, e) => { SwitchTab("tickets"); RefreshTickets(); };
+        tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets]);
 
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = BgColor };
@@ -225,11 +235,70 @@ class MainForm : Form
         };
         PopulateGuide();
 
+        // Group Policy tab
+        _gpBox = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = BgColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        _btnGpRefresh = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
+        _btnGpRefresh.FlatAppearance.BorderColor = BorderColor;
+        _btnGpRefresh.Click += (s, e) => RefreshGpTab();
+        _btnGpUpdate = new Button { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Cursor = Cursors.Hand };
+        _btnGpUpdate.FlatAppearance.BorderColor = BorderColor;
+        _btnGpUpdate.Click += BtnGpUpdate_Click;
+        _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
+        var gpBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        _btnGpRefresh.Location = new Point(10, 3);
+        _btnGpUpdate.Location = new Point(100, 3);
+        _chkGpForce.Location = new Point(216, 8);
+        gpBtnPanel.Controls.AddRange([_btnGpRefresh, _btnGpUpdate, _chkGpForce]);
+        _gpPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        _gpPanel.Controls.Add(_gpBox);
+        _gpPanel.Controls.Add(gpBtnPanel);
+        AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor);
+
+        // Kerberos Tickets tab
+        _ticketsBox = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = BgColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font("Cascadia Code", 9f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        _btnPurgeTickets = new Button { Text = "Purge All Tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28), Cursor = Cursors.Hand };
+        _btnPurgeTickets.FlatAppearance.BorderColor = BorderColor;
+        _btnPurgeTickets.Click += BtnPurgeTickets_Click;
+        var ticketsRefreshBtn = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
+        ticketsRefreshBtn.FlatAppearance.BorderColor = BorderColor;
+        ticketsRefreshBtn.Click += (s, e) => RefreshTickets();
+        var ticketsInfoBtn = new Button { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Cursor = Cursors.Hand };
+        ticketsInfoBtn.FlatAppearance.BorderColor = BorderColor;
+        ticketsInfoBtn.Click += (s, e) => { if (_showingExplainer) { _showingExplainer = false; RefreshTickets(); } else ShowTicketsExplainer(); };
+        var ticketsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        _btnPurgeTickets.Location = new Point(10, 3);
+        ticketsRefreshBtn.Location = new Point(158, 3);
+        ticketsInfoBtn.Location = new Point(246, 3);
+        ticketsBtnPanel.Controls.AddRange([_btnPurgeTickets, ticketsRefreshBtn, ticketsInfoBtn]);
+        _ticketsPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        _ticketsPanel.Controls.Add(_ticketsBox);
+        _ticketsPanel.Controls.Add(ticketsBtnPanel);
+
         _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
         _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
 
         contentWrapper.Controls.Add(_resultsScrollPanel);
         contentWrapper.Controls.Add(_guideBox);
+        contentWrapper.Controls.Add(_gpPanel);
+        contentWrapper.Controls.Add(_ticketsPanel);
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
@@ -246,16 +315,55 @@ class MainForm : Form
             _resultsCanvas.Invalidate();
         };
 
-        LoadSettings();
         FormClosing += (s, e) =>
         {
             _runCts?.Cancel();
-            SaveSettings();
         };
         FormClosed += (s, e) => Environment.Exit(0);
+        _ = DetectDomainAsync();
     }
 
-    ComboBox MakeInput(Panel parent, string label, int col, int row)
+    async Task DetectDomainAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_txtDomain.Text)) return; // don't override a saved value
+
+        try
+        {
+            string? domain = Environment.GetEnvironmentVariable("USERDNSDOMAIN");
+
+            if (string.IsNullOrWhiteSpace(domain))
+            {
+                domain = await Task.Run(() =>
+                {
+                    try
+                    {
+                        string dsreg = RunProcess("dsregcmd", "/status", timeoutMs: 5000);
+                        var m = Regex.Match(dsreg, @"Device Domain\s*:\s*(\S+)", RegexOptions.IgnoreCase);
+                        return m.Success ? m.Groups[1].Value.Trim() : null;
+                    }
+                    catch { return null; }
+                });
+            }
+
+            if (string.IsNullOrWhiteSpace(domain))
+            {
+                domain = await Task.Run(() =>
+                {
+                    try { return System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().DomainName; }
+                    catch { return null; }
+                });
+            }
+
+            if (IsDisposed || string.IsNullOrWhiteSpace(domain)) return;
+            if (!string.IsNullOrWhiteSpace(_txtDomain.Text)) return; // user may have started typing
+
+            _txtDomain.Text = domain.Trim().ToLowerInvariant();
+            _lblStatus.Text = $"Auto-detected domain: {_txtDomain.Text}";
+        }
+        catch { }
+    }
+
+    TextBox MakeInput(Panel parent, string label, int col, int row)
     {
         int x = col == 0 ? 14 : parent.Width / 2 + 4;
         int y = row == 0 ? 2 : 42;
@@ -268,121 +376,30 @@ class MainForm : Form
             Location = new Point(x, y), AutoSize = true,
         };
 
-        var cbo = new ComboBox
+        var txt = new TextBox
         {
             Text = "",
-            DropDownStyle = ComboBoxStyle.DropDown,
             BackColor = SurfaceColor, ForeColor = TextColor,
-            FlatStyle = FlatStyle.Standard,
+            BorderStyle = BorderStyle.FixedSingle,
             Font = new Font("Cascadia Code", 9f),
             Location = new Point(x, y + 13), Width = w,
         };
 
-        parent.Controls.AddRange([lbl, cbo]);
+        parent.Controls.AddRange([lbl, txt]);
 
         parent.Resize += (s, e) =>
         {
             int newX = col == 0 ? 14 : parent.ClientSize.Width / 2 + 4;
             int newW = parent.ClientSize.Width / 2 - 24;
             lbl.Location = new Point(newX, lbl.Location.Y);
-            cbo.Location = new Point(newX, cbo.Location.Y);
-            cbo.Width = newW;
+            txt.Location = new Point(newX, txt.Location.Y);
+            txt.Width = newW;
         };
 
-        return cbo;
+        return txt;
     }
 
     // ── Settings ────────────────────────────────────────────
-
-    void LoadSettings()
-    {
-        try
-        {
-            if (!File.Exists(SettingsPath)) return;
-            var json = File.ReadAllText(SettingsPath);
-            var s = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-            if (s == null) return;
-
-            LoadComboHistory(_txtDomain, s, "domain");
-            LoadComboHistory(_txtDc, s, "dc");
-
-            if (s.TryGetValue("dcSuffix", out var ds))
-                _chkDcSuffix.Checked = ds.ValueKind == JsonValueKind.True;
-        }
-        catch { }
-    }
-
-    static void LoadComboHistory(ComboBox cbo, Dictionary<string, JsonElement> data, string key)
-    {
-        if (!data.TryGetValue(key, out var el)) return;
-        if (el.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in el.EnumerateArray())
-            {
-                string? val = item.GetString();
-                if (!string.IsNullOrEmpty(val))
-                    cbo.Items.Add(val);
-            }
-            if (cbo.Items.Count > 0)
-                cbo.SelectedIndex = 0;
-        }
-        else if (el.ValueKind == JsonValueKind.String)
-        {
-            string? val = el.GetString();
-            if (!string.IsNullOrEmpty(val))
-            {
-                cbo.Items.Add(val);
-                cbo.SelectedIndex = 0;
-            }
-        }
-    }
-
-    void SaveSettings()
-    {
-        try
-        {
-            AddToHistory(_txtDomain);
-            AddToHistory(_txtDc);
-
-            var s = new Dictionary<string, object>
-            {
-                ["domain"] = ComboHistory(_txtDomain),
-                ["dc"] = ComboHistory(_txtDc),
-                ["dcSuffix"] = _chkDcSuffix.Checked,
-            };
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch { }
-    }
-
-    static void AddToHistory(ComboBox cbo)
-    {
-        string val = cbo.Text.Trim();
-        if (string.IsNullOrEmpty(val)) return;
-        for (int i = 0; i < cbo.Items.Count; i++)
-        {
-            if (string.Equals(cbo.Items[i]?.ToString(), val, StringComparison.OrdinalIgnoreCase))
-            {
-                cbo.Items.RemoveAt(i);
-                break;
-            }
-        }
-        cbo.Items.Insert(0, val);
-        cbo.SelectedIndex = 0;
-    }
-
-    static List<string> ComboHistory(ComboBox cbo)
-    {
-        var list = new List<string>();
-        foreach (var item in cbo.Items)
-        {
-            string? s = item?.ToString();
-            if (!string.IsNullOrEmpty(s))
-                list.Add(s);
-        }
-        return list;
-    }
 
     void BtnClear_Click(object? sender, EventArgs e)
     {
@@ -402,15 +419,14 @@ class MainForm : Form
     void BtnReset_Click(object? sender, EventArgs e)
     {
         var result = MessageBox.Show(
-            "This will clear all saved domain history, input fields, results, and settings.\n\nContinue?",
+            "This will clear all input fields and results.\n\nContinue?",
             "Reset All", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (result != DialogResult.Yes) return;
 
-        _txtDomain.Items.Clear(); _txtDomain.Text = "";
-        _txtDc.Items.Clear(); _txtDc.Text = "";
+        _txtDomain.Text = "";
+        _txtDc.Text = "";
         BtnClear_Click(sender, e);
-        try { if (File.Exists(SettingsPath)) File.Delete(SettingsPath); } catch { }
-        _lblStatus.Text = "All settings reset";
+        _lblStatus.Text = "All fields reset";
     }
 
     // ── Tab switching ───────────────────────────────────────
@@ -419,8 +435,10 @@ class MainForm : Form
     {
         _resultsScrollPanel.Visible = tab == "results";
         _guideBox.Visible = tab == "guide";
+        _gpPanel.Visible = tab == "gp";
+        _ticketsPanel.Visible = tab == "tickets";
 
-        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide") })
+        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets") })
         {
             btn.BackColor = tab == key ? SurfaceColor : BgColor;
             btn.ForeColor = tab == key ? AccentColor : DimColor;
@@ -509,7 +527,9 @@ class MainForm : Form
                 "• Secure Channel — verifies the computer account's trust relationship with the domain via nltest /sc_verify\n" +
                 "  Fix: If broken, reset the computer's secure channel: 'Test-ComputerSecureChannel -Repair' (requires domain admin credentials) or rejoin the domain\n\n" +
                 "• Site Assignment — the AD site this client is assigned to, from nltest /dsgetsite\n" +
-                "  Fix: If no site or wrong site, verify the client's subnet is registered in AD Sites and Services under the correct site"),
+                "  Fix: If no site or wrong site, verify the client's subnet is registered in AD Sites and Services under the correct site\n\n" +
+                "• Computer Password Age — the machine account password auto-rotates every 30 days by default; a stale password can cause trust failures\n" +
+                "  Fix: If over 45 days old, the machine may have lost its trust relationship. Reset with 'Test-ComputerSecureChannel -Repair' or rejoin the domain. Check that the DisablePasswordChange registry value is not set"),
 
             ("DC Discovery & Connectivity",
                 "Locates a domain controller and tests connectivity to the ports required for AD operations.\n\n" +
@@ -521,6 +541,12 @@ class MainForm : Form
                 "  Fix: If required by policy, ensure the DC has a valid certificate bound to LDAPS\n\n" +
                 "• Port 88 (Kerberos) — KDC port; required for domain authentication\n" +
                 "  Fix: Verify firewall allows TCP/UDP 88 to the DC\n\n" +
+                "• Port 445 (SMB) — required for SYSVOL and NETLOGON share access; Group Policy downloads GPOs over SMB\n" +
+                "  Fix: Check firewall rules for TCP 445. Verify the Server service is running on the DC\n\n" +
+                "• Port 135 (RPC) — RPC endpoint mapper; used for domain join, replication, and some management tools\n" +
+                "  Fix: Check firewall rules for TCP 135 and the dynamic RPC port range (49152-65535)\n\n" +
+                "• Port 464 (Kpasswd) — Kerberos password change protocol; used when changing domain passwords\n" +
+                "  Fix: Check firewall rules for TCP/UDP 464. Only required if password changes fail\n\n" +
                 "• Port 53 (DNS) — the DC is typically also a DNS server for AD-integrated zones\n" +
                 "  Fix: Confirm the client's configured DNS servers point to AD-integrated DNS\n\n" +
                 "• Port 3268 (Global Catalog) — used for forest-wide searches in multi-domain environments\n" +
@@ -535,16 +561,26 @@ class MainForm : Form
                 "• _gc._tcp SRV — locates Global Catalog servers (multi-domain forests only)\n" +
                 "  Fix: Only required in multi-domain forests; verify the DC is configured as a Global Catalog in AD Sites and Services\n\n" +
                 "• DC A Record — the located DC's hostname must resolve to an IP address\n" +
-                "  Fix: Check that the DC's computer account registered its A record, or add it manually if using non-dynamic DNS"),
+                "  Fix: Check that the DC's computer account registered its A record, or add it manually if using non-dynamic DNS\n\n" +
+                "• DNS Suffix Search List — verifies the target domain appears in the machine's DNS suffix search order\n" +
+                "  Fix: If the domain is missing from the suffix list, short-name DNS lookups will fail. Set via Group Policy (Computer Configuration > Administrative Templates > Network > DNS Client > DNS Suffix Search List) or manually in network adapter IPv4/IPv6 properties > Advanced > DNS tab"),
+
+            ("SYSVOL & NETLOGON",
+                "These domain shares are critical infrastructure for Group Policy and logon scripts.\n\n" +
+                "• SYSVOL Access — tests read access to \\\\domain\\SYSVOL, where Group Policy templates and scripts are stored\n" +
+                "  Fix: If inaccessible, check Port 445 (SMB) connectivity, DNS resolution of the domain name, DFS service on the DC (the SYSVOL share uses DFS-R or NTFRS), and NTFS/share permissions\n\n" +
+                "• NETLOGON Access — tests read access to \\\\domain\\NETLOGON, used for logon scripts and domain-wide script distribution\n" +
+                "  Fix: Same troubleshooting as SYSVOL — these shares are typically co-located on the same DC. If SYSVOL works but NETLOGON doesn't, check the share configuration on the DC with 'net share' or Server Manager"),
 
             ("Group Policy",
-                "Parses gpresult to check whether Group Policy is applying correctly to this computer.\n\n" +
+                "Parses gpresult to check whether Group Policy is applying correctly to this computer. For the full breakdown — every applied and filtered GPO for both Computer and User scope — switch to the Group Policy tab.\n\n" +
                 "• GP Last Refresh — how long since policy was last applied\n" +
-                "  Fix: If stale, run 'gpupdate /force' and check the Event Viewer (Applications and Services Logs > Microsoft > Windows > GroupPolicy) for errors\n\n" +
+                "  Fix: If stale, run 'gpupdate /force' (available directly from the Group Policy tab) and check the Event Viewer (Applications and Services Logs > Microsoft > Windows > GroupPolicy) for errors\n\n" +
                 "• Applied GPOs — count of policies successfully applied to this computer\n" +
                 "  Fix: If zero, verify the computer object is in an OU with linked GPOs, and that security filtering allows this computer\n\n" +
                 "• Denied GPOs — policies that exist but were filtered out (security filtering, WMI filters, disabled links)\n" +
-                "  Fix: This is often expected behavior — review each denied GPO's link status and security filtering if unexpected"),
+                "  Fix: This is often expected behavior — review each denied GPO's link status and security filtering if unexpected\n\n" +
+                "The Group Policy tab shows Computer and User scope side by side: last applied time (with age and staleness warning), site name, and every applied and denied GPO with its filtering reason. Use 'Run gpupdate' to force a refresh without leaving the app — check 'Force' to reapply all policies rather than just changed ones."),
 
             ("Trust Relationships",
                 "Uses nltest /domain_trusts to enumerate trust relationships visible to this domain.\n\n" +
@@ -562,6 +598,465 @@ class MainForm : Form
         };
 
         return s;
+    }
+
+    // ── Group Policy tab ────────────────────────────────────
+
+    void AppendGpLine(string text, Color color, bool bold = false, Color? backColor = null)
+    {
+        _gpBox.SelectionStart = _gpBox.TextLength;
+        _gpBox.SelectionLength = 0;
+        _gpBox.SelectionColor = color;
+        _gpBox.SelectionBackColor = backColor ?? _gpBox.BackColor;
+        _gpBox.SelectionFont = bold ? new Font(_gpBox.Font, FontStyle.Bold) : _gpBox.Font;
+        _gpBox.AppendText(text);
+    }
+
+    async void RefreshGpTab()
+    {
+        if (_gpRunning) return;
+        _gpRunning = true;
+        _gpBox.Clear();
+        AppendGpLine("Loading Group Policy details...\n", DimColor);
+
+        string raw;
+        try
+        {
+            raw = await Task.Run(() => RunProcess("gpresult", "/r", timeoutMs: 25000));
+        }
+        catch (Exception ex)
+        {
+            _gpBox.Clear();
+            AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
+            _gpRunning = false;
+            return;
+        }
+
+        _gpBox.Clear();
+        var scopes = ParseGpResult(raw);
+        if (scopes.Count == 0)
+        {
+            AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
+            AppendGpLine(raw, DimColor);
+            _gpRunning = false;
+            return;
+        }
+
+        AppendGpLine("\n", BgColor);
+        foreach (var scope in scopes)
+            RenderGpScope(scope);
+
+        _gpBox.SelectionStart = 0;
+        _gpBox.ScrollToCaret();
+        _gpRunning = false;
+    }
+
+    void RenderGpScope(GpScope scope)
+    {
+        AppendGpLine($"  ══════════════════════════════════════\n", BorderColor);
+        AppendGpLine($"   {scope.Name.ToUpperInvariant()} SCOPE\n", AccentColor, bold: true);
+        AppendGpLine($"  ══════════════════════════════════════\n\n", BorderColor);
+
+        if (!string.IsNullOrEmpty(scope.LastApplied))
+        {
+            AppendGpLine("  Last Applied: ", DimColor);
+            bool parsed = DateTime.TryParse(Regex.Replace(scope.LastApplied, @"\s+at\s+", " "), out var lastTime);
+            string ageText = parsed ? $"  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)" : "";
+            Color ageColor = parsed && (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
+            AppendGpLine(scope.LastApplied + ageText + "\n", ageColor, bold: true);
+        }
+
+        if (!string.IsNullOrEmpty(scope.Site))
+        {
+            AppendGpLine("  Site: ", DimColor);
+            AppendGpLine(scope.Site + "\n", TextColor);
+        }
+
+        AppendGpLine("\n", BorderColor);
+        AppendGpLine("  Applied GPOs", TextColor, bold: true);
+        AppendGpLine($"  ({scope.Applied.Count})\n", DimColor);
+        if (scope.Applied.Count == 0)
+        {
+            AppendGpLine("    None\n", DimColor);
+        }
+        foreach (var gpo in scope.Applied)
+        {
+            AppendGpLine("    ● ", PassColor);
+            AppendGpLine(gpo + "\n", TextColor);
+        }
+
+        AppendGpLine("\n", BorderColor);
+        AppendGpLine("  Denied / Filtered GPOs", TextColor, bold: true);
+        AppendGpLine($"  ({scope.Denied.Count})\n", DimColor);
+        if (scope.Denied.Count == 0)
+        {
+            AppendGpLine("    None\n", DimColor);
+        }
+        foreach (var (name, reason) in scope.Denied)
+        {
+            AppendGpLine("    ● ", WarnColor);
+            AppendGpLine(name, TextColor);
+            if (!string.IsNullOrEmpty(reason))
+                AppendGpLine($"  — {reason}", DimColor);
+            AppendGpLine("\n", TextColor);
+        }
+
+        AppendGpLine("\n\n", BorderColor);
+    }
+
+    static List<GpScope> ParseGpResult(string raw)
+    {
+        var scopes = new List<GpScope>();
+        var sectionPattern = new Regex(@"(COMPUTER SETTINGS|USER SETTINGS)\s*\r?\n-+\s*\r?\n([\s\S]*?)(?=\r?\nCOMPUTER SETTINGS|\r?\nUSER SETTINGS|\z)", RegexOptions.IgnoreCase);
+
+        foreach (Match sm in sectionPattern.Matches(raw))
+        {
+            string name = sm.Groups[1].Value.Equals("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase) ? "Computer" : "User";
+            string body = sm.Groups[2].Value;
+
+            var lastAppliedMatch = Regex.Match(body, @"Last time Group Policy was applied:\s*(.+)", RegexOptions.IgnoreCase);
+            var siteMatch = Regex.Match(body, @"^\s*Site Name:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            var applied = new List<string>();
+            var appliedSection = Regex.Match(body, @"Applied Group Policy Objects\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*\r?\n|\r?\n\s*The following GPOs|\z)", RegexOptions.IgnoreCase);
+            if (appliedSection.Success)
+            {
+                foreach (var line in appliedSection.Groups[1].Value.Split('\n'))
+                {
+                    string t = line.Trim();
+                    if (t.Length > 0) applied.Add(t);
+                }
+            }
+
+            var denied = new List<(string, string)>();
+            var deniedSection = Regex.Match(body, @"The following GPOs were not applied because they were filtered out\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*The \w+ is a part of the following security groups|\r?\n\s*\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
+            if (deniedSection.Success)
+            {
+                string? currentName = null;
+                foreach (var rawLine in deniedSection.Groups[1].Value.Split('\n'))
+                {
+                    string line = rawLine.TrimEnd('\r');
+                    string trimmed = line.Trim();
+                    if (trimmed.Length == 0) continue;
+
+                    // Indented "Filtering: <reason>" lines describe the GPO just above them
+                    if (trimmed.StartsWith("Filtering:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string reason = trimmed["Filtering:".Length..].Trim();
+                        if (currentName != null)
+                            denied.Add((currentName, reason));
+                        currentName = null;
+                    }
+                    else
+                    {
+                        if (currentName != null) denied.Add((currentName, ""));
+                        currentName = trimmed;
+                    }
+                }
+                if (currentName != null) denied.Add((currentName, ""));
+            }
+
+            scopes.Add(new GpScope(name,
+                lastAppliedMatch.Success ? lastAppliedMatch.Groups[1].Value.Trim() : "",
+                siteMatch.Success ? siteMatch.Groups[1].Value.Trim() : "",
+                applied, denied));
+        }
+
+        return scopes;
+    }
+
+    async void BtnGpUpdate_Click(object? sender, EventArgs e)
+    {
+        bool force = _chkGpForce.Checked;
+        string message = force
+            ? "This will run 'gpupdate /force', which re-applies ALL group policies (not just changed ones). This can briefly disrupt mapped drives, printers, and other policy-managed settings, and may require a restart for some extensions.\n\nContinue?"
+            : "This will run 'gpupdate', which applies any changed group policies.\n\nContinue?";
+        var confirm = MessageBox.Show(message, "Run gpupdate",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        _btnGpUpdate.Enabled = false;
+        _gpBox.Clear();
+        AppendGpLine(force ? "Running gpupdate /force...\n" : "Running gpupdate...\n", AccentColor, bold: true);
+
+        try
+        {
+            string output = await Task.Run(() => RunProcess("gpupdate", force ? "/force" : "", timeoutMs: 90000));
+            AppendGpLine("\n" + output.Trim() + "\n\n", DimColor);
+            AppendGpLine("Refreshing details...\n", DimColor);
+        }
+        catch (Exception ex)
+        {
+            AppendGpLine($"\ngpupdate failed: {ex.Message}\n\n", FailColor);
+        }
+        finally
+        {
+            _btnGpUpdate.Enabled = true;
+        }
+
+        RefreshGpTab();
+    }
+
+    // ── Kerberos Tickets tab ──────────────────────────────────
+
+    void AppendTicketsLine(string text, Color color, bool bold = false, Color? backColor = null)
+    {
+        _ticketsBox.SelectionStart = _ticketsBox.TextLength;
+        _ticketsBox.SelectionLength = 0;
+        _ticketsBox.SelectionColor = color;
+        _ticketsBox.SelectionBackColor = backColor ?? _ticketsBox.BackColor;
+        _ticketsBox.SelectionFont = bold ? new Font(_ticketsBox.Font, FontStyle.Bold) : _ticketsBox.Font;
+        _ticketsBox.AppendText(text);
+    }
+
+    void RefreshTickets()
+    {
+        _ticketsBox.Clear();
+        string raw;
+        try { raw = RunProcess("klist", "", timeoutMs: 5000); }
+        catch (Exception ex) { AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor); return; }
+
+        if (string.IsNullOrWhiteSpace(raw) || raw.Contains("no credentials", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
+            return;
+        }
+
+        var lines = raw.Split('\n');
+        var headers = new List<string>();
+        var tickets = new List<(string Server, Dictionary<string, string> Fields)>();
+        string? currentServer = null;
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string rawLine in lines)
+        {
+            string line = rawLine.TrimEnd('\r');
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            if (line.StartsWith("Current LogonId", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("Cached Tickets", StringComparison.OrdinalIgnoreCase))
+            {
+                headers.Add(line);
+                continue;
+            }
+
+            if (line.TrimStart().StartsWith("#"))
+            {
+                if (currentServer != null)
+                    tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
+                currentServer = null;
+                fields.Clear();
+                continue;
+            }
+
+            var kv = line.Split(':', 2);
+            if (kv.Length == 2)
+            {
+                string key = kv[0].Trim();
+                string val = kv[1].Trim();
+                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
+                    currentServer = val;
+                else
+                    fields[key] = val;
+            }
+        }
+        if (currentServer != null)
+            tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
+
+        foreach (var h in headers)
+        {
+            if (h.StartsWith("Current LogonId", StringComparison.OrdinalIgnoreCase))
+                AppendTicketsLine(h + "\n\n", DimColor);
+            else
+                AppendTicketsLine(h + "\n", AccentColor, bold: true);
+        }
+
+        for (int i = 0; i < tickets.Count; i++)
+            RenderTicket(tickets[i].Server, tickets[i].Fields, i);
+
+        if (tickets.Count == 0)
+            AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
+    }
+
+    void RenderTicket(string server, Dictionary<string, string> fields, int index)
+    {
+        string svc = server.Split('/')[0].ToUpperInvariant();
+        string cacheFlag = fields.TryGetValue("Cache Flags", out var cf) ? cf : "";
+        bool isDelegation = cacheFlag.Contains("DELEGATION", StringComparison.OrdinalIgnoreCase);
+        bool isPrimary = cacheFlag.Contains("PRIMARY", StringComparison.OrdinalIgnoreCase);
+
+        string tgtDesc = isDelegation ? "Delegation TGT — forwarded for Kerberos delegation"
+            : isPrimary ? "Primary TGT — your main logon credential from the KDC"
+            : "Ticket Granting Ticket — master key from KDC";
+
+        var (label, desc) = svc switch
+        {
+            "KRBTGT" => ("TGT", tgtDesc),
+            "CIFS" => ("CIFS", "SMB file share service ticket"),
+            "HTTP" => ("HTTP", "Web service ticket (ADFS, Exchange, etc.)"),
+            "LDAP" => ("LDAP", "Directory service ticket"),
+            "HOST" => ("HOST", "Host service ticket (remote admin, WinRM)"),
+            "RPCSS" => ("RPCSS", "RPC service ticket"),
+            "DNS" => ("DNS", "DNS service ticket"),
+            "TERMSRV" => ("RDP", "Remote Desktop service ticket"),
+            "MSSQLSVC" => ("SQL", "SQL Server service ticket"),
+            "EXCHANGEMDB" => ("EXCH", "Exchange mailbox service ticket"),
+            _ => ("SVC", $"{svc} service ticket"),
+        };
+
+        Color badgeBg = svc == "KRBTGT" ? AccentColor : PassColor;
+
+        AppendTicketsLine($"\n ┌─ ", BorderColor);
+        AppendTicketsLine($" {label} ", Color.Black, bold: true, backColor: badgeBg);
+        AppendTicketsLine($"  {desc}\n", DimColor);
+        AppendTicketsLine($" │\n", BorderColor);
+
+        AppendTicketsLine($" │  ", BorderColor);
+        AppendTicketsLine("Server: ", DimColor);
+        AppendTicketsLine(server + "\n", TextColor, bold: true);
+
+        if (fields.TryGetValue("Client", out var client))
+        {
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine("Client: ", DimColor);
+            AppendTicketsLine(client + "\n", TextColor, bold: true);
+        }
+
+        if (fields.TryGetValue("KerbTicket Encryption Type", out var enc))
+        {
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine("Encryption: ", DimColor);
+            Color encColor = enc.Contains("AES", StringComparison.OrdinalIgnoreCase) ? PassColor
+                : enc.Contains("RC4", StringComparison.OrdinalIgnoreCase) ? WarnColor : TextColor;
+            AppendTicketsLine(enc + "\n", encColor);
+        }
+
+        if (fields.TryGetValue("Ticket Flags", out var flags))
+        {
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine("Flags: ", DimColor);
+            AppendTicketsLine(flags + "\n", DimColor);
+        }
+
+        if (!string.IsNullOrEmpty(cacheFlag))
+        {
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine("Cache: ", DimColor);
+            AppendTicketsLine(cacheFlag + "\n", isDelegation ? WarnColor : isPrimary ? PassColor : TextColor);
+        }
+
+        if (fields.TryGetValue("Kdc Called", out var kdc))
+        {
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine("KDC: ", DimColor);
+            AppendTicketsLine(kdc + "\n", TextColor);
+        }
+
+        foreach (var timeKey in new[] { "Start Time", "End Time", "Renew Time" })
+        {
+            if (!fields.TryGetValue(timeKey, out var timeVal)) continue;
+            AppendTicketsLine($" │  ", BorderColor);
+            AppendTicketsLine($"{timeKey}: ", DimColor);
+
+            bool expired = false;
+            if (timeKey == "End Time")
+            {
+                string cleaned = Regex.Replace(timeVal, @"\s*\(.*?\)\s*$", "");
+                expired = DateTime.TryParse(cleaned, out var endTime) && endTime < DateTime.Now;
+            }
+            AppendTicketsLine(timeVal + (expired ? "  EXPIRED" : "") + "\n", expired ? FailColor : TextColor);
+        }
+
+        AppendTicketsLine($" └──\n", BorderColor);
+    }
+
+    void ShowTicketsExplainer()
+    {
+        _showingExplainer = true;
+        _ticketsBox.Clear();
+
+        AppendTicketsLine("KERBEROS TICKETS EXPLAINED\n\n", AccentColor, bold: true);
+
+        AppendTicketsLine("What are Kerberos tickets?\n", TextColor, bold: true);
+        AppendTicketsLine("When you log in to a Windows domain, the Key Distribution Center (KDC)\n", DimColor);
+        AppendTicketsLine("issues you a Ticket Granting Ticket (TGT). This TGT is your master\n", DimColor);
+        AppendTicketsLine("credential — it proves your identity without sending your password again.\n\n", DimColor);
+
+        AppendTicketsLine("Each time you access a network resource (file share, web app, database),\n", DimColor);
+        AppendTicketsLine("your TGT is used to request a service ticket for that specific resource.\n", DimColor);
+        AppendTicketsLine("These service tickets are cached so you don't re-authenticate every time.\n\n", DimColor);
+
+        AppendTicketsLine("TICKET TYPES\n\n", AccentColor, bold: true);
+
+        AppendTicketsLine(" TGT  ", Color.Black, bold: true, backColor: AccentColor);
+        AppendTicketsLine("  Ticket Granting Ticket\n", TextColor, bold: true);
+        AppendTicketsLine("       Your master Kerberos credential from the domain controller.\n", DimColor);
+        AppendTicketsLine("       Server field shows: krbtgt/REALM @ REALM\n", DimColor);
+        AppendTicketsLine("       If this is missing or expired, nothing else works.\n\n", DimColor);
+        AppendTicketsLine("       You may see two TGTs — check the Cache Flags to tell them apart:\n", DimColor);
+        AppendTicketsLine("       • PRIMARY", PassColor, bold: true);
+        AppendTicketsLine(" — your main logon TGT, issued during interactive login\n", DimColor);
+        AppendTicketsLine("       • DELEGATION", WarnColor, bold: true);
+        AppendTicketsLine(" — a forwarded TGT for Kerberos delegation. Issued when a\n", DimColor);
+        AppendTicketsLine("         service is trusted for delegation and needs to act on your behalf.\n\n", DimColor);
+
+        AppendTicketsLine(" CIFS ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine("  SMB/File Share\n", TextColor, bold: true);
+        AppendTicketsLine("       Grants access to Windows file shares (\\\\server\\share).\n\n", DimColor);
+
+        AppendTicketsLine(" LDAP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine("  Directory Service\n", TextColor, bold: true);
+        AppendTicketsLine("       Used for Active Directory lookups and queries.\n\n", DimColor);
+
+        AppendTicketsLine(" HOST ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine("  Host/Remote Admin\n", TextColor, bold: true);
+        AppendTicketsLine("       Used for WinRM, remote management, and scheduled tasks.\n\n", DimColor);
+
+        AppendTicketsLine(" HTTP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine("  Web Service\n", TextColor, bold: true);
+        AppendTicketsLine("       Used for Kerberos-authenticated web apps, ADFS, Exchange OWA.\n\n", DimColor);
+
+        AppendTicketsLine(" RDP  ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine("  Remote Desktop\n", TextColor, bold: true);
+        AppendTicketsLine("       Authenticates Remote Desktop (TERMSRV) connections.\n\n", DimColor);
+
+        AppendTicketsLine("ENCRYPTION\n\n", AccentColor, bold: true);
+        AppendTicketsLine("  AES-256  ", PassColor);
+        AppendTicketsLine("— Strong. Expected on modern domains.\n", DimColor);
+        AppendTicketsLine("  RC4      ", WarnColor);
+        AppendTicketsLine("— Weak. May indicate legacy systems or misconfigured SPNs.\n\n", DimColor);
+
+        AppendTicketsLine("WHAT DOES PURGE DO?\n\n", AccentColor, bold: true);
+        AppendTicketsLine("Purging destroys all cached Kerberos tickets. Your TGT is re-acquired\n", DimColor);
+        AppendTicketsLine("on next authentication, and service tickets are re-requested on next\n", DimColor);
+        AppendTicketsLine("access. Useful when troubleshooting stale credentials or delegation issues.\n\n", DimColor);
+
+        AppendTicketsLine("Click ", DimColor);
+        AppendTicketsLine("What is this?", AccentColor, bold: true);
+        AppendTicketsLine(" again to return to the ticket list.\n", DimColor);
+    }
+
+    void BtnPurgeTickets_Click(object? sender, EventArgs e)
+    {
+        var confirm = MessageBox.Show(
+            "This will destroy all cached Kerberos tickets.\n\n"
+            + "Your TGT will be re-acquired on next authentication, but you may need to "
+            + "re-authenticate to access network resources (file shares, web apps, etc.).\n\n"
+            + "Continue?",
+            "Purge Kerberos Tickets", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        try
+        {
+            RunProcess("klist", "purge", timeoutMs: 5000);
+            _lblStatus.Text = "Tickets purged — run diagnostics twice (first run reacquires tickets, second shows true results)";
+            _lblStatus.ForeColor = WarnColor;
+            RefreshTickets();
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Purge failed: {ex.Message}";
+        }
     }
 
     // ── Owner-drawn results ─────────────────────────────────
@@ -720,6 +1215,7 @@ class MainForm : Form
         var identityTask = Task.Run(() => TestDomainMembership(config));
         var dcTask = Task.Run(() => TestDcConnectivity(config));
         var dnsTask = Task.Run(() => TestDnsForAd(config));
+        var sysvolTask = Task.Run(() => TestSysvolNetlogon(config));
         var gpTask = Task.Run(() => TestGroupPolicy(config));
         var trustTask = Task.Run(() => TestTrusts(config));
         var kerbTask = Task.Run(() => TestKerberosAndTime(config));
@@ -729,6 +1225,7 @@ class MainForm : Form
             (identityTask, "Domain Membership & Identity", () => identityTask.Result),
             (dcTask, "DC Discovery & Connectivity", () => dcTask.Result),
             (dnsTask, "DNS for Active Directory", () => dnsTask.Result),
+            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.Result),
             (gpTask, "Group Policy", () => gpTask.Result),
             (trustTask, "Trust Relationships", () => trustTask.Result),
             (kerbTask, "Kerberos & Time Sync", () => kerbTask.Result),
@@ -750,7 +1247,6 @@ class MainForm : Form
         ShowResults(results);
         RebuildHistoryBar();
 
-        SaveSettings();
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
         _btnExport.Enabled = true;
@@ -908,14 +1404,20 @@ class MainForm : Form
             new("Domain Membership & Identity", [
                 new("Domain Joined"), new("Logged-on User"),
                 new("Secure Channel"), new("Site Assignment"),
+                new("Computer Password Age"),
             ]),
             new("DC Discovery & Connectivity", [
                 new("Locate DC"), new("Port 389 (LDAP)"), new("Port 636 (LDAPS)"),
-                new("Port 88 (Kerberos)"), new("Port 53 (DNS)"), new("Port 3268 (Global Catalog)"),
+                new("Port 88 (Kerberos)"), new("Port 445 (SMB)"), new("Port 135 (RPC)"),
+                new("Port 464 (Kpasswd)"), new("Port 53 (DNS)"), new("Port 3268 (Global Catalog)"),
             ]),
             new("DNS for Active Directory", [
                 new("_ldap._tcp SRV"), new("_kerberos._tcp SRV"),
                 new("_gc._tcp SRV"), new("DC A Record"),
+                new("DNS Suffix Search List"),
+            ]),
+            new("SYSVOL & NETLOGON", [
+                new("SYSVOL Access"), new("NETLOGON Access"),
             ]),
             new("Group Policy", [
                 new("GP Last Refresh"), new("Applied GPOs"), new("Denied GPOs"),
@@ -966,10 +1468,15 @@ class MainForm : Form
             string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000);
             bool ok = scVerify.Contains("ERROR_SUCCESS", StringComparison.OrdinalIgnoreCase)
                    || scVerify.Contains("The command completed successfully", StringComparison.OrdinalIgnoreCase);
+            bool accessDenied = scVerify.Contains("ACCESS_DENIED", StringComparison.OrdinalIgnoreCase)
+                             || scVerify.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
             var trustMatch = Regex.Match(scVerify, @"Trust Verification Status\s*=\s*(.+)", RegexOptions.IgnoreCase);
-            tests.Add(new("Secure Channel",
-                ok ? Status.Pass : Status.Fail,
-                trustMatch.Success ? trustMatch.Groups[1].Value.Trim() : (ok ? "Verified" : scVerify.Trim())));
+            if (accessDenied)
+                tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
+            else
+                tests.Add(new("Secure Channel",
+                    ok ? Status.Pass : Status.Fail,
+                    trustMatch.Success ? trustMatch.Groups[1].Value.Trim() : (ok ? "Verified" : scVerify.Trim())));
         }
         catch (Exception ex)
         {
@@ -987,6 +1494,31 @@ class MainForm : Form
         catch (Exception ex)
         {
             tests.Add(new("Site Assignment", Status.Warn, $"nltest not available: {ex.Message}"));
+        }
+
+        try
+        {
+            string ps = RunProcess("powershell", "-NoProfile -Command \"$s=[adsisearcher]\\\"(&(objectCategory=computer)(name=$env:COMPUTERNAME))\\\";$s.PropertiesToLoad.Add('pwdLastSet')|Out-Null;$r=$s.FindOne();if($r){[datetime]::FromFileTime($r.Properties['pwdlastset'][0]).ToString('o')}else{'NOTFOUND'}\"", timeoutMs: 10000);
+            string dateStr = ps.Trim();
+            if (dateStr == "NOTFOUND")
+            {
+                tests.Add(new("Computer Password Age", Status.Skip, "Computer object not found in AD"));
+            }
+            else if (DateTime.TryParse(dateStr, out var lastChanged))
+            {
+                var age = DateTime.Now - lastChanged;
+                tests.Add(new("Computer Password Age",
+                    age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
+                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "")));
+            }
+            else
+            {
+                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
+            }
+        }
+        catch (Exception ex)
+        {
+            tests.Add(new("Computer Password Age", Status.Warn, $"AD query failed: {ex.Message}"));
         }
 
         return new("Domain Membership & Identity", tests);
@@ -1026,6 +1558,9 @@ class MainForm : Form
             ("Port 389 (LDAP)", 389, Task.Run(() => TryTcpConnect(kdcIp, kdc, 389))),
             ("Port 636 (LDAPS)", 636, Task.Run(() => TryTcpConnect(kdcIp, kdc, 636))),
             ("Port 88 (Kerberos)", 88, Task.Run(() => TryTcpConnect(kdcIp, kdc, 88))),
+            ("Port 445 (SMB)", 445, Task.Run(() => TryTcpConnect(kdcIp, kdc, 445))),
+            ("Port 135 (RPC)", 135, Task.Run(() => TryTcpConnect(kdcIp, kdc, 135))),
+            ("Port 464 (Kpasswd)", 464, Task.Run(() => TryTcpConnect(kdcIp, kdc, 464))),
             ("Port 53 (DNS)", 53, Task.Run(() => TryTcpConnect(kdcIp, kdc, 53))),
             ("Port 3268 (Global Catalog)", 3268, Task.Run(() => TryTcpConnect(kdcIp, kdc, 3268))),
         };
@@ -1035,7 +1570,7 @@ class MainForm : Form
         foreach (var (name, port, task) in portTasks)
         {
             bool open = task.Result;
-            bool required = port is 389 or 88;
+            bool required = port is 389 or 88 or 445;
             if (kdcIp == null)
                 tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
             else
@@ -1069,6 +1604,34 @@ class MainForm : Form
             tests.Add(new("DC A Record", Status.Fail, $"Resolution failed: {ex.Message}"));
         }
 
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters");
+            var searchList = key?.GetValue("SearchList") as string ?? "";
+            var domain = key?.GetValue("Domain") as string ?? "";
+            var suffixes = new List<string>();
+            if (!string.IsNullOrWhiteSpace(searchList))
+                suffixes.AddRange(searchList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0));
+            else if (!string.IsNullOrWhiteSpace(domain))
+                suffixes.Add(domain);
+
+            if (suffixes.Count > 0)
+            {
+                bool hasDomain = suffixes.Any(s => s.Contains(cfg.Domain, StringComparison.OrdinalIgnoreCase));
+                tests.Add(new("DNS Suffix Search List",
+                    hasDomain ? Status.Pass : Status.Warn,
+                    string.Join(", ", suffixes) + (hasDomain ? "" : $" — target domain {cfg.Domain} not in suffix list")));
+            }
+            else
+            {
+                tests.Add(new("DNS Suffix Search List", Status.Warn, "No DNS suffix configured"));
+            }
+        }
+        catch (Exception ex)
+        {
+            tests.Add(new("DNS Suffix Search List", Status.Warn, $"Registry read failed: {ex.Message}"));
+        }
+
         return new("DNS for Active Directory", tests);
     }
 
@@ -1094,42 +1657,91 @@ class MainForm : Form
         }
     }
 
+    static TestGroup TestSysvolNetlogon(DiagConfig cfg)
+    {
+        var tests = new List<TestEntry>();
+
+        void TestShare(string shareName, string testName)
+        {
+            string path = $@"\\{cfg.Domain}\{shareName}";
+            try
+            {
+                bool exists = Directory.Exists(path);
+                if (exists)
+                {
+                    var entries = Directory.GetFileSystemEntries(path);
+                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries.Length} entries)"));
+                }
+                else
+                {
+                    tests.Add(new(testName, Status.Fail, $"{path} not accessible"));
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                tests.Add(new(testName, Status.Warn, $"{path} exists but access denied — check permissions"));
+            }
+            catch (Exception ex)
+            {
+                tests.Add(new(testName, Status.Fail, $"{path} — {ex.Message}"));
+            }
+        }
+
+        TestShare("SYSVOL", "SYSVOL Access");
+        TestShare("NETLOGON", "NETLOGON Access");
+
+        return new("SYSVOL & NETLOGON", tests);
+    }
+
     static TestGroup TestGroupPolicy(DiagConfig cfg)
     {
         var tests = new List<TestEntry>();
 
         try
         {
-            string gpresult = RunProcess("gpresult", "/r /scope:computer", timeoutMs: 20000);
+            string gpresult = RunProcess("gpresult", "/r", timeoutMs: 20000);
+            bool hasComputer = gpresult.Contains("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase);
+            bool hasUser = gpresult.Contains("USER SETTINGS", StringComparison.OrdinalIgnoreCase);
 
-            var lastApplied = Regex.Match(gpresult, @"Last time Group Policy was applied\s*:\s*(.+)", RegexOptions.IgnoreCase);
-            if (lastApplied.Success && DateTime.TryParse(lastApplied.Groups[1].Value.Trim(), out var lastTime))
+            if (!hasComputer && !hasUser)
+            {
+                tests.Add(new("GP Last Refresh", Status.Warn, "gpresult returned no data — run as Administrator for full results"));
+                tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
+                tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
+                return new("Group Policy", tests);
+            }
+
+            var scopes = ParseGpResult(gpresult);
+            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
+            var user = scopes.FirstOrDefault(s => s.Name == "User");
+            var primary = computer ?? user;
+            string scopeLabel = computer != null ? "Computer" : "User";
+            string elevationNote = !hasComputer ? " (run as Administrator for Computer scope)" : "";
+
+            if (primary != null && !string.IsNullOrEmpty(primary.LastApplied)
+                && DateTime.TryParse(Regex.Replace(primary.LastApplied, @"\s+at\s+", " "), out var lastTime))
             {
                 var age = DateTime.Now - lastTime;
                 tests.Add(new("GP Last Refresh",
                     age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
-                    $"{lastTime:g} ({FormatTimeSpan(age)} ago)"));
+                    $"{scopeLabel}: {lastTime:g} ({FormatTimeSpan(age)} ago){elevationNote}"));
             }
             else
             {
-                tests.Add(new("GP Last Refresh", Status.Warn, "Could not determine last refresh time"));
+                tests.Add(new("GP Last Refresh", Status.Warn,
+                    $"Could not determine last refresh time{elevationNote}"));
             }
 
-            var appliedSection = Regex.Match(gpresult, @"Applied Group Policy Objects\s*\r?\n[\s\S]*?(?=\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
-            int appliedCount = 0;
-            if (appliedSection.Success)
-                appliedCount = appliedSection.Value.Split('\n').Count(l => l.Trim().Length > 0 && !l.Contains("Applied Group Policy Objects", StringComparison.OrdinalIgnoreCase) && !l.Contains("----", StringComparison.OrdinalIgnoreCase));
+            int appliedCount = primary?.Applied.Count(a => !a.Equals("N/A", StringComparison.OrdinalIgnoreCase)) ?? 0;
             tests.Add(new("Applied GPOs",
                 appliedCount > 0 ? Status.Pass : Status.Warn,
-                appliedCount > 0 ? $"{appliedCount} GPO(s) applied" : "No applied GPOs found"));
+                appliedCount > 0
+                    ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
+                    : $"{scopeLabel}: No applied GPOs found{elevationNote}"));
 
-            var deniedSection = Regex.Match(gpresult, @"The following GPOs were not applied because they were filtered out\s*\r?\n[\s\S]*?(?=\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
-            int deniedCount = 0;
-            if (deniedSection.Success)
-                deniedCount = deniedSection.Value.Split('\n')
-                    .Select(l => l.Trim())
-                    .Count(l => l.Length > 0 && !l.Contains("filtered out", StringComparison.OrdinalIgnoreCase));
-            tests.Add(new("Denied GPOs", Status.Pass, $"{deniedCount} GPO(s) filtered out (informational)"));
+            int deniedCount = primary?.Denied.Count ?? 0;
+            tests.Add(new("Denied GPOs", Status.Pass,
+                $"{scopeLabel}: {deniedCount} GPO(s) filtered out (informational){elevationNote}"));
         }
         catch (Exception ex)
         {
@@ -1229,15 +1841,21 @@ class MainForm : Form
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
         };
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        var outputTask = proc.StandardOutput.ReadToEndAsync();
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
         if (!proc.WaitForExit(timeoutMs))
         {
             try { proc.Kill(true); } catch { }
         }
-        return outputTask.GetAwaiter().GetResult();
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
+            return stderr;
+        return stdout;
     }
 
     static bool TryTcpConnect(IPAddress? ip, string host, int port, int timeoutMs = 3000)
@@ -1266,3 +1884,4 @@ enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
 record DiagRun(DateTime Timestamp, string Domain, List<TestGroup> Results);
+record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
