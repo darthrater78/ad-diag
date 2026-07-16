@@ -77,7 +77,6 @@ class MainForm : Form
     bool _showingExplainer;
     List<TestGroup>? _lastResults;
     List<TestGroup>? _renderedGroups;
-    bool _renderRunning;
     string? _placeholderText;
     readonly List<DiagRun> _runHistory = [];
     int _selectedRunIndex = -1;
@@ -403,6 +402,7 @@ class MainForm : Form
 
     void BtnClear_Click(object? sender, EventArgs e)
     {
+        _runCts?.Cancel();
         _runHistory.Clear();
         _selectedRunIndex = -1;
         _lastResults = null;
@@ -616,39 +616,43 @@ class MainForm : Form
     {
         if (_gpRunning) return;
         _gpRunning = true;
-        _gpBox.Clear();
-        AppendGpLine("Loading Group Policy details...\n", DimColor);
-
-        string raw;
         try
         {
-            raw = await Task.Run(() => RunProcess("gpresult", "/r", timeoutMs: 25000));
-        }
-        catch (Exception ex)
-        {
             _gpBox.Clear();
-            AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
-            _gpRunning = false;
-            return;
-        }
+            AppendGpLine("Loading Group Policy details...\n", DimColor);
 
-        _gpBox.Clear();
-        var scopes = ParseGpResult(raw);
-        if (scopes.Count == 0)
+            string raw;
+            try
+            {
+                raw = await Task.Run(() => RunProcess("gpresult", "/r", timeoutMs: 25000));
+            }
+            catch (Exception ex)
+            {
+                _gpBox.Clear();
+                AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
+                return;
+            }
+
+            _gpBox.Clear();
+            var scopes = ParseGpResult(raw);
+            if (scopes.Count == 0)
+            {
+                AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
+                AppendGpLine(raw, DimColor);
+                return;
+            }
+
+            AppendGpLine("\n", BgColor);
+            foreach (var scope in scopes)
+                RenderGpScope(scope);
+
+            _gpBox.SelectionStart = 0;
+            _gpBox.ScrollToCaret();
+        }
+        finally
         {
-            AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
-            AppendGpLine(raw, DimColor);
             _gpRunning = false;
-            return;
         }
-
-        AppendGpLine("\n", BgColor);
-        foreach (var scope in scopes)
-            RenderGpScope(scope);
-
-        _gpBox.SelectionStart = 0;
-        _gpBox.ScrollToCaret();
-        _gpRunning = false;
     }
 
     void RenderGpScope(GpScope scope)
@@ -724,7 +728,7 @@ class MainForm : Form
                 foreach (var line in appliedSection.Groups[1].Value.Split('\n'))
                 {
                     string t = line.Trim();
-                    if (t.Length > 0) applied.Add(t);
+                    if (t.Length > 0 && !t.Equals("N/A", StringComparison.OrdinalIgnoreCase)) applied.Add(t);
                 }
             }
 
@@ -767,6 +771,8 @@ class MainForm : Form
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
+        if (_gpRunning) return;
+
         bool force = _chkGpForce.Checked;
         string message = force
             ? "This will run 'gpupdate /force', which re-applies ALL group policies (not just changed ones). This can briefly disrupt mapped drives, printers, and other policy-managed settings, and may require a restart for some extensions.\n\nContinue?"
@@ -775,6 +781,7 @@ class MainForm : Form
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
 
+        _gpRunning = true;
         _btnGpUpdate.Enabled = false;
         _gpBox.Clear();
         AppendGpLine(force ? "Running gpupdate /force...\n" : "Running gpupdate...\n", AccentColor, bold: true);
@@ -792,6 +799,7 @@ class MainForm : Form
         finally
         {
             _btnGpUpdate.Enabled = true;
+            _gpRunning = false;
         }
 
         RefreshGpTab();
@@ -828,6 +836,26 @@ class MainForm : Form
         string? currentServer = null;
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        void ParseField(string text)
+        {
+            var kv = text.Split(':', 2);
+            if (kv.Length == 2)
+            {
+                string key = kv[0].Trim();
+                string val = kv[1].Trim();
+                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
+                    currentServer = val;
+                else
+                    fields[key] = val;
+                return;
+            }
+
+            // "Ticket Flags 0x... -> ..." has no colon separator
+            var flagsMatch = Regex.Match(text, @"^\s*Ticket Flags\s+(.*)$", RegexOptions.IgnoreCase);
+            if (flagsMatch.Success)
+                fields["Ticket Flags"] = flagsMatch.Groups[1].Value.Trim();
+        }
+
         foreach (string rawLine in lines)
         {
             string line = rawLine.TrimEnd('\r');
@@ -840,25 +868,22 @@ class MainForm : Form
                 continue;
             }
 
-            if (line.TrimStart().StartsWith("#"))
+            string trimmedLine = line.TrimStart();
+            if (trimmedLine.StartsWith("#"))
             {
                 if (currentServer != null)
                     tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
                 currentServer = null;
                 fields.Clear();
+
+                // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
+                int markerEnd = trimmedLine.IndexOf('>');
+                if (markerEnd >= 0 && markerEnd + 1 < trimmedLine.Length)
+                    ParseField(trimmedLine[(markerEnd + 1)..].Trim());
                 continue;
             }
 
-            var kv = line.Split(':', 2);
-            if (kv.Length == 2)
-            {
-                string key = kv[0].Trim();
-                string val = kv[1].Trim();
-                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
-                    currentServer = val;
-                else
-                    fields[key] = val;
-            }
+            ParseField(line);
         }
         if (currentServer != null)
             tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
@@ -1074,7 +1099,8 @@ class MainForm : Form
             y += 28;
             foreach (var test in group.Tests)
             {
-                string detail = _renderRunning ? "running..." : test.Detail;
+                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
+                string detail = isPending ? "running..." : test.Detail;
                 var sz = TextRenderer.MeasureText(detail, TestDetailFont,
                     new Size(detailW, 0), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
                 y += Math.Max(20, sz.Height + 4) + 2;
@@ -1114,7 +1140,8 @@ class MainForm : Form
                 Color detailColor;
                 string detail;
                 SolidBrush dotBrush;
-                if (_renderRunning)
+                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
+                if (isPending)
                 {
                     dotBrush = AccentBrush;
                     detailColor = DimColor;
@@ -1145,10 +1172,9 @@ class MainForm : Form
         }
     }
 
-    void RenderResults(List<TestGroup> groups, bool running = false)
+    void RenderResults(List<TestGroup> groups)
     {
         _renderedGroups = groups;
-        _renderRunning = running;
         _placeholderText = null;
         int h = MeasureResultsHeight(_resultsCanvas.Width);
         _resultsCanvas.Height = h;
@@ -1192,9 +1218,10 @@ class MainForm : Form
         SwitchTab("results");
 
         var results = BuildSkeleton();
-        RenderResults(results, running: true);
+        RenderResults(results);
 
-        _runHistory.Insert(0, new DiagRun(DateTime.MinValue, domain, results));
+        var pendingRun = new DiagRun(DateTime.MinValue, domain, results);
+        _runHistory.Insert(0, pendingRun);
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
@@ -1237,13 +1264,24 @@ class MainForm : Form
             if (cts.IsCancellationRequested || IsDisposed) return;
             var match = pending.First(p => p.task == done);
             pending.Remove(match);
-            ReplaceGroup(match.name, match.getResult());
+            try
+            {
+                ReplaceGroup(match.name, match.getResult());
+            }
+            catch (Exception ex)
+            {
+                ReplaceGroup(match.name, new TestGroup(match.name, [new TestEntry("Error", Status.Fail, ex.Message)]));
+            }
         }
 
         _lastResults = results;
-        _runHistory[0] = new DiagRun(DateTime.Now, domain, results);
-        if (_runHistory.Count > 5) _runHistory.RemoveAt(5);
-        _selectedRunIndex = 0;
+        int pendingIndex = _runHistory.IndexOf(pendingRun);
+        if (pendingIndex >= 0)
+        {
+            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, results);
+            if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
+            _selectedRunIndex = pendingIndex;
+        }
         ShowResults(results);
         RebuildHistoryBar();
 
@@ -1732,7 +1770,7 @@ class MainForm : Form
                     $"Could not determine last refresh time{elevationNote}"));
             }
 
-            int appliedCount = primary?.Applied.Count(a => !a.Equals("N/A", StringComparison.OrdinalIgnoreCase)) ?? 0;
+            int appliedCount = primary?.Applied.Count ?? 0;
             tests.Add(new("Applied GPOs",
                 appliedCount > 0 ? Status.Pass : Status.Warn,
                 appliedCount > 0
@@ -1864,7 +1902,14 @@ class MainForm : Form
         {
             using var client = new TcpClient();
             var task = ip != null ? client.ConnectAsync(ip, port) : client.ConnectAsync(host, port);
-            return task.Wait(timeoutMs) && client.Connected;
+            if (!task.Wait(timeoutMs))
+            {
+                // Connect is still in flight past the timeout; observe its eventual fault so it
+                // never surfaces as an unobserved task exception once the client above is disposed.
+                _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                return false;
+            }
+            return client.Connected;
         }
         catch { return false; }
     }
