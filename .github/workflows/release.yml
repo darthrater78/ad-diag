@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish win-x64 self-contained build
+        run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish
+
+      - name: Zip build output
+        shell: pwsh
+        run: Compress-Archive -Path publish\* -DestinationPath ad-diag-${{ github.ref_name }}-win-x64.zip
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ad-diag-${{ github.ref_name }}-win-x64.zip
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
