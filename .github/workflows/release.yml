@@ -21,13 +21,13 @@ jobs:
       - name: Publish win-x64 self-contained build
         run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish
 
-      - name: Zip build output
+      - name: Rename build output for release
         shell: pwsh
-        run: Compress-Archive -Path publish\* -DestinationPath ad-diag-${{ github.ref_name }}-win-x64.zip
+        run: Copy-Item publish\ad-diag.exe ad-diag-${{ github.ref_name }}-win-x64.exe
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: ad-diag-${{ github.ref_name }}-win-x64.zip
+          files: ad-diag-${{ github.ref_name }}-win-x64.exe
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           generate_release_notes: true
