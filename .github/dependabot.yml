@@ -4,3 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # The app itself has no packages; the test project does
+  - package-ecosystem: nuget
+    directory: /tests/AdDiag.Tests
+    schedule:
+      interval: weekly

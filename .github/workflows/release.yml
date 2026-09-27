@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Never cancel a release mid-publish; a second tag push waits its turn
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
@@ -16,9 +21,25 @@ jobs:
       contents: write      # create the GitHub release
       id-token: write      # sign the build provenance attestation
       attestations: write  # store the attestation
+      actions: read        # look up the CI run for the tagged commit
     env:
       REF_NAME: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      # Only publish what was merged and passed CI. Prerelease tags (v1.2.3-rc1) may come from a branch, but still
+      # need a green CI run on that commit.
+      - name: Verify tagged commit is on main and passed CI
+        shell: pwsh
+        run: |
+          if ($env:REF_NAME -notmatch '-') {
+            $status = gh api "repos/$env:REPO/compare/main...$env:SHA" --jq .status
+            if ($status -notin 'identical', 'behind') { throw "Tagged commit $env:SHA is not on main (compare: $status)" }
+          }
+          $passed = gh run list --repo $env:REPO --commit $env:SHA --workflow ci.yml --status success --json databaseId --jq length
+          if ([int]$passed -lt 1) { throw "CI (ci.yml) has not passed for $env:SHA; wait for it, then re-run this job" }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -27,17 +48,38 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      # The build takes its version from the tag, so also require the tagged source to declare it: a tag pushed
+      # before the bump would otherwise ship an exe whose version no commit claims
       - name: Derive version from tag
         shell: pwsh
         run: |
-          if ($env:REF_NAME -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?)$') {
+          if ($env:REF_NAME -notmatch '^v((\d+\.\d+\.\d+)(-[0-9A-Za-z.]+)?)$') {
             throw "Tag '$env:REF_NAME' is not of the form vMAJOR.MINOR.PATCH[-prerelease]"
           }
-          "VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+          $version, $release = $Matches[1], $Matches[2]
+          $declared = ([xml](Get-Content AdDiag.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($declared -ne $release) { throw "Tag $env:REF_NAME does not match AdDiag.csproj <Version>$declared</Version>" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      # The release body is the tag's row in the README's Version History table, so the two can't drift; a
+      # release without a row fails here, before anything is built. Prereleases get GitHub's generated notes only.
+      - name: Extract release notes from README
+        id: notes
+        shell: pwsh
+        run: |
+          if ($env:REF_NAME -match '-') { exit 0 }
+          $row = Get-Content -Encoding utf8 README.md |
+            Where-Object { $_ -match "^\|\s*$([regex]::Escape($env:REF_NAME))\s*\|" } | Select-Object -First 1
+          if (-not $row) { throw "README.md Version History has no row for $env:REF_NAME" }
+          $notes = ($row.Trim().Trim('|').Split('|') | Select-Object -Skip 2) -join '|'
+          if (-not $notes.Trim()) { throw "README.md Version History row for $env:REF_NAME has no notes" }
+          $notes.Trim() | Out-File -Encoding utf8 release-notes.md
+          "path=release-notes.md" >> $env:GITHUB_OUTPUT
           "ASSET=ad-diag-$env:REF_NAME-win-x64.exe" >> $env:GITHUB_ENV
 
       - name: Publish win-x64 self-contained build
-        run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish -p:Version=${{ env.VERSION }}
+        shell: pwsh
+        run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish "-p:Version=$env:VERSION"
 
       - name: Rename build output and write checksum
         shell: pwsh
@@ -59,4 +101,14 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
           prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
+
+      # Confirm what users will download is byte-for-byte what was built, hashed and attested above
+      - name: Verify published asset
+        shell: pwsh
+        run: |
+          gh release download $env:REF_NAME --repo $env:REPO --pattern $env:ASSET --dir verify
+          if ((Get-FileHash "verify\$env:ASSET").Hash -ne (Get-FileHash $env:ASSET).Hash) {
+            throw "Published $env:ASSET differs from the build"
+          }
