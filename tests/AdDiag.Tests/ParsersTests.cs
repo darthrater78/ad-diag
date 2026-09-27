@@ -273,4 +273,74 @@ public class ParsersTests
     [Fact]
     public void TimeSource_ResolveFailure_IsNotDomain() =>
         Assert.False(Parsers.IsDomainTimeSource("10.0.0.10", "fabrikam.com", Resolve));
+
+    // ── TGT ────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(Samples.Klist, true)]
+    [InlineData(Samples.KlistGetSuccess, true)]
+    [InlineData(Samples.KlistCrossRealm, true)]
+    [InlineData(Samples.KlistEmpty, false)]
+    [InlineData(Samples.KlistGetFailed, false)]
+    public void HasTgt(string output, bool expected) =>
+        Assert.Equal(expected, Parsers.HasTgt(output, "CONTOSO.COM"));
+
+    [Fact]
+    public void HasTgt_OtherRealmOnly_IsFalse() =>
+        Assert.False(Parsers.HasTgt(Samples.Klist, "FABRIKAM.COM"));
+
+    [Fact]
+    public void KlistError_ExtractsNtStatusNotLogonId()
+    {
+        Assert.Equal("0xc000018b", Parsers.KlistError(Samples.KlistGetFailed));
+        Assert.Null(Parsers.KlistError(Samples.KlistGetSuccess)); // "LogonId is 0:0x3e7a1" isn't an error
+    }
+
+    // ── Password age query ─────────────────────────────────
+
+    [Fact]
+    public void PasswordAge_Ok()
+    {
+        var r = Parsers.ParsePasswordAgeQuery("OK|contoso.com|2026-07-01T12:30:00.0000000Z\r\n");
+        Assert.Null(r.Error);
+        Assert.Equal("contoso.com", r.Domain);
+        Assert.Equal(new DateTime(2026, 7, 1, 12, 30, 0, DateTimeKind.Utc), r.LastSetUtc);
+        Assert.Equal(DateTimeKind.Utc, r.LastSetUtc!.Value.Kind);
+    }
+
+    [Fact]
+    public void PasswordAge_Zero_Is1601()
+    {
+        var r = Parsers.ParsePasswordAgeQuery("OK|contoso.com|1601-01-01T00:00:00.0000000Z");
+        Assert.Equal(1601, r.LastSetUtc!.Value.Year);
+    }
+
+    [Fact]
+    public void PasswordAge_NotFound()
+    {
+        var r = Parsers.ParsePasswordAgeQuery("NOTFOUND|contoso.com");
+        Assert.Null(r.Error);
+        Assert.Equal("contoso.com", r.Domain);
+        Assert.Null(r.LastSetUtc);
+    }
+
+    [Fact]
+    public void PasswordAge_ScriptError()
+    {
+        var r = Parsers.ParsePasswordAgeQuery("ERROR|The local computer is not joined to a domain or the domain cannot be contacted.");
+        Assert.Equal("The local computer is not joined to a domain or the domain cannot be contacted.", r.Error);
+        Assert.Null(r.Domain);
+    }
+
+    [Theory]
+    [InlineData("#< CLIXML")]
+    [InlineData("Exception calling \"GetComputerDomain\" with \"0\" argument(s): \"The local computer is not joined to a domain\"")]
+    [InlineData("")]
+    [InlineData("OK|contoso.com|garbage")]
+    public void PasswordAge_Error(string output)
+    {
+        var r = Parsers.ParsePasswordAgeQuery(output);
+        Assert.NotNull(r.Error);
+        Assert.Null(r.Domain);
+    }
 }

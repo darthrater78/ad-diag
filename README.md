@@ -64,7 +64,7 @@ Parses `dsregcmd /status`, `nltest`, `WindowsIdentity.GetCurrent()`, and AD via 
 - **Logged-on User** — current Windows identity (DOMAIN\user)
 - **Secure Channel** — verifies the computer account's trust relationship via `nltest /sc_verify`
 - **Site Assignment** — the AD site this client is assigned to, from `nltest /dsgetsite`
-- **Computer Password Age** — queries the computer object's `pwdLastSet` attribute from AD; warns if stale (>45 days may indicate broken auto-rotation)
+- **Computer Password Age** — queries the computer object's `pwdLastSet` attribute in the computer's own domain (which may differ from the target or logged-on user's domain); warns if stale (>45 days may indicate broken auto-rotation)
 
 ### 2. DC Discovery & Connectivity
 
@@ -85,7 +85,7 @@ Locates a domain controller and tests connectivity to required ports. Port check
 - **_ldap._tcp SRV** — required for DC locator
 - **_kerberos._tcp SRV** — required for KDC discovery
 - **_gc._tcp SRV** (optional) — Global Catalog discovery in multi-domain forests
-- **DC A Record** — resolves the target DC hostname to an IP address
+- **DC A Record** — resolves the target DC hostname to its IPv4 (A) and IPv6 (AAAA) addresses; port checks prefer IPv4 and fall back to IPv6
 - **DNS Suffix Search List** — verifies the target domain is in the machine's DNS suffix list; a missing suffix causes short-name resolution failures
 
 ### 4. SYSVOL & NETLOGON
@@ -109,7 +109,7 @@ Parses `gpresult /r`.
 
 ### 7. Kerberos & Time Sync
 
-- **TGT Present** — a cached `krbtgt/REALM` ticket proves KDC contact
+- **TGT Present** — checks for a cached `krbtgt/REALM` ticket; if none is cached (e.g. in an elevated session, which has its own empty cache), requests one with `klist get` — either way proving KDC contact
 - **Clock Skew** — measured via `w32tm` against the DC; Kerberos has a strict 5-minute tolerance
 - **Time Source** — confirms the client is syncing from the domain hierarchy, not local CMOS
 
@@ -171,10 +171,11 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 | `gpresult /r` | Group Policy status (diagnostics + tab) | 20s (25s in tab) |
 | `gpupdate` / `gpupdate /force` | Manual policy refresh (Group Policy tab) | 90s |
 | `klist` | Kerberos ticket cache (diagnostics + tab) | 5s |
+| `klist get krbtgt/REALM` | Request a TGT when none is cached | 10s |
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
 | `w32tm /stripchart` | Clock skew measurement | 5s |
 | `w32tm /query /source` | Time source | 5s |
-| `powershell` ([adsisearcher]) | Computer password age from AD | 10s |
+| `powershell` (DirectorySearcher) | Computer password age from AD | 15s |
 
 All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout.
 

@@ -267,4 +267,30 @@ static class Samples
             1: CONTOSO contoso.com (NT 5) (Gesamtstruktur-Stamm) (Primärdomäne) (Systemeigen)
         Der Befehl wurde erfolgreich ausgeführt.
         """;
+
+    public const string KlistGetSuccess = """
+
+        Current LogonId is 0:0x3e7a1
+        A ticket to krbtgt/CONTOSO.COM has been retrieved successfully.
+
+        Cached Tickets: (1)
+
+        #0>	Client: alice @ CONTOSO.COM
+        	Server: krbtgt/CONTOSO.COM @ CONTOSO.COM
+        	KerbTicket Encryption Type: AES-256-CTS-HMAC-SHA1-96
+        """;
+
+    public const string KlistGetFailed = """
+
+        Current LogonId is 0:0x3e7a1
+        Error calling API LsaCallAuthenticationPackage (GetTicket substatus): 0x6fb
+
+        klist failed with 0xc000018b/-1073741429: The SAM database on the Windows Server does not have a computer account for this workstation trust relationship.
+        """;
+
+    // Cross-realm: a user from another forest holding a referral TGT for the target realm
+    public const string KlistCrossRealm = """
+        #0>	Client: bob @ FABRIKAM.COM
+        	Server: krbtgt/CONTOSO.COM @ FABRIKAM.COM
+        """;
 }
