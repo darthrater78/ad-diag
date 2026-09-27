@@ -10,53 +10,70 @@ public class ParsersTests
 
     static string Eol(string s, bool crlf) => crlf ? Samples.Crlf(s) : s;
 
-    // ── gpresult ───────────────────────────────────────────
+    // ── Group Policy (RSoP) ────────────────────────────────
 
     [Theory, MemberData(nameof(LineEndings))]
-    public void GpResult_ParsesBothScopes(bool crlf)
+    public void Rsop_ParsesBothScopes(bool crlf)
     {
-        var scopes = Parsers.ParseGpResult(Eol(Samples.GpResult, crlf));
+        var scopes = Parsers.ParseRsop(Eol(Samples.Rsop, crlf));
 
         Assert.Equal(["Computer", "User"], scopes.Select(s => s.Name));
 
         var computer = scopes[0];
-        Assert.Equal("7/16/2026 at 9:58:41 AM", computer.LastApplied);
+        Assert.Equal(GpScopeState.Ok, computer.State);
+        Assert.Equal(new DateTime(2026, 7, 16, 9, 58, 41, DateTimeKind.Utc), computer.LastAppliedUtc);
+        Assert.Equal(DateTimeKind.Utc, computer.LastAppliedUtc!.Value.Kind);
         Assert.Equal("HQ", computer.Site);
+        // Highest appliedOrder first; Default Domain Policy is linked twice but listed once
         Assert.Equal(["Workstation Baseline", "Default Domain Policy"], computer.Applied);
-        Assert.Equal([("Local Group Policy", "Not Applied (Empty)"), ("Server Hardening", "Denied (Security)")], computer.Denied);
+        Assert.Equal([
+            ("Local Group Policy", "Not Applied (Empty)"),
+            ("Server Hardening", "Denied (Security)"),
+            ("Kiosk Lockdown", "Denied (WMI Filter)"),
+            ("Old Printers", "Disabled (Link)"),
+        ], computer.Denied);
 
         var user = scopes[1];
-        Assert.Equal("7/16/2026 at 10:01:12 AM", user.LastApplied);
-        Assert.Equal("HQ", user.Site);
-        Assert.Equal(["Drive Mappings"], user.Applied);
-        Assert.Equal([("Local Group Policy", "Not Applied (Empty)")], user.Denied);
-    }
-
-    [Theory, MemberData(nameof(LineEndings))]
-    public void GpResult_UserOnly_IgnoresNA(bool crlf)
-    {
-        var scope = Assert.Single(Parsers.ParseGpResult(Eol(Samples.GpResultUserOnly, crlf)));
-        Assert.Equal("User", scope.Name);
-        Assert.Empty(scope.Applied);
-        Assert.Empty(scope.Denied);
+        Assert.Equal(GpScopeState.Ok, user.State);
+        Assert.Equal(["Laufwerke & Drucker | Zürich"], user.Applied); // non-ASCII and '|' in the name survive
+        Assert.Empty(user.Denied);
     }
 
     [Fact]
-    public void GpResult_Unrecognised_ReturnsNoScopes() =>
-        Assert.Empty(Parsers.ParseGpResult("ERROR: Access denied."));
+    public void Rsop_NotElevated_ComputerDenied()
+    {
+        var scopes = Parsers.ParseRsop(Samples.RsopNotElevated);
+        Assert.Equal(GpScopeState.AccessDenied, scopes[0].State);
+        Assert.Empty(scopes[0].Applied);
+        Assert.Equal(GpScopeState.Ok, scopes[1].State);
+        Assert.Null(scopes[1].LastAppliedUtc);
+        Assert.Equal("", scopes[1].Site);
+    }
 
     [Fact]
-    public void GpTime_ParsesGpresultFormat()
+    public void Rsop_NoDataAndError()
     {
-        var saved = CultureInfo.CurrentCulture;
-        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
-        try
-        {
-            Assert.Equal(new DateTime(2026, 7, 16, 9, 58, 41), Parsers.ParseGpTime("7/16/2026 at 9:58:41 AM"));
-            Assert.Null(Parsers.ParseGpTime("not a date"));
-        }
-        finally { CultureInfo.CurrentCulture = saved; }
+        var scopes = Parsers.ParseRsop("SCOPE|Computer|NODATA\r\nSCOPE|User|ERROR|Der RPC-Server ist nicht verfügbar.\r\n");
+        Assert.Equal(GpScopeState.NoData, scopes[0].State);
+        Assert.Equal(GpScopeState.Error, scopes[1].State);
+        Assert.Equal("Der RPC-Server ist nicht verfügbar.", scopes[1].Detail);
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("#< CLIXML")]
+    [InlineData("powershell : The term 'powershell' is not recognized")]
+    public void Rsop_ScriptDidNotRun_ReturnsNoScopes(string output) =>
+        Assert.Empty(Parsers.ParseRsop(output));
+
+    [Theory]
+    [InlineData(false, false, true, false, "Disabled (Link)")]
+    [InlineData(true, false, true, false, "Disabled (GPO)")]
+    [InlineData(true, true, true, false, "Denied (Security)")]
+    [InlineData(true, true, false, false, "Denied (WMI Filter)")]
+    [InlineData(true, true, false, true, "Not Applied (Empty)")]
+    public void GpDeniedReason(bool linkEnabled, bool gpoEnabled, bool accessDenied, bool filterAllowed, string expected) =>
+        Assert.Equal(expected, Parsers.GpDeniedReason(linkEnabled, gpoEnabled, accessDenied, filterAllowed));
 
     // ── klist ──────────────────────────────────────────────
 
@@ -79,6 +96,30 @@ public class ParsersTests
 
         Assert.Equal("cifs/DC01.contoso.com @ CONTOSO.COM", tickets[1].Server);
         Assert.Equal("RSADSI RC4-HMAC(NT)", tickets[1].Fields["KerbTicket Encryption Type"]);
+    }
+
+    [Theory, MemberData(nameof(LineEndings))]
+    public void Klist_German_FieldsKeyedByPosition(bool crlf)
+    {
+        var (headers, tickets) = Parsers.ParseKlist(Eol(Samples.KlistGerman, crlf));
+
+        Assert.Equal(["Aktuelle Anmelde-ID ist 0:0x3e7a1", "Zwischengespeicherte Tickets: (1)"], headers);
+        var tgt = Assert.Single(tickets);
+        Assert.Equal("krbtgt/CONTOSO.COM @ CONTOSO.COM", tgt.Server);
+        Assert.Equal("alice @ CONTOSO.COM", tgt.Fields["Client"]);
+        Assert.Equal("AES-256-CTS-HMAC-SHA1-96", tgt.Fields["KerbTicket Encryption Type"]);
+        Assert.StartsWith("0x40e10000 -> forwardable", tgt.Fields["Ticket Flags"]);
+        Assert.Equal("16.07.2026 19:58:40 (lokal)", tgt.Fields["End Time"]);
+        Assert.Equal("0x1 -> PRIMARY", tgt.Fields["Cache Flags"]);
+        Assert.Equal("DC01.contoso.com", tgt.Fields["Kdc Called"]);
+    }
+
+    [Fact]
+    public void Klist_OlderWindows_MissingTrailingFields()
+    {
+        var tgt = Assert.Single(Parsers.ParseKlist(Samples.KlistNoCacheFlags).Tickets);
+        Assert.Equal("7/16/2026 19:58:40 (local)", tgt.Fields["End Time"]);
+        Assert.False(tgt.Fields.ContainsKey("Cache Flags"));
     }
 
     [Fact]

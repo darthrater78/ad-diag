@@ -45,7 +45,7 @@ This tool is **read-only and diagnostic**. It does not store, transmit, or log a
 
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session.
 - **Exported reports contain only metadata.** The text export includes test names and diagnostic details (trust names, GPO counts, port status). No raw tokens, password hashes, or credential material is included.
-- **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `gpresult`, `w32tm`, and other tools is parsed in memory for specific values only. The raw output is never written to disk or stored beyond the method scope.
+- **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `w32tm`, PowerShell queries, and other tools is parsed in memory for specific values only. The raw output is never written to disk or stored beyond the method scope.
 
 ### Process isolation
 
@@ -82,6 +82,8 @@ Locates a domain controller and tests connectivity to required ports. Port check
 
 ### 3. DNS for Active Directory
 
+SRV records are queried with the Windows DNS API (`DnsQuery`), bypassing the resolver cache, and report the best target (lowest priority, highest weight) first.
+
 - **_ldap._tcp SRV** — required for DC locator
 - **_kerberos._tcp SRV** — required for KDC discovery
 - **_gc._tcp SRV** (optional) — Global Catalog discovery in multi-domain forests
@@ -97,7 +99,7 @@ Tests access to the domain's SYSVOL and NETLOGON shares. These must be reachable
 
 ### 5. Group Policy
 
-Parses `gpresult /r`.
+Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same data `gpresult` reports. The last refresh time comes from the Group Policy engine's `State` registry key. Computer scope requires running as Administrator, as it does for `gpresult`.
 
 - **GP Last Refresh** — how long since policy was last applied
 - **Applied GPOs** — count of policies successfully applied
@@ -115,14 +117,14 @@ Parses `gpresult /r`.
 
 ## Group Policy Tab
 
-A dedicated tab (separate from the streaming diagnostics above) that parses `gpresult /r` into a readable, color-coded breakdown:
+A dedicated tab (separate from the streaming diagnostics above) that reads the Resultant Set of Policy (see above) into a readable, color-coded breakdown:
 
 - **Computer and User scope**, each showing:
   - Last applied time, with age and a staleness warning past 7 days
   - AD site name
   - Every **applied** GPO
   - Every **denied/filtered** GPO with its filtering reason (security filtering, WMI filter, disabled link, etc.)
-- **Refresh** — re-runs `gpresult` and re-renders the tab
+- **Refresh** — re-queries the policy results and re-renders the tab
 - **Run gpupdate** — runs `gpupdate` (or `gpupdate /force` with the **Force** checkbox) directly from the app, with a confirmation dialog explaining the impact of Force (reapplies all policies, not just changed ones; can briefly disrupt mapped drives/printers; may require a restart for some extensions). Automatically refreshes the tab afterward.
 
 ## Kerberos Tickets Tab
@@ -147,11 +149,11 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 **Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`gpresult`, `klist`, `nltest`, `w32tm`), kept free of WinForms so they can be unit tested on any platform.
+**Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Dark theme. Test groups stream results in real-time as each completes.
 
-**Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. The exceptions are the Group Policy checks and tab (`gpresult /r` has no language-neutral output that doesn't require writing a file) and the Kerberos Tickets tab's field labels, which currently need English Windows.
+**Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and SRV lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too.
 
 **Input Validation:**
 - `HostnamePattern`: `^[a-zA-Z0-9.\-]+$` — domain and DC fields
@@ -167,8 +169,6 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 | `nltest /dsgetsite` | AD site assignment | 5s |
 | `nltest /dsgetdc` | DC locator | 8s |
 | `nltest /domain_trusts` | Trust enumeration | 8s |
-| `nslookup -type=SRV` | AD DNS SRV records | 5s |
-| `gpresult /r` | Group Policy status (diagnostics + tab) | 20s (25s in tab) |
 | `gpupdate` / `gpupdate /force` | Manual policy refresh (Group Policy tab) | 90s |
 | `klist` | Kerberos ticket cache (diagnostics + tab) | 5s |
 | `klist get krbtgt/REALM` | Request a TGT when none is cached | 10s |
@@ -176,6 +176,7 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 | `w32tm /stripchart` | Clock skew measurement | 5s |
 | `w32tm /query /source` | Time source | 5s |
 | `powershell` (DirectorySearcher) | Computer password age from AD | 15s |
+| `powershell` (Get-CimInstance, `root\rsop`) | Group Policy results (diagnostics + tab) | 25s |
 
 All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout.
 
@@ -197,7 +198,7 @@ Run the parser tests (works on Windows, Linux or macOS):
 dotnet test tests/AdDiag.Tests
 ```
 
-The tests use representative English-language tool output in `tests/AdDiag.Tests/Samples.cs`. When a parser misreads real output, add that output as a sample and a test.
+The tests use representative tool output (mostly English, with some German) in `tests/AdDiag.Tests/Samples.cs`. When a parser misreads real output, add that output as a sample and a test.
 
 ## Releasing
 

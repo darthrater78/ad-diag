@@ -586,7 +586,7 @@ class MainForm : Form
                 "  Fix: Same troubleshooting as SYSVOL — these shares are typically co-located on the same DC. If SYSVOL works but NETLOGON doesn't, check the share configuration on the DC with 'net share' or Server Manager"),
 
             ("Group Policy",
-                "Parses gpresult to check whether Group Policy is applying correctly to this computer. For the full breakdown — every applied and filtered GPO for both Computer and User scope — switch to the Group Policy tab.\n\n" +
+                "Reads the Resultant Set of Policy (the data gpresult reports) to check whether Group Policy is applying correctly to this computer. For the full breakdown — every applied and filtered GPO for both Computer and User scope — switch to the Group Policy tab.\n\n" +
                 "• GP Last Refresh — how long since policy was last applied\n" +
                 "  Fix: If stale, run 'gpupdate /force' (available directly from the Group Policy tab) and check the Event Viewer (Applications and Services Logs > Microsoft > Windows > GroupPolicy) for errors\n\n" +
                 "• Applied GPOs — count of policies successfully applied to this computer\n" +
@@ -636,23 +636,23 @@ class MainForm : Form
             ResetGpBox(keep);
             AppendGpLine("Loading Group Policy details...\n", DimColor);
 
-            string raw;
+            string raw = "";
+            List<GpScope> scopes;
             try
             {
-                raw = await Task.Run(() => RunProcess("gpresult", "/r", timeoutMs: 25000));
+                scopes = await Task.Run(() => QueryRsop(out raw));
             }
             catch (Exception ex)
             {
                 ResetGpBox(keep);
-                AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
+                AppendGpLine($"Error querying Group Policy results: {ex.Message}\n", FailColor);
                 return;
             }
 
             ResetGpBox(keep);
-            var scopes = Parsers.ParseGpResult(raw);
             if (scopes.Count == 0)
             {
-                AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
+                AppendGpLine("Could not read Group Policy results. Raw output:\n\n", WarnColor);
                 AppendGpLine(raw, DimColor);
                 return;
             }
@@ -683,13 +683,18 @@ class MainForm : Form
         AppendGpLine($"   {scope.Name.ToUpperInvariant()} SCOPE\n", AccentColor, bold: true);
         AppendGpLine($"  ══════════════════════════════════════\n\n", BorderColor);
 
-        if (!string.IsNullOrEmpty(scope.LastApplied))
+        if (scope.State != GpScopeState.Ok)
         {
+            AppendGpLine("  " + GpScopeUnavailable(scope) + "\n\n\n", scope.State == GpScopeState.Error ? FailColor : WarnColor);
+            return;
+        }
+
+        if (scope.LastAppliedUtc is { } lastUtc)
+        {
+            var lastTime = lastUtc.ToLocalTime();
             AppendGpLine("  Last Applied: ", DimColor);
-            var lastTime = Parsers.ParseGpTime(scope.LastApplied);
-            string ageText = lastTime is { } t ? $"  ({FormatTimeSpan(DateTime.Now - t)} ago)" : "";
-            Color ageColor = lastTime is { } t2 && (DateTime.Now - t2).TotalDays >= 7 ? WarnColor : TextColor;
-            AppendGpLine(scope.LastApplied + ageText + "\n", ageColor, bold: true);
+            Color ageColor = (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
+            AppendGpLine($"{lastTime:g}  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
         }
 
         if (!string.IsNullOrEmpty(scope.Site))
@@ -730,6 +735,13 @@ class MainForm : Form
         AppendGpLine("\n\n", BorderColor);
     }
 
+
+    static string GpScopeUnavailable(GpScope scope) => scope.State switch
+    {
+        GpScopeState.AccessDenied => $"{scope.Name} scope requires running as Administrator",
+        GpScopeState.NoData => $"No Group Policy results recorded for the {scope.Name} scope (RSoP logging may be disabled)",
+        _ => $"Could not read the {scope.Name} scope: {scope.Detail}",
+    };
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
@@ -1631,25 +1643,81 @@ class MainForm : Form
 
     static TestEntry LookupSrv(string record, string testName, bool required)
     {
+        string optional = required ? "" : " (optional)";
         try
         {
-            string output = RunProcess("nslookup", $"-type=SRV {record}", timeoutMs: 5000);
-            bool found = output.Contains("service", StringComparison.OrdinalIgnoreCase)
-                      && output.Contains(record.Split('.', 3)[2], StringComparison.OrdinalIgnoreCase);
-            if (found)
-            {
-                var m = Regex.Match(output, @"svr hostname\s*=\s*(.+)", RegexOptions.IgnoreCase);
-                string host = m.Success ? m.Groups[1].Value.Trim() : "found";
-                return new(testName, Status.Pass, $"{record} -> {host}" + (required ? "" : " (optional)"));
-            }
-            return new(testName, required ? Status.Fail : Status.Warn,
-                $"No {record} record" + (required ? "" : " (optional)"));
+            var targets = QuerySrv(record);
+            if (targets == null)
+                return new(testName, required ? Status.Fail : Status.Warn, $"No {record} record{optional}");
+
+            string hosts = string.Join(", ", targets.Take(3)) + (targets.Count > 3 ? $" (+{targets.Count - 3} more)" : "");
+            return new(testName, Status.Pass, $"{record} -> {hosts}{optional}");
         }
         catch (Exception ex)
         {
-            return new(testName, Status.Warn, $"nslookup failed: {ex.Message}");
+            return new(testName, Status.Warn, $"DNS query failed: {ex.Message}");
         }
     }
+
+    const ushort DnsTypeSrv = 33;
+    const uint DnsQueryBypassCache = 0x8;       // ask the DNS server, like nslookup, not the local resolver cache
+    const int DnsErrorNameError = 9003;         // DNS_ERROR_RCODE_NAME_ERROR (NXDOMAIN)
+    const int DnsInfoNoRecords = 9501;          // DNS_INFO_NO_RECORDS
+
+    /// <summary>
+    /// SRV targets for <paramref name="record"/> ("host:port"), best first (lowest priority, then highest weight);
+    /// null if the name or record doesn't exist. Uses the DNS API directly, so nothing depends on nslookup's
+    /// (translated) output.
+    /// </summary>
+    static List<string>? QuerySrv(string record)
+    {
+        int status = DnsQuery_W(record, DnsTypeSrv, DnsQueryBypassCache, IntPtr.Zero, out IntPtr results, IntPtr.Zero);
+        try
+        {
+            if (status is DnsErrorNameError or DnsInfoNoRecords) return null;
+            if (status != 0) throw new System.ComponentModel.Win32Exception(status);
+
+            var srv = new List<(string Target, ushort Priority, ushort Weight, ushort Port)>();
+            for (IntPtr p = results; p != IntPtr.Zero;)
+            {
+                var r = Marshal.PtrToStructure<DnsSrvRecord>(p);
+                // Only answers: the additional section carries the targets' A/AAAA records
+                if (r.wType == DnsTypeSrv && (r.Flags & 0x3) == 1)
+                    srv.Add((Marshal.PtrToStringUni(r.pNameTarget) ?? "", r.wPriority, r.wWeight, r.wPort));
+                p = r.pNext;
+            }
+            return srv.Count == 0 ? null
+                : srv.OrderBy(s => s.Priority).ThenByDescending(s => s.Weight).Select(s => $"{s.Target}:{s.Port}").ToList();
+        }
+        finally
+        {
+            if (results != IntPtr.Zero) DnsRecordListFree(results, 1); // DnsFreeRecordList
+        }
+    }
+
+    // DNS_RECORDW's header followed by the DNS_SRV_DATAW member of its data union
+    [StructLayout(LayoutKind.Sequential)]
+    struct DnsSrvRecord
+    {
+        public IntPtr pNext;
+        public IntPtr pName;
+        public ushort wType;
+        public ushort wDataLength;
+        public uint Flags;        // bits 0-1: section (1 = answer)
+        public uint dwTtl;
+        public uint dwReserved;
+        public IntPtr pNameTarget;
+        public ushort wPriority;
+        public ushort wWeight;
+        public ushort wPort;
+        public ushort Pad;
+    }
+
+    [DllImport("dnsapi.dll", CharSet = CharSet.Unicode)]
+    static extern int DnsQuery_W(string name, ushort type, uint options, IntPtr extra, out IntPtr results, IntPtr reserved);
+
+    [DllImport("dnsapi.dll")]
+    static extern void DnsRecordListFree(IntPtr recordList, int freeType);
 
     static TestGroup TestSysvolNetlogon(DiagConfig cfg)
     {
@@ -1693,28 +1761,27 @@ class MainForm : Form
 
         try
         {
-            string gpresult = RunProcess("gpresult", "/r", timeoutMs: 20000);
-            bool hasComputer = gpresult.Contains("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase);
-            bool hasUser = gpresult.Contains("USER SETTINGS", StringComparison.OrdinalIgnoreCase);
+            var scopes = QueryRsop(out _);
+            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
+            var user = scopes.FirstOrDefault(s => s.Name == "User");
+            var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
 
-            if (!hasComputer && !hasUser)
+            if (primary == null)
             {
-                tests.Add(new("GP Last Refresh", Status.Warn, "gpresult returned no data — run as Administrator for full results"));
+                string why = scopes.Count == 0 ? "Could not read Group Policy results"
+                    : string.Join("; ", scopes.Select(GpScopeUnavailable));
+                tests.Add(new("GP Last Refresh", Status.Warn, why));
                 tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
                 tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
                 return new("Group Policy", tests);
             }
 
-            var scopes = Parsers.ParseGpResult(gpresult);
-            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
-            var user = scopes.FirstOrDefault(s => s.Name == "User");
-            var primary = computer ?? user;
-            string scopeLabel = computer != null ? "Computer" : "User";
-            string elevationNote = !hasComputer ? " (run as Administrator for Computer scope)" : "";
+            string scopeLabel = primary.Name;
+            string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
 
-            if (primary != null && !string.IsNullOrEmpty(primary.LastApplied)
-                && Parsers.ParseGpTime(primary.LastApplied) is { } lastTime)
+            if (primary.LastAppliedUtc is { } lastUtc)
             {
+                var lastTime = lastUtc.ToLocalTime();
                 var age = DateTime.Now - lastTime;
                 tests.Add(new("GP Last Refresh",
                     age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
@@ -1726,22 +1793,22 @@ class MainForm : Form
                     $"Could not determine last refresh time{elevationNote}"));
             }
 
-            int appliedCount = primary?.Applied.Count ?? 0;
+            int appliedCount = primary.Applied.Count;
             tests.Add(new("Applied GPOs",
                 appliedCount > 0 ? Status.Pass : Status.Warn,
                 appliedCount > 0
                     ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
                     : $"{scopeLabel}: No applied GPOs found{elevationNote}"));
 
-            int deniedCount = primary?.Denied.Count ?? 0;
+            int deniedCount = primary.Denied.Count;
             tests.Add(new("Denied GPOs", Status.Pass,
                 $"{scopeLabel}: {deniedCount} GPO(s) filtered out (informational){elevationNote}"));
         }
         catch (Exception ex)
         {
-            tests.Add(new("GP Last Refresh", Status.Fail, $"gpresult error: {ex.Message}"));
-            tests.Add(new("Applied GPOs", Status.Skip, "gpresult unavailable"));
-            tests.Add(new("Denied GPOs", Status.Skip, "gpresult unavailable"));
+            tests.Add(new("GP Last Refresh", Status.Fail, $"Group Policy query error: {ex.Message}"));
+            tests.Add(new("Applied GPOs", Status.Skip, "Group Policy results unavailable"));
+            tests.Add(new("Denied GPOs", Status.Skip, "Group Policy results unavailable"));
         }
 
         return new("Group Policy", tests);
@@ -1855,6 +1922,56 @@ class MainForm : Form
             "ERROR|" + ($e.Message -replace '\s+', ' ')
         }
         """;
+
+    // Group Policy results from the RSoP logging data in WMI (what gpresult itself reads), which, unlike gpresult's
+    // text, is the same in every display language. Output format: see Parsers.ParseRsop. The last-applied time
+    // comes from the GP engine's own State key, falling back to when the RSoP session was logged.
+    const string RsopScript = """
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        function Clean($s) { "$s" -replace '\s+', ' ' }
+        function Flag($b) { if ($b) { '1' } else { '0' } }
+        function Get-LastApplied($stateKey) {
+            try {
+                $p = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\$stateKey\Extension-List\{00000000-0000-0000-0000-000000000000}"
+                $ft = ([int64]$p.EndTimeHi -shl 32) -bor ([int64]$p.EndTimeLo -band 0xFFFFFFFF)
+                if ($ft -gt 0) { [datetime]::FromFileTimeUtc($ft) }
+            } catch { }
+        }
+        function Write-Scope($scope, $ns, $stateKey) {
+            try {
+                $session = Get-CimInstance -Namespace $ns -ClassName RSOP_Session | Select-Object -First 1
+                $gpos = @{}
+                Get-CimInstance -Namespace $ns -ClassName RSOP_GPO | ForEach-Object { $gpos[$_.id] = $_ }
+                $links = @(Get-CimInstance -Namespace $ns -ClassName RSOP_GPLink)
+            } catch {
+                $e = $_.Exception
+                $code = if ($e -is [Microsoft.Management.Infrastructure.CimException]) { "$($e.NativeErrorCode)" } else { '' }
+                if ($code -eq 'AccessDenied') { "SCOPE|$scope|DENIED" }
+                elseif ($code -eq 'InvalidNamespace') { "SCOPE|$scope|NODATA" }
+                else { "SCOPE|$scope|ERROR|" + (Clean $e.Message) }
+                return
+            }
+            if (-not $session) { "SCOPE|$scope|NODATA"; return }
+            $last = Get-LastApplied $stateKey
+            if (-not $last -and $session.creationTime) { $last = $session.creationTime.ToUniversalTime() }
+            "SCOPE|$scope|OK|" + $(if ($last) { $last.ToString('o') } else { '' }) + '|' + (Clean $session.site)
+            foreach ($l in $links) {
+                $g = $gpos[$l.GPO.id]
+                if (-not $g) { continue }
+                "GPO|$scope|$($g.id)|$([int]$l.appliedOrder)|$(Flag $l.enabled)|$(Flag $g.enabled)|$(Flag $g.accessDenied)|$(Flag $g.filterAllowed)|" + (Clean $g.name)
+            }
+        }
+        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        Write-Scope 'Computer' 'root\rsop\computer' 'Machine'
+        Write-Scope 'User' "root\rsop\user\$($sid -replace '-', '_')" $sid
+        """;
+
+    static List<GpScope> QueryRsop(out string raw)
+    {
+        raw = RunPowerShell(RsopScript, timeoutMs: 25000);
+        return Parsers.ParseRsop(raw);
+    }
 
     /// <summary>Runs a PowerShell script passed via -EncodedCommand, avoiding command-line quoting entirely.</summary>
     static string RunPowerShell(string script, int timeoutMs)

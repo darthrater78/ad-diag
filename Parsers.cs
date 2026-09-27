@@ -157,103 +157,119 @@ static class Parsers
         return new(null, null, line.Length > 0 ? line : "No output from PowerShell");
     }
 
-    /// <summary>Parses a gpresult timestamp such as "7/16/2026 at 10:00:00 AM" in the current culture.</summary>
-    public static DateTime? ParseGpTime(string value) =>
-        DateTime.TryParse(Regex.Replace(value, @"\s+at\s+", " "), out var t) ? t : null;
-
-    public static List<GpScope> ParseGpResult(string raw)
+    /// <summary>
+    /// Parses the RSoP query's output, one line per scope and per GPO link:
+    /// <code>
+    /// SCOPE|Computer|OK|&lt;last applied, ISO 8601 UTC, or empty&gt;|&lt;site&gt;
+    /// SCOPE|Computer|DENIED            (not elevated)
+    /// SCOPE|User|NODATA                (no RSoP logging data for this scope)
+    /// SCOPE|User|ERROR|&lt;message&gt;
+    /// GPO|&lt;scope&gt;|&lt;GPO id&gt;|&lt;appliedOrder&gt;|&lt;link enabled&gt;|&lt;GPO enabled&gt;|&lt;access denied&gt;|&lt;WMI filter allowed&gt;|&lt;name&gt;
+    /// </code>
+    /// Flags are 1/0. A GPO with appliedOrder 0 was not applied. Returns no scopes if the script didn't run.
+    /// </summary>
+    public static List<GpScope> ParseRsop(string output)
     {
         var scopes = new List<GpScope>();
-        var sectionPattern = new Regex(@"(COMPUTER SETTINGS|USER SETTINGS)\s*\r?\n-+\s*\r?\n([\s\S]*?)(?=\r?\nCOMPUTER SETTINGS|\r?\nUSER SETTINGS|\z)", RegexOptions.IgnoreCase);
+        var links = new List<(string Scope, string Id, int Order, string Name, string Reason)>();
 
-        // "Site Name:" normally sits in the header block above the scope sections
-        var headerSite = Regex.Match(raw, @"^\s*Site Name:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-        foreach (Match sm in sectionPattern.Matches(raw))
+        foreach (var rawLine in output.Split('\n'))
         {
-            string name = sm.Groups[1].Value.Equals("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase) ? "Computer" : "User";
-            string body = sm.Groups[2].Value;
-
-            var lastAppliedMatch = Regex.Match(body, @"Last time Group Policy was applied:\s*(.+)", RegexOptions.IgnoreCase);
-            var siteMatch = Regex.Match(body, @"^\s*Site Name:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-            var applied = new List<string>();
-            var appliedSection = Regex.Match(body, @"Applied Group Policy Objects\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*\r?\n|\r?\n\s*The following GPOs|\z)", RegexOptions.IgnoreCase);
-            if (appliedSection.Success)
+            var parts = rawLine.TrimEnd('\r').Split('|');
+            if (parts.Length >= 3 && parts[0] == "SCOPE")
             {
-                foreach (var line in appliedSection.Groups[1].Value.Split('\n'))
+                var (state, detail) = parts[2] switch
                 {
-                    string t = line.Trim();
-                    if (t.Length > 0 && !t.Equals("N/A", StringComparison.OrdinalIgnoreCase)) applied.Add(t);
-                }
+                    "OK" => (GpScopeState.Ok, ""),
+                    "DENIED" => (GpScopeState.AccessDenied, ""),
+                    "NODATA" => (GpScopeState.NoData, ""),
+                    _ => (GpScopeState.Error, string.Join("|", parts[3..]).Trim()),
+                };
+                DateTime? lastApplied = state == GpScopeState.Ok && parts.Length > 3
+                    && DateTime.TryParse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
+                    ? t.ToUniversalTime() : null;
+                string site = state == GpScopeState.Ok && parts.Length > 4 ? string.Join("|", parts[4..]).Trim() : "";
+                scopes.Add(new(parts[1], state, detail, lastApplied, site, [], []));
             }
-
-            var denied = new List<(string, string)>();
-            var deniedSection = Regex.Match(body, @"The following GPOs were not applied because they were filtered out\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*The \w+ is a part of the following security groups|\r?\n\s*\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
-            if (deniedSection.Success)
+            else if (parts.Length >= 9 && parts[0] == "GPO" && int.TryParse(parts[3], out int order))
             {
-                string? currentName = null;
-                foreach (var rawLine in deniedSection.Groups[1].Value.Split('\n'))
-                {
-                    string line = rawLine.TrimEnd('\r');
-                    string trimmed = line.Trim();
-                    if (trimmed.Length == 0) continue;
-
-                    // Indented "Filtering: <reason>" lines describe the GPO just above them
-                    if (trimmed.StartsWith("Filtering:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string reason = trimmed["Filtering:".Length..].Trim();
-                        if (currentName != null)
-                            denied.Add((currentName, reason));
-                        currentName = null;
-                    }
-                    else
-                    {
-                        if (currentName != null) denied.Add((currentName, ""));
-                        currentName = trimmed;
-                    }
-                }
-                if (currentName != null) denied.Add((currentName, ""));
+                bool Flag(int i) => parts[i].Trim() == "1";
+                links.Add((parts[1], parts[2], order, string.Join("|", parts[8..]).Trim(),
+                    GpDeniedReason(Flag(4), Flag(5), Flag(6), Flag(7))));
             }
+        }
 
-            scopes.Add(new GpScope(name,
-                lastAppliedMatch.Success ? lastAppliedMatch.Groups[1].Value.Trim() : "",
-                siteMatch.Success ? siteMatch.Groups[1].Value.Trim() : headerSite.Success ? headerSite.Groups[1].Value.Trim() : "",
-                applied, denied));
+        foreach (var scope in scopes)
+        {
+            var mine = links.Where(l => l.Scope == scope.Name).ToList();
+            // Highest appliedOrder wins, so list it first (as gpresult does). A GPO linked more than once
+            // shows up once: as applied if any of its links applied.
+            var applied = mine.Where(l => l.Order > 0).OrderByDescending(l => l.Order).DistinctBy(l => l.Id).ToList();
+            scope.Applied.AddRange(applied.Select(l => l.Name));
+            scope.Denied.AddRange(mine.Where(l => l.Order <= 0 && !applied.Any(a => a.Id == l.Id))
+                .DistinctBy(l => l.Id).Select(l => (l.Name, l.Reason)));
         }
 
         return scopes;
     }
 
-    /// <summary>Header lines and tickets from <c>klist</c>. No tickets and no headers means an empty cache.</summary>
+    /// <summary>Why an unapplied GPO was filtered out, using gpresult's wording.</summary>
+    public static string GpDeniedReason(bool linkEnabled, bool gpoEnabled, bool accessDenied, bool filterAllowed) =>
+        !linkEnabled ? "Disabled (Link)"
+        : !gpoEnabled ? "Disabled (GPO)"
+        : accessDenied ? "Denied (Security)"
+        : !filterAllowed ? "Denied (WMI Filter)"
+        : "Not Applied (Empty)";
+
+    // klist prints each ticket's fields in a fixed order; the labels are translated on non-English Windows,
+    // so fields are keyed by position. Older Windows omits the trailing ones.
+    static readonly string[] KlistFieldOrder =
+    [
+        "Client", "Server", "KerbTicket Encryption Type", "Ticket Flags", "Start Time", "End Time",
+        "Renew Time", "Session Key Type", "Cache Flags", "Kdc Called",
+    ];
+
+    /// <summary>
+    /// Header lines and tickets from <c>klist</c>. No tickets and no headers means an empty cache. Field keys are
+    /// the English labels (<see cref="KlistFieldOrder"/>) whatever the display language.
+    /// </summary>
     public static KlistOutput ParseKlist(string raw)
     {
         var headers = new List<string>();
         var tickets = new List<KlistTicket>();
-        if (string.IsNullOrWhiteSpace(raw) || raw.Contains("no credentials", StringComparison.OrdinalIgnoreCase))
-            return new(headers, tickets);
 
         string? currentServer = null;
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        int fieldIndex = 0;
+        bool inTicket = false;
 
         void ParseField(string text)
         {
-            var kv = text.Split(':', 2);
-            if (kv.Length == 2)
+            string label, value;
+            // "Ticket Flags 0x40e10000 -> forwardable ..." has no colon (in English at least), and a flags value
+            // is always "0x... -> ..."; everything else is "Label: value" (times contain colons, so split once)
+            var flags = Regex.Match(text, @"\b0x[0-9a-f]+\s*->.*$", RegexOptions.IgnoreCase);
+            int colon = text.IndexOfAny([':', '：']);
+            if (flags.Success && (colon < 0 || colon > flags.Index))
             {
-                string key = kv[0].Trim();
-                string val = kv[1].Trim();
-                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
-                    currentServer = val;
-                else
-                    fields[key] = val;
-                return;
+                label = text[..flags.Index].Trim().TrimEnd(':', '：').Trim();
+                value = flags.Value.Trim();
             }
+            else if (colon >= 0)
+            {
+                label = text[..colon].Trim();
+                value = text[(colon + 1)..].Trim();
+            }
+            else return;
 
-            // "Ticket Flags 0x... -> ..." has no colon separator
-            var flagsMatch = Regex.Match(text, @"^\s*Ticket Flags\s+(.*)$", RegexOptions.IgnoreCase);
-            if (flagsMatch.Success)
-                fields["Ticket Flags"] = flagsMatch.Groups[1].Value.Trim();
+            string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
+                ?? (fieldIndex < KlistFieldOrder.Length ? KlistFieldOrder[fieldIndex] : label);
+            fieldIndex++;
+
+            if (key == "Server")
+                currentServer = value;
+            else
+                fields[key] = value;
         }
 
         void Flush()
@@ -262,6 +278,7 @@ static class Parsers
                 tickets.Add(new(currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
             currentServer = null;
             fields.Clear();
+            fieldIndex = 0;
         }
 
         foreach (string rawLine in raw.Split('\n'))
@@ -269,28 +286,27 @@ static class Parsers
             string line = rawLine.TrimEnd('\r');
             if (string.IsNullOrWhiteSpace(line)) continue;
 
-            if (line.StartsWith("Current LogonId", StringComparison.OrdinalIgnoreCase)
-                || line.StartsWith("Cached Tickets", StringComparison.OrdinalIgnoreCase))
-            {
-                headers.Add(line);
-                continue;
-            }
-
             string trimmedLine = line.TrimStart();
-            if (trimmedLine.StartsWith("#"))
+            if (Regex.IsMatch(trimmedLine, @"^#\d+>"))
             {
                 Flush();
+                inTicket = true;
 
                 // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
-                int markerEnd = trimmedLine.IndexOf('>');
-                if (markerEnd >= 0 && markerEnd + 1 < trimmedLine.Length)
-                    ParseField(trimmedLine[(markerEnd + 1)..].Trim());
+                string rest = trimmedLine[(trimmedLine.IndexOf('>') + 1)..].Trim();
+                if (rest.Length > 0) ParseField(rest);
                 continue;
             }
 
-            ParseField(line);
+            // Lines before the first ticket are headers ("Current LogonId is ...", "Cached Tickets: (n)")
+            if (inTicket) ParseField(line);
+            else headers.Add(line.Trim());
         }
         Flush();
+
+        // A failed klist (e.g. "klist failed with 0xc000005f ... (no credentials)") has no cache to show
+        if (tickets.Count == 0 && KlistError(raw) != null)
+            headers.Clear();
 
         return new(headers, tickets);
     }
@@ -299,6 +315,9 @@ static class Parsers
 /// <summary>Computer account's domain and pwdLastSet (UTC); both null with <c>Error</c> set if the query failed. LastSetUtc null with Domain set means not found.</summary>
 record PasswordAgeResult(string? Domain, DateTime? LastSetUtc, string? Error);
 record ScVerifyResult(bool Ok, bool AccessDenied, string Detail);
-record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
+enum GpScopeState { Ok, AccessDenied, NoData, Error }
+/// <summary>One RSoP scope ("Computer" or "User"). When State isn't Ok the lists are empty; Detail holds any error.</summary>
+record GpScope(string Name, GpScopeState State, string Detail, DateTime? LastAppliedUtc, string Site,
+    List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);
 record KlistOutput(List<string> Headers, List<KlistTicket> Tickets);
