@@ -19,6 +19,9 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// P/Invoke targets are all system DLLs; never resolve them from the exe's own folder, where a planted copy could sit
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+
 #nullable enable
 namespace AdDiag;
 
@@ -129,9 +132,9 @@ class MainForm : Form
         var appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
         var lblTag = new Label { Text = $" v{appVersion} ", ForeColor = AccentColor, BackColor = AccentDimColor, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), AutoSize = true, Location = new Point(148, 10) };
         var lnkGithub = new LinkLabel { Text = "GitHub", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-        lnkGithub.LinkClicked += (s, e) => Process.Start(new ProcessStartInfo { FileName = "https://github.com/darthrater78/ad-diag", UseShellExecute = true });
+        lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
         var lnkRelease = new LinkLabel { Text = "Release Notes", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-        lnkRelease.LinkClicked += (s, e) => Process.Start(new ProcessStartInfo { FileName = "https://github.com/darthrater78/ad-diag/releases/latest", UseShellExecute = true });
+        lnkRelease.LinkClicked += (s, e) => OpenUrl($"https://github.com/darthrater78/ad-diag/releases/tag/v{appVersion}");
         header.Controls.AddRange([lblTitle, lblTag, lnkGithub, lnkRelease]);
         header.Resize += (s, e) =>
         {
@@ -2036,12 +2039,32 @@ class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Full path of a Windows tool in System32. A bare name would make CreateProcess search the exe's own folder
+    /// and the current directory first, so a planted klist.exe next to a downloaded ad-diag.exe would run instead,
+    /// elevated whenever the app is.
+    /// </summary>
+    static string SystemTool(string name) => Path.Combine(Environment.SystemDirectory,
+        name == "powershell" ? @"WindowsPowerShell\v1.0\powershell.exe" : name + ".exe");
+
+    /// <summary>
+    /// Opens an http(s) URL in the default browser at the shell's integrity level: explorer.exe hands it to the
+    /// already-running (unelevated) shell, where ShellExecute from an elevated app would open an elevated browser.
+    /// </summary>
+    static void OpenUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps) return;
+        string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        try { Process.Start(new ProcessStartInfo(explorer, $"\"{uri.AbsoluteUri}\"") { UseShellExecute = false })?.Dispose(); }
+        catch { }
+    }
+
     /// <summary>Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on timeout.</summary>
     static string RunProcess(string fileName, string arguments, int timeoutMs = 15000)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = fileName, Arguments = arguments,
+            FileName = SystemTool(fileName), Arguments = arguments,
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true,
             // Closed immediately, so a tool that prompts (e.g. gpupdate's "OK to log off? (Y/N)") reads EOF instead of waiting

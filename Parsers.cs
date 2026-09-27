@@ -230,6 +230,22 @@ static class Parsers
     ];
 
     /// <summary>
+    /// Splits one klist field line into its (translated) label and value, or null if it isn't one. Values can
+    /// contain colons (times), so "Label: value" splits once; "Ticket Flags 0x40e10000 -> ..." has no colon (in
+    /// English at least), and a flags value is always "0x... -> ...".
+    /// </summary>
+    static (string Label, string Value)? SplitKlistField(string text)
+    {
+        var flags = Regex.Match(text, @"\b0x[0-9a-f]+\s*->.*$", RegexOptions.IgnoreCase);
+        int colon = text.IndexOfAny([':', '：']);
+        if (flags.Success && (colon < 0 || colon > flags.Index))
+            return (text[..flags.Index].Trim().TrimEnd(':', '：').Trim(), flags.Value.Trim());
+        if (colon >= 0)
+            return (text[..colon].Trim(), text[(colon + 1)..].Trim());
+        return null;
+    }
+
+    /// <summary>
     /// Header lines and tickets from <c>klist</c>. No tickets and no headers means an empty cache. Field keys are
     /// the English labels (<see cref="KlistFieldOrder"/>) whatever the display language.
     /// </summary>
@@ -245,22 +261,8 @@ static class Parsers
 
         void ParseField(string text)
         {
-            string label, value;
-            // "Ticket Flags 0x40e10000 -> forwardable ..." has no colon (in English at least), and a flags value
-            // is always "0x... -> ..."; everything else is "Label: value" (times contain colons, so split once)
-            var flags = Regex.Match(text, @"\b0x[0-9a-f]+\s*->.*$", RegexOptions.IgnoreCase);
-            int colon = text.IndexOfAny([':', '：']);
-            if (flags.Success && (colon < 0 || colon > flags.Index))
-            {
-                label = text[..flags.Index].Trim().TrimEnd(':', '：').Trim();
-                value = flags.Value.Trim();
-            }
-            else if (colon >= 0)
-            {
-                label = text[..colon].Trim();
-                value = text[(colon + 1)..].Trim();
-            }
-            else return;
+            if (SplitKlistField(text) is not { } field) return;
+            var (label, value) = field;
 
             string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
                 ?? (fieldIndex < KlistFieldOrder.Length ? KlistFieldOrder[fieldIndex] : label);
