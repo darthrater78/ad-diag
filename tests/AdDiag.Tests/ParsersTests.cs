@@ -128,13 +128,61 @@ public class ParsersTests
     }
 
     [Fact]
+    public void Site_German() =>
+        Assert.Equal("Zürich-HQ", Parsers.ParseSite(Samples.NltestDsGetSiteGerman));
+
+    [Fact]
+    public void DcLocator_German() =>
+        Assert.Equal("DC01.contoso.com", Parsers.ParseDcLocator(Samples.NltestDsGetDcGerman));
+
+    [Fact]
+    public void NltestError_IgnoresSuccessStatuses() =>
+        Assert.Null(Parsers.NltestError(Samples.NltestScVerify));
+
+    [Theory]
+    [InlineData(Samples.NltestScVerify)]
+    [InlineData(Samples.NltestScVerifyGerman)]
+    public void ScVerify_Healthy(string output)
+    {
+        var r = Parsers.ParseScVerify(output);
+        Assert.True(r.Ok);
+        Assert.False(r.AccessDenied);
+        Assert.Equal("Verified with DC01.contoso.com", r.Detail);
+    }
+
+    [Theory]
+    [InlineData(Samples.NltestScVerifyBroken)]
+    [InlineData(Samples.NltestScVerifyBrokenGerman)]
+    public void ScVerify_BrokenTrust_FailsDespiteCommandSuccess(string output)
+    {
+        var r = Parsers.ParseScVerify(output);
+        Assert.False(r.Ok);
+        Assert.False(r.AccessDenied);
+        Assert.Equal("1311 0x51f ERROR_NO_LOGON_SERVERS", r.Detail);
+    }
+
+    [Fact]
+    public void ScVerify_AccessDenied()
+    {
+        var r = Parsers.ParseScVerify(Samples.NltestScVerifyAccessDenied);
+        Assert.False(r.Ok);
+        Assert.True(r.AccessDenied);
+    }
+
+    [Fact]
+    public void ScVerify_NoStatus_Fails() =>
+        Assert.False(Parsers.ParseScVerify("The command completed successfully").Ok);
+
+    [Fact]
     public void NltestError_FallsBackToHexStatus() =>
         Assert.Equal("0x77f", Parsers.NltestError("Getting DC Site failed: Status = 1919 0x77f"));
+
+    static readonly string?[] OwnDomain = ["CONTOSO", "contoso.com"];
 
     [Theory, MemberData(nameof(LineEndings))]
     public void Trusts_ExcludesPrimaryDomain(bool crlf)
     {
-        var trusts = Parsers.ParseTrusts(Eol(Samples.NltestTrusts, crlf));
+        var trusts = Parsers.ParseTrusts(Eol(Samples.NltestTrusts, crlf), OwnDomain);
         Assert.Equal(2, trusts.Count);
         Assert.StartsWith("CHILD child.contoso.com (NT 5)", trusts[0]);
         Assert.StartsWith("FABRIKAM fabrikam.com (NT 5)", trusts[1]);
@@ -142,12 +190,26 @@ public class ParsersTests
 
     [Fact]
     public void Trusts_SingleDomain_IsEmpty() =>
-        Assert.Empty(Parsers.ParseTrusts(Samples.NltestTrustsSingleDomain));
+        Assert.Empty(Parsers.ParseTrusts(Samples.NltestTrustsSingleDomain, OwnDomain));
+
+    [Theory]
+    [InlineData("CONTOSO", null)]
+    [InlineData(null, "contoso.com")]
+    [InlineData(null, null)] // falls back to the English "(Primary Domain)" marker
+    public void Trusts_PrimaryDomain_MatchedByEitherName(string? netbios, string? dns) =>
+        Assert.Empty(Parsers.ParseTrusts(Samples.NltestTrustsSingleDomain, [netbios, dns]));
+
+    [Fact]
+    public void Trusts_German_ExcludesPrimaryByName()
+    {
+        var trust = Assert.Single(Parsers.ParseTrusts(Samples.NltestTrustsGerman, OwnDomain));
+        Assert.StartsWith("CHILD child.contoso.com", trust);
+    }
 
     [Fact]
     public void Trusts_Failure_IsDetected()
     {
-        Assert.Empty(Parsers.ParseTrusts(Samples.NltestTrustsFailed));
+        Assert.Empty(Parsers.ParseTrusts(Samples.NltestTrustsFailed, OwnDomain));
         Assert.Equal("ERROR_NO_SUCH_DOMAIN", Parsers.NltestError(Samples.NltestTrustsFailed));
         Assert.Null(Parsers.NltestError(Samples.NltestTrusts));
     }
@@ -177,9 +239,19 @@ public class ParsersTests
     public void Skew_Error_ReturnsNull() =>
         Assert.Null(Parsers.ParseStripchartSkew(Samples.W32tmStripchartError));
 
-    [Theory, MemberData(nameof(LineEndings))]
-    public void TimeSource_Parses(bool crlf) =>
-        Assert.Equal("DC01.contoso.com", Parsers.ParseTimeSource(Eol(Samples.W32tmStatus, crlf)));
+    [Fact]
+    public void Skew_CommaDecimalOutput() =>
+        Assert.Equal(0.0206779, Parsers.ParseStripchartSkew(Samples.W32tmStripchartComma)!.Value, 7);
+
+    [Fact]
+    public void TimeSource_Parses() =>
+        Assert.Equal("DC01.contoso.com", Parsers.ParseTimeSource(Samples.W32tmSource));
+
+    [Theory]
+    [InlineData(Samples.W32tmSourceError)]
+    [InlineData("")]
+    public void TimeSource_Error_ReturnsNull(string output) =>
+        Assert.Null(Parsers.ParseTimeSource(output));
 
     static IPAddress[] Resolve(string host) =>
         host == "contoso.com" ? [IPAddress.Parse("10.0.0.10"), IPAddress.Parse("10.0.0.11")] : throw new Exception("NXDOMAIN");

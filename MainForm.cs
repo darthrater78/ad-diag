@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -9,6 +10,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -65,6 +67,11 @@ class MainForm : Form
     static readonly SolidBrush AccentBrush = new(AccentColor);
     static readonly Font TabFontActive = new("Segoe UI", 8.5f, FontStyle.Bold);
     static readonly Font TabFontInactive = new("Segoe UI", 8.5f);
+    static readonly Font GpBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font TicketsBoldFont = new("Cascadia Code", 9f, FontStyle.Bold);
+    static readonly Font HistoryLabelFont = new("Segoe UI", 8f);
+    static readonly Font HistoryFont = new("Segoe UI", 7.5f);
+    static readonly Font HistoryFontBold = new("Segoe UI", 7.5f, FontStyle.Bold);
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
@@ -76,6 +83,7 @@ class MainForm : Form
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
     bool _gpRunning;
     bool _showingExplainer;
+    bool _ticketsRunning;
     List<TestGroup>? _renderedGroups;
     string? _placeholderText;
     readonly List<DiagRun> _runHistory = [];
@@ -319,7 +327,11 @@ class MainForm : Form
         {
             _runCts?.Cancel();
         };
-        FormClosed += (s, e) => Environment.Exit(0);
+        FormClosed += (s, e) =>
+        {
+            KillRunningProcesses();
+            Environment.Exit(0);
+        };
         _ = DetectDomainAsync();
     }
 
@@ -609,7 +621,7 @@ class MainForm : Form
         _gpBox.SelectionLength = 0;
         _gpBox.SelectionColor = color;
         _gpBox.SelectionBackColor = backColor ?? _gpBox.BackColor;
-        _gpBox.SelectionFont = bold ? new Font(_gpBox.Font, FontStyle.Bold) : _gpBox.Font;
+        _gpBox.SelectionFont = bold ? GpBoldFont : _gpBox.Font;
         _gpBox.AppendText(text);
     }
 
@@ -762,16 +774,32 @@ class MainForm : Form
         _ticketsBox.SelectionLength = 0;
         _ticketsBox.SelectionColor = color;
         _ticketsBox.SelectionBackColor = backColor ?? _ticketsBox.BackColor;
-        _ticketsBox.SelectionFont = bold ? new Font(_ticketsBox.Font, FontStyle.Bold) : _ticketsBox.Font;
+        _ticketsBox.SelectionFont = bold ? TicketsBoldFont : _ticketsBox.Font;
         _ticketsBox.AppendText(text);
     }
 
-    void RefreshTickets()
+    async void RefreshTickets()
     {
+        if (_ticketsRunning) return;
+        _ticketsRunning = true;
+        _showingExplainer = false;
         _ticketsBox.Clear();
+        AppendTicketsLine("Loading tickets...\n", DimColor);
         string raw;
-        try { raw = RunProcess("klist", "", timeoutMs: 5000); }
-        catch (Exception ex) { AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor); return; }
+        try { raw = await Task.Run(() => RunProcess("klist", "", timeoutMs: 5000)); }
+        catch (Exception ex)
+        {
+            if (!_showingExplainer)
+            {
+                _ticketsBox.Clear();
+                AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor);
+            }
+            return;
+        }
+        finally { _ticketsRunning = false; }
+
+        if (_showingExplainer || IsDisposed) return; // user opened the explainer while klist ran
+        _ticketsBox.Clear();
 
         var (headers, tickets) = Parsers.ParseKlist(raw);
         if (headers.Count == 0 && tickets.Count == 0)
@@ -953,7 +981,7 @@ class MainForm : Form
         AppendTicketsLine(" again to return to the ticket list.\n", DimColor);
     }
 
-    void BtnPurgeTickets_Click(object? sender, EventArgs e)
+    async void BtnPurgeTickets_Click(object? sender, EventArgs e)
     {
         var confirm = MessageBox.Show(
             "This will destroy all cached Kerberos tickets.\n\n"
@@ -963,9 +991,10 @@ class MainForm : Form
             "Purge Kerberos Tickets", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
 
+        _btnPurgeTickets.Enabled = false;
         try
         {
-            RunProcess("klist", "purge", timeoutMs: 5000);
+            await Task.Run(() => RunProcess("klist", "purge", timeoutMs: 5000));
             _lblStatus.Text = "Tickets purged — run diagnostics twice (first run reacquires tickets, second shows true results)";
             _lblStatus.ForeColor = WarnColor;
             RefreshTickets();
@@ -973,6 +1002,10 @@ class MainForm : Form
         catch (Exception ex)
         {
             _lblStatus.Text = $"Purge failed: {ex.Message}";
+        }
+        finally
+        {
+            _btnPurgeTickets.Enabled = true;
         }
     }
 
@@ -1141,13 +1174,13 @@ class MainForm : Form
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
-            (identityTask, "Domain Membership & Identity", () => identityTask.Result),
-            (dcTask, "DC Discovery & Connectivity", () => dcTask.Result),
-            (dnsTask, "DNS for Active Directory", () => dnsTask.Result),
-            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.Result),
-            (gpTask, "Group Policy", () => gpTask.Result),
-            (trustTask, "Trust Relationships", () => trustTask.Result),
-            (kerbTask, "Kerberos & Time Sync", () => kerbTask.Result),
+            (identityTask, "Domain Membership & Identity", () => identityTask.GetAwaiter().GetResult()),
+            (dcTask, "DC Discovery & Connectivity", () => dcTask.GetAwaiter().GetResult()),
+            (dnsTask, "DNS for Active Directory", () => dnsTask.GetAwaiter().GetResult()),
+            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.GetAwaiter().GetResult()),
+            (gpTask, "Group Policy", () => gpTask.GetAwaiter().GetResult()),
+            (trustTask, "Trust Relationships", () => trustTask.GetAwaiter().GetResult()),
+            (kerbTask, "Kerberos & Time Sync", () => kerbTask.GetAwaiter().GetResult()),
         };
 
         while (pending.Count > 0)
@@ -1187,7 +1220,11 @@ class MainForm : Form
 
     void RebuildHistoryBar()
     {
+        // Deferred: this can run from one of these buttons' own Click handler
+        var old = _historyPanel.Controls.Cast<Control>().ToArray();
         _historyPanel.Controls.Clear();
+        if (old.Length > 0 && IsHandleCreated)
+            BeginInvoke(() => { foreach (var c in old) c.Dispose(); });
         if (_runHistory.Count == 0)
         {
             _historyPanel.Visible = false;
@@ -1195,7 +1232,7 @@ class MainForm : Form
         }
 
         int x = 10;
-        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = new Font("Segoe UI", 8f), AutoSize = true, Location = new Point(x, 6) };
+        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, 6) };
         _historyPanel.Controls.Add(lblRuns);
         x += lblRuns.PreferredWidth + 4;
 
@@ -1210,7 +1247,7 @@ class MainForm : Form
             var btn = new Button
             {
                 Text = label, FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 7.5f, selected ? FontStyle.Bold : FontStyle.Regular),
+                Font = selected ? HistoryFontBold : HistoryFont,
                 BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
                 ForeColor = selected ? Color.Black : (isPending ? WarnColor : DimColor),
                 Size = new Size(isPending ? 72 : 62, 20), Location = new Point(x, 4), Cursor = Cursors.Hand,
@@ -1224,7 +1261,7 @@ class MainForm : Form
         var del = new Button
         {
             Text = "Delete Run", FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 7.5f),
+            Font = HistoryFont,
             BackColor = SurfaceColor, ForeColor = FailColor,
             Size = new Size(70, 20), Cursor = Cursors.Hand,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
@@ -1411,21 +1448,15 @@ class MainForm : Form
         try
         {
             string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000);
-            bool ok = scVerify.Contains("ERROR_SUCCESS", StringComparison.OrdinalIgnoreCase)
-                   || scVerify.Contains("The command completed successfully", StringComparison.OrdinalIgnoreCase);
-            bool accessDenied = scVerify.Contains("ACCESS_DENIED", StringComparison.OrdinalIgnoreCase)
-                             || scVerify.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
-            var trustMatch = Regex.Match(scVerify, @"Trust Verification Status\s*=\s*(.+)", RegexOptions.IgnoreCase);
-            if (accessDenied)
+            var sc = Parsers.ParseScVerify(scVerify);
+            if (sc.AccessDenied)
                 tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
             else
-                tests.Add(new("Secure Channel",
-                    ok ? Status.Pass : Status.Fail,
-                    trustMatch.Success ? trustMatch.Groups[1].Value.Trim() : (ok ? "Verified" : scVerify.Trim())));
+                tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         try
@@ -1441,7 +1472,7 @@ class MainForm : Form
         }
         catch (Exception ex)
         {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         try
@@ -1452,16 +1483,21 @@ class MainForm : Form
             {
                 tests.Add(new("Computer Password Age", Status.Skip, "Computer object not found in AD"));
             }
-            else if (DateTime.TryParse(dateStr, out var lastChanged))
+            else if (!DateTime.TryParse(dateStr, out var lastChanged))
+            {
+                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
+            }
+            else if (lastChanged.Year < 1700)
+            {
+                // pwdLastSet = 0 converts to 1601-01-01
+                tests.Add(new("Computer Password Age", Status.Warn, "pwdLastSet is 0 — the computer account password was reset or never set"));
+            }
+            else
             {
                 var age = DateTime.Now - lastChanged;
                 tests.Add(new("Computer Password Age",
                     age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
                     $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "")));
-            }
-            else
-            {
-                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
             }
         }
         catch (Exception ex)
@@ -1598,9 +1634,9 @@ class MainForm : Form
             return new(testName, required ? Status.Fail : Status.Warn,
                 $"No {record} record" + (required ? "" : " (optional)"));
         }
-        catch
+        catch (Exception ex)
         {
-            return new(testName, Status.Warn, "nslookup not available");
+            return new(testName, Status.Warn, $"nslookup failed: {ex.Message}");
         }
     }
 
@@ -1708,7 +1744,7 @@ class MainForm : Form
         {
             string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
             string? trustError = Parsers.NltestError(trusts);
-            var lines = Parsers.ParseTrusts(trusts);
+            var lines = Parsers.ParseTrusts(trusts, GetOwnDomainNames());
 
             if (trustError != null)
                 tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError}"));
@@ -1719,7 +1755,7 @@ class MainForm : Form
         }
         catch (Exception ex)
         {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         return new("Trust Relationships", tests);
@@ -1732,7 +1768,7 @@ class MainForm : Form
 
         try
         {
-            string klist = RunProcess("klist", "");
+            string klist = RunProcess("klist", "", timeoutMs: 5000);
             var tgtPattern = new Regex($@"krbtgt/{Regex.Escape(realm)}\s*@\s*{Regex.Escape(realm)}", RegexOptions.IgnoreCase);
             tests.Add(new("TGT Present",
                 tgtPattern.IsMatch(klist) ? Status.Pass : Status.Fail,
@@ -1756,12 +1792,13 @@ class MainForm : Form
             else
                 tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
         }
-        catch { tests.Add(new("Clock Skew", Status.Warn, "w32tm not available")); }
+        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
 
         try
         {
-            string w32status = RunProcess("w32tm", "/query /status", timeoutMs: 5000);
-            string source = Parsers.ParseTimeSource(w32status) ?? "unknown";
+            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000);
+            if (Parsers.ParseTimeSource(w32source) is not { } source)
+                throw new InvalidOperationException(w32source.Trim());
             bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, Dns.GetHostAddresses);
             tests.Add(new("Time Source",
                 fromDomain ? Status.Pass : Status.Warn,
@@ -1769,7 +1806,7 @@ class MainForm : Form
         }
         catch (Exception ex)
         {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm not available: {ex.Message}"));
+            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
         }
 
         return new("Kerberos & Time Sync", tests);
@@ -1777,6 +1814,63 @@ class MainForm : Form
 
     // ── Helpers ─────────────────────────────────────────────
 
+    // Console tools write redirected output in the OEM code page (e.g. 437, 850), not UTF-8;
+    // decoding it as UTF-8 garbles any non-ASCII GPO, site or user name.
+    static readonly Encoding ConsoleEncoding = GetConsoleEncoding();
+
+    static Encoding GetConsoleEncoding()
+    {
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding((int)GetOEMCP());
+        }
+        catch { return Encoding.UTF8; }
+    }
+
+    [DllImport("kernel32.dll")]
+    static extern uint GetOEMCP();
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetGetJoinInformation(string? server, out IntPtr nameBuffer, out int joinStatus);
+
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buffer);
+
+    /// <summary>This machine's own domain: its NetBIOS name (from the join state) and its primary DNS suffix.</summary>
+    static string?[] GetOwnDomainNames()
+    {
+        string? netbios = null;
+        try
+        {
+            const int NetSetupDomainName = 3;
+            if (NetGetJoinInformation(null, out var buffer, out int status) == 0)
+            {
+                try { if (status == NetSetupDomainName) netbios = Marshal.PtrToStringUni(buffer); }
+                finally { NetApiBufferFree(buffer); }
+            }
+        }
+        catch { }
+
+        string? dns = null;
+        try { dns = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().DomainName; }
+        catch { }
+
+        return [netbios, dns];
+    }
+
+    // External tools still running; killed on exit so none outlive the app
+    static readonly ConcurrentDictionary<Process, byte> RunningProcesses = new();
+
+    static void KillRunningProcesses()
+    {
+        foreach (var proc in RunningProcesses.Keys)
+        {
+            try { proc.Kill(true); } catch { }
+        }
+    }
+
+    /// <summary>Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on timeout.</summary>
     static string RunProcess(string fileName, string arguments, int timeoutMs = 15000)
     {
         var psi = new ProcessStartInfo
@@ -1784,22 +1878,34 @@ class MainForm : Form
             FileName = fileName, Arguments = arguments,
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
+            // Closed immediately, so a tool that prompts (e.g. gpupdate's "OK to log off? (Y/N)") reads EOF instead of waiting
+            RedirectStandardInput = true,
+            StandardOutputEncoding = ConsoleEncoding,
+            StandardErrorEncoding = ConsoleEncoding,
         };
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        if (!proc.WaitForExit(timeoutMs))
+        RunningProcesses.TryAdd(proc, 0);
+        try
         {
-            try { proc.Kill(true); } catch { }
+            proc.StandardInput.Close();
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(timeoutMs))
+            {
+                try { proc.Kill(true); } catch { }
+                throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
+            }
+            string stdout = stdoutTask.GetAwaiter().GetResult();
+            string stderr = stderrTask.GetAwaiter().GetResult();
+            if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
+                return stderr;
+            return stdout;
         }
-        string stdout = stdoutTask.GetAwaiter().GetResult();
-        string stderr = stderrTask.GetAwaiter().GetResult();
-        if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
-            return stderr;
-        return stdout;
+        finally
+        {
+            RunningProcesses.TryRemove(proc, out _);
+        }
     }
 
     static bool TryTcpConnect(IPAddress? ip, string host, int port, int timeoutMs = 3000)

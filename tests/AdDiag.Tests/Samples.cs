@@ -197,15 +197,74 @@ static class Samples
         10:20:00, error: 0x800705B4
         """;
 
-    public const string W32tmStatus = """
-        Leap Indicator: 0(no warning)
-        Stratum: 4 (secondary reference - syncd by (S)NTP)
-        Precision: -23 (119.209ns per tick)
-        Root Delay: 0.0312500s
-        Root Dispersion: 7.8134000s
-        ReferenceId: 0x0A00000A (source IP:  10.0.0.10)
-        Last Successful Sync Time: 7/16/2026 9:58:40 AM
-        Source: DC01.contoso.com
-        Poll Interval: 10 (1024s)
+    // w32tm /query /source prints only the value
+    public const string W32tmSource = "DC01.contoso.com\r\n";
+    public const string W32tmSourceError = "The following error occurred: The service has not been started. (0x80070426)\r\n";
+
+    // Stripchart on a comma-decimal system
+    public const string W32tmStripchartComma = """
+        Tracking DC01.contoso.com [10.0.0.10:123].
+        Collecting 1 samples.
+        The current time is 16.07.2026 10:20:00.
+        10:20:00, +00,0206779s
+        """;
+
+    public const string NltestScVerify = """
+        Flags: b0 HAS_IP  HAS_TIMESERV
+        Trusted DC Name \\DC01.contoso.com
+        Trusted DC Connection Status Status = 0 0x0 NERR_Success
+        Trust Verification Status = 0 0x0 NERR_Success
+        The command completed successfully
+        """;
+
+    // A broken trust: nltest still says the command completed successfully
+    public const string NltestScVerifyBroken = """
+        Flags: 0
+        Trusted DC Name
+        Trusted DC Connection Status Status = 1311 0x51f ERROR_NO_LOGON_SERVERS
+        Trust Verification Status = 1311 0x51f ERROR_NO_LOGON_SERVERS
+        The command completed successfully
+        """;
+
+    public const string NltestScVerifyAccessDenied = """
+        I_NetLogonControl failed: Status = 5 0x5 ERROR_ACCESS_DENIED
+        """;
+
+    // ── Translated output (German-style; labels differ, structure and codes don't) ──
+
+    public const string NltestScVerifyGerman = """
+        Flags: b0 HAS_IP  HAS_TIMESERV
+        Name des vertrauenswürdigen DCs \\DC01.contoso.com
+        Verbindungsstatus des vertrauenswürdigen DCs Status = 0 0x0 NERR_Success
+        Status der Vertrauensüberprüfung = 0 0x0 NERR_Success
+        Der Befehl wurde erfolgreich ausgeführt.
+        """;
+
+    public const string NltestScVerifyBrokenGerman = """
+        Flags: 0
+        Name des vertrauenswürdigen DCs
+        Verbindungsstatus des vertrauenswürdigen DCs Status = 1311 0x51f ERROR_NO_LOGON_SERVERS
+        Status der Vertrauensüberprüfung = 1311 0x51f ERROR_NO_LOGON_SERVERS
+        Der Befehl wurde erfolgreich ausgeführt.
+        """;
+
+    public const string NltestDsGetSiteGerman = """
+        Zürich-HQ
+        Der Befehl wurde erfolgreich ausgeführt.
+        """;
+
+    public const string NltestDsGetDcGerman = """
+                   DC: \\DC01.contoso.com
+              Adresse: \\10.0.0.10
+            Domänen-GUID: 2b6e4c1a-0000-4000-8000-000000000001
+         Domänenname: contoso.com
+        Der Befehl wurde erfolgreich ausgeführt.
+        """;
+
+    public const string NltestTrustsGerman = """
+        Liste der Domänenvertrauensstellungen:
+            0: CHILD child.contoso.com (NT 5) (Gesamtstruktur: 1) (Direkt ausgehend) (Direkt eingehend)
+            1: CONTOSO contoso.com (NT 5) (Gesamtstruktur-Stamm) (Primärdomäne) (Systemeigen)
+        Der Befehl wurde erfolgreich ausgeführt.
         """;
 }

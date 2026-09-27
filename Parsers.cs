@@ -12,56 +12,101 @@ namespace AdDiag;
 // WinForms dependency so they can be unit tested on any platform (see tests/AdDiag.Tests).
 static class Parsers
 {
-    static readonly Regex NltestErrorPattern = new(@"Status\s*=\s*\d+\s+(0x[0-9a-f]+)\s*(\S*)", RegexOptions.IgnoreCase);
+    // Tool output is translated on non-English Windows, so parsers anchor on structure, numbers
+    // and symbolic codes (e.g. "Status = 1311 0x51f ERROR_NO_LOGON_SERVERS"), never on English labels.
 
-    /// <summary>The error name (or hex status) if nltest reported a failure, e.g. "ERROR_NO_SITENAME"; otherwise null.</summary>
-    public static string? NltestError(string output)
+    static readonly Regex NltestStatusPattern = new(@"Status\s*=\s*(\d+)\s+(0x[0-9a-f]+)\s*([A-Z][A-Z0-9_]*)?", RegexOptions.IgnoreCase);
+    static readonly Regex UncNamePattern = new(@"\\\\([^\s\\]+)");
+
+    record NltestStatus(int Code, string Hex, string Name)
     {
-        var m = NltestErrorPattern.Match(output);
-        if (!m.Success) return null;
-        return m.Groups[2].Value.Length > 0 ? m.Groups[2].Value : m.Groups[1].Value;
+        public string Label => Name.Length > 0 ? Name : Hex;
     }
 
-    /// <summary>Site name from <c>nltest /dsgetsite</c>, or null if none was returned.</summary>
+    static List<NltestStatus> NltestStatuses(string output) =>
+        NltestStatusPattern.Matches(output)
+            .Select(m => new NltestStatus(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), m.Groups[2].Value, m.Groups[3].Value))
+            .ToList();
+
+    /// <summary>The first failure nltest reported, e.g. "ERROR_NO_SITENAME" (or the hex status if unnamed); null if none.</summary>
+    public static string? NltestError(string output) =>
+        NltestStatuses(output).FirstOrDefault(s => s.Code != 0)?.Label;
+
+    /// <summary>
+    /// Result of <c>nltest /sc_verify</c>. nltest reports success for the command itself even when
+    /// verification failed, so the verdict comes only from the "Status = N" codes, all of which must be 0.
+    /// </summary>
+    public static ScVerifyResult ParseScVerify(string output)
+    {
+        var statuses = NltestStatuses(output);
+        if (statuses.Count == 0)
+            return new(false, false, string.IsNullOrWhiteSpace(output) ? "No output from nltest" : output.Trim());
+
+        var failure = statuses.FirstOrDefault(s => s.Code != 0);
+        if (failure != null)
+            return new(false, failure.Code == 5, $"{failure.Code} {failure.Hex} {failure.Name}".Trim()); // 5 = ERROR_ACCESS_DENIED
+
+        var dc = UncNamePattern.Match(output);
+        return new(true, false, dc.Success ? $"Verified with {dc.Groups[1].Value}" : "Verified");
+    }
+
+    /// <summary>Site name from <c>nltest /dsgetsite</c> (its first line), or null if none was returned.</summary>
     public static string? ParseSite(string output)
     {
         // On failure nltest prints e.g. "Getting DC Site failed: Status = 1919 0x77f ERROR_NO_SITENAME"
         if (NltestError(output) != null) return null;
-        string? site = output.Trim().Split('\n')
-            .FirstOrDefault(l => !l.Contains("command completed", StringComparison.OrdinalIgnoreCase))?.Trim();
+        string? site = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
         return string.IsNullOrEmpty(site) ? null : site;
     }
 
-    /// <summary>DC hostname from <c>nltest /dsgetdc</c>, or null if none was located.</summary>
+    /// <summary>DC hostname from <c>nltest /dsgetdc</c> (the first \\name, ahead of the \\address), or null if none was located.</summary>
     public static string? ParseDcLocator(string output)
     {
-        var m = Regex.Match(output, @"DC:\s*\\\\(\S+)", RegexOptions.IgnoreCase);
+        if (NltestError(output) != null) return null;
+        var m = UncNamePattern.Match(output);
         return m.Success ? m.Groups[1].Value : null;
     }
 
     /// <summary>
-    /// Trusts from <c>nltest /domain_trusts</c>, excluding the machine's own (primary) domain.
-    /// Entries look like "0: CONTOSO contoso.com (NT 5) (Forest Tree Root) (Primary Domain) (Native)".
+    /// Trusts from <c>nltest /domain_trusts</c>, excluding the machine's own domain. Entries look like
+    /// "0: CONTOSO contoso.com (NT 5) (Forest Tree Root) (Primary Domain) (Native)"; the primary domain is
+    /// recognised by matching its NetBIOS or DNS name against <paramref name="ownDomainNames"/>.
     /// </summary>
-    public static List<string> ParseTrusts(string output) =>
-        output.Split('\n')
-            .Select(l => l.Trim())
-            .Where(l => Regex.IsMatch(l, @"^\d+:\s+\S") && !l.Contains("(Primary Domain)", StringComparison.OrdinalIgnoreCase))
-            .Select(l => Regex.Replace(l, @"^\d+:\s+", ""))
-            .ToList();
-
-    /// <summary>Absolute offset in seconds from <c>w32tm /stripchart /dataonly</c>, e.g. "10:21:47, +00.0206779s".</summary>
-    public static double? ParseStripchartSkew(string output)
+    public static List<string> ParseTrusts(string output, IEnumerable<string?> ownDomainNames)
     {
-        var m = Regex.Match(output, @"([+-]?\d+\.\d+)s");
-        return m.Success ? Math.Abs(double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture)) : null;
+        var own = new HashSet<string>(ownDomainNames.Where(n => !string.IsNullOrWhiteSpace(n))!, StringComparer.OrdinalIgnoreCase);
+        var trusts = new List<string>();
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var m = Regex.Match(rawLine.Trim(), @"^\d+:\s+(\S+)(?:\s+([^\s(]\S*))?(.*)$");
+            if (!m.Success) continue;
+            if (own.Contains(m.Groups[1].Value) || (m.Groups[2].Success && own.Contains(m.Groups[2].Value))
+                || m.Groups[3].Value.Contains("(Primary Domain)", StringComparison.OrdinalIgnoreCase)) // English-only fallback
+                continue;
+            trusts.Add(Regex.Replace(rawLine.Trim(), @"^\d+:\s+", ""));
+        }
+        return trusts;
     }
 
-    /// <summary>The "Source:" value from <c>w32tm /query /status</c>, or null if absent.</summary>
+    /// <summary>
+    /// Absolute offset in seconds from <c>w32tm /stripchart /dataonly</c>, e.g. "10:21:47, +00.0206779s".
+    /// Accepts "," as the decimal separator too.
+    /// </summary>
+    public static double? ParseStripchartSkew(string output)
+    {
+        var m = Regex.Match(output, @"([+-]?\d+[.,]\d+)s\b");
+        return m.Success ? Math.Abs(double.Parse(m.Groups[1].Value.Replace(',', '.'), CultureInfo.InvariantCulture)) : null;
+    }
+
+    /// <summary>
+    /// The source from <c>w32tm /query /source</c>, which prints just the value (no label to translate).
+    /// Null if w32tm failed, which it reports with an HRESULT such as "(0x80070426)".
+    /// </summary>
     public static string? ParseTimeSource(string output)
     {
-        var m = Regex.Match(output, @"Source:\s*(.+)", RegexOptions.IgnoreCase);
-        return m.Success ? m.Groups[1].Value.Trim() : null;
+        if (Regex.IsMatch(output, @"0x8[0-9a-f]{7}", RegexOptions.IgnoreCase)) return null;
+        string? source = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+        return string.IsNullOrEmpty(source) ? null : source;
     }
 
     /// <summary>
@@ -219,6 +264,7 @@ static class Parsers
     }
 }
 
+record ScVerifyResult(bool Ok, bool AccessDenied, string Detail);
 record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);
 record KlistOutput(List<string> Headers, List<KlistTicket> Tickets);
