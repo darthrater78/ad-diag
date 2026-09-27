@@ -6,95 +6,24 @@ static class Samples
 {
     public static string Crlf(string s) => s.Replace("\r\n", "\n").Replace("\n", "\r\n");
 
-    public const string GpResult = """
-
-        Microsoft (R) Windows (R) Operating System Group Policy Result tool v2.0
-        © Microsoft Corporation. All rights reserved.
-
-        Created on 7/16/2026 at 10:15:02 AM
-
-
-        RSOP data for CONTOSO\alice on PC01 : Logging Mode
-        ---------------------------------------------------
-
-        OS Configuration:            Member Workstation
-        OS Version:                  10.0.22631
-        Site Name:                   HQ
-        Roaming Profile:             N/A
-        Local Profile:               C:\Users\alice
-        Connected over a slow link?: No
-
-
-        COMPUTER SETTINGS
-        ------------------
-            CN=PC01,OU=Workstations,DC=contoso,DC=com
-            Last time Group Policy was applied: 7/16/2026 at 9:58:41 AM
-            Group Policy was applied from:      DC01.contoso.com
-            Group Policy slow link threshold:   500 kbps
-            Domain Name:                        CONTOSO
-            Domain Type:                        Windows 2008 or later
-
-            Applied Group Policy Objects
-            -----------------------------
-                Workstation Baseline
-                Default Domain Policy
-
-            The following GPOs were not applied because they were filtered out
-            -------------------------------------------------------------------
-                Local Group Policy
-                    Filtering:  Not Applied (Empty)
-
-                Server Hardening
-                    Filtering:  Denied (Security)
-
-            The computer is a part of the following security groups
-            -------------------------------------------------------
-                BUILTIN\Administrators
-                Everyone
-
-
-        USER SETTINGS
-        --------------
-            CN=Alice,OU=Users,DC=contoso,DC=com
-            Last time Group Policy was applied: 7/16/2026 at 10:01:12 AM
-            Group Policy was applied from:      DC01.contoso.com
-            Group Policy slow link threshold:   500 kbps
-            Domain Name:                        CONTOSO
-            Domain Type:                        Windows 2008 or later
-
-            Applied Group Policy Objects
-            -----------------------------
-                Drive Mappings
-
-            The following GPOs were not applied because they were filtered out
-            -------------------------------------------------------------------
-                Local Group Policy
-                    Filtering:  Not Applied (Empty)
-
-            The user is a part of the following security groups
-            ---------------------------------------------------
-                Domain Users
-                Everyone
+    // RsopScript output (MainForm.cs): the app's own format, so identical in every display language
+    public const string Rsop = """
+        SCOPE|Computer|OK|2026-07-16T09:58:41.0000000Z|HQ
+        GPO|Computer|LocalGPO|0|1|1|0|1|Local Group Policy
+        GPO|Computer|cn={31B2F340-016D-11D2-945F-00C04FB984F9},cn=policies,cn=system,DC=contoso,DC=com|1|1|1|0|1|Default Domain Policy
+        GPO|Computer|cn={6AC1786C-016F-11D2-945F-00C04FB984F9},cn=policies,cn=system,DC=contoso,DC=com|2|1|1|0|1|Workstation Baseline
+        GPO|Computer|cn={31B2F340-016D-11D2-945F-00C04FB984F9},cn=policies,cn=system,DC=contoso,DC=com|0|0|1|0|1|Default Domain Policy
+        GPO|Computer|cn={A1111111-0000-0000-0000-000000000001},cn=policies,cn=system,DC=contoso,DC=com|0|1|1|1|1|Server Hardening
+        GPO|Computer|cn={A1111111-0000-0000-0000-000000000002},cn=policies,cn=system,DC=contoso,DC=com|0|1|1|0|0|Kiosk Lockdown
+        GPO|Computer|cn={A1111111-0000-0000-0000-000000000003},cn=policies,cn=system,DC=contoso,DC=com|0|0|1|0|1|Old Printers
+        SCOPE|User|OK|2026-07-16T10:01:12.0000000Z|HQ
+        GPO|User|cn={B2222222-0000-0000-0000-000000000001},cn=policies,cn=system,DC=contoso,DC=com|1|1|1|0|1|Laufwerke & Drucker | Zürich
         """;
 
-    // Non-elevated gpresult: user scope only, with nothing applied
-    public const string GpResultUserOnly = """
-        RSOP data for CONTOSO\alice on PC01 : Logging Mode
-        ---------------------------------------------------
-
-        Site Name:                   HQ
-
-        USER SETTINGS
-        --------------
-            Last time Group Policy was applied: 7/16/2026 at 10:01:12 AM
-
-            Applied Group Policy Objects
-            -----------------------------
-                N/A
-
-            The user is a part of the following security groups
-            ---------------------------------------------------
-                Domain Users
+    // Not elevated: no access to the computer namespace; user scope with no State key, site or links
+    public const string RsopNotElevated = """
+        SCOPE|Computer|DENIED
+        SCOPE|User|OK||
         """;
 
     public const string Klist = """
@@ -124,6 +53,37 @@ static class Samples
         	Session Key Type: RSADSI RC4-HMAC(NT)
         	Cache Flags: 0
         	Kdc Called: DC01.contoso.com
+        """;
+
+    // Representative German klist: translated labels, and the flags line has no colon
+    public const string KlistGerman = """
+
+        Aktuelle Anmelde-ID ist 0:0x3e7a1
+
+        Zwischengespeicherte Tickets: (1)
+
+        #0>	Client: alice @ CONTOSO.COM
+        	Server: krbtgt/CONTOSO.COM @ CONTOSO.COM
+        	KerbTicket (Verschlüsselungstyp): AES-256-CTS-HMAC-SHA1-96
+        	Ticketkennzeichen 0x40e10000 -> forwardable renewable initial pre_authent name_canonicalize
+        	Startzeit: 16.07.2026 9:58:40 (lokal)
+        	Endzeit:   16.07.2026 19:58:40 (lokal)
+        	Erneuerungszeit: 23.07.2026 9:58:40 (lokal)
+        	Sitzungsschlüsseltyp: AES-256-CTS-HMAC-SHA1-96
+        	Cacheflags: 0x1 -> PRIMARY
+        	Aufgerufenes KDC: DC01.contoso.com
+        """;
+
+    // Older Windows (7 / 2008 R2) klist: no Cache Flags or Kdc Called
+    public const string KlistNoCacheFlags = """
+        #0>	Client: alice @ CONTOSO.COM
+        	Server: krbtgt/CONTOSO.COM @ CONTOSO.COM
+        	KerbTicket Encryption Type: AES-256-CTS-HMAC-SHA1-96
+        	Ticket Flags 0x40e10000 -> forwardable renewable initial pre_authent name_canonicalize
+        	Start Time: 7/16/2026 9:58:40 (local)
+        	End Time:   7/16/2026 19:58:40 (local)
+        	Renew Time: 7/23/2026 9:58:40 (local)
+        	Session Key Type: AES-256-CTS-HMAC-SHA1-96
         """;
 
     public const string KlistEmpty = """
