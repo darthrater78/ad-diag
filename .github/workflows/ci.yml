@@ -33,3 +33,12 @@ jobs:
 
       - name: Publish (single-file smoke test)
         run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish
+
+      # The exe itself (not zipped), for testing a branch on a domain-joined machine before release
+      - name: Upload exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: publish/ad-diag.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

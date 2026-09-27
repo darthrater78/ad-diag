@@ -202,7 +202,7 @@ The tests use representative tool output (mostly English, with some German) in `
 
 ## Releasing
 
-Push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow takes the version from the tag, so the in-app badge and file version always match it; `<Version>` in `AdDiag.csproj` only sets the version for local builds. CI builds every push to `main` and every pull request.
+Push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow takes the version from the tag, so the in-app badge and file version always match it; `<Version>` in `AdDiag.csproj` only sets the version for local builds. CI builds every push to `main` and every pull request, and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`.
 
 ## Version History
 
