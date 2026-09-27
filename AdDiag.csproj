@@ -19,7 +19,8 @@
     <Version>1.1.0</Version>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Test project lives under tests/ and is built separately -->
+    <!-- Test project lives under tests/ and the screenshot harness under tools/; both are built separately -->
     <Compile Remove="tests/**" />
+    <Compile Remove="tools/**" />
   </ItemGroup>
 </Project>

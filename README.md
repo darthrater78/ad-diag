@@ -4,6 +4,8 @@ Standalone Windows diagnostic tool that checks the health of a domain-joined mac
 
 [GitHub](https://github.com/darthrater78/ad-diag) · [v1.1.0 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v1.1.0)
 
+![Results tab showing a completed diagnostic run](docs/screenshots/results.png)
+
 ## Download
 
 Grab `ad-diag-vX.Y.Z-win-x64.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.
@@ -121,6 +123,8 @@ Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same 
 
 ## Group Policy Tab
 
+![Group Policy tab with Computer and User scope breakdown](docs/screenshots/group-policy.png)
+
 A dedicated tab (separate from the streaming diagnostics above) that reads the Resultant Set of Policy (see above) into a readable, color-coded breakdown:
 
 - **Computer and User scope**, each showing:
@@ -132,6 +136,8 @@ A dedicated tab (separate from the streaming diagnostics above) that reads the R
 - **Run gpupdate** — runs `gpupdate` (or `gpupdate /force` with the **Force** checkbox) directly from the app, with a confirmation dialog explaining the impact of Force (reapplies all policies, not just changed ones; can briefly disrupt mapped drives/printers; may require a restart for some extensions). Automatically refreshes the tab afterward.
 
 ## Kerberos Tickets Tab
+
+![Kerberos Tickets tab showing cached tickets with service badges](docs/screenshots/kerberos-tickets.png)
 
 A dedicated tab that parses `klist` and renders every cached Kerberos ticket with color-coded service type badges:
 
@@ -203,6 +209,8 @@ dotnet test tests/AdDiag.Tests
 ```
 
 The tests use representative tool output (mostly English, with some German) in `tests/AdDiag.Tests/Samples.cs`. When a parser misreads real output, add that output as a sample and a test.
+
+The README screenshots are generated from mock data by `tools/screenshots/run.sh` (Linux, under Wine). See [tools/screenshots/README.md](tools/screenshots/README.md).
 
 ## Releasing
 
