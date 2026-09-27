@@ -4,7 +4,19 @@ Standalone Windows diagnostic tool that checks the health of a domain-joined mac
 
 ## Download
 
-Grab `ad-diag.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.
+Grab `ad-diag-vX.Y.Z-win-x64.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.
+
+### Verifying a download
+
+Each release includes a `.sha256` checksum file and a signed [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) proving the exe was built by this repository's release workflow from the tagged source.
+
+```powershell
+# Checksum — compare against the .sha256 file from the release
+Get-FileHash -Algorithm SHA256 .\ad-diag-vX.Y.Z-win-x64.exe
+
+# Provenance (requires the GitHub CLI)
+gh attestation verify .\ad-diag-vX.Y.Z-win-x64.exe --repo darthrater78/ad-diag
+```
 
 ## Windows SmartScreen
 
@@ -175,6 +187,10 @@ dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
 Output: `bin/Release/net8.0-windows/win-x64/publish/ad-diag.exe`
+
+## Releasing
+
+Push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow takes the version from the tag, so the in-app badge and file version always match it; `<Version>` in `AdDiag.csproj` only sets the version for local builds. CI builds every push to `main` and every pull request.
 
 ## Version History
 
