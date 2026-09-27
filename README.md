@@ -4,7 +4,19 @@ Standalone Windows diagnostic tool that checks the health of a domain-joined mac
 
 ## Download
 
-Grab `ad-diag.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.
+Grab `ad-diag-vX.Y.Z-win-x64.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.
+
+### Verifying a download
+
+Each release includes a `.sha256` checksum file and a signed [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) proving the exe was built by this repository's release workflow from the tagged source.
+
+```powershell
+# Checksum — compare against the .sha256 file from the release
+Get-FileHash -Algorithm SHA256 .\ad-diag-vX.Y.Z-win-x64.exe
+
+# Provenance (requires the GitHub CLI)
+gh attestation verify .\ad-diag-vX.Y.Z-win-x64.exe --repo darthrater78/ad-diag
+```
 
 ## Windows SmartScreen
 
@@ -37,10 +49,10 @@ This tool is **read-only and diagnostic**. It does not store, transmit, or log a
 
 ### Process isolation
 
-- **Single instance enforced.** A global mutex prevents multiple instances from running simultaneously.
-- **Background tasks are cancelled on exit.** All async diagnostic work is cancelled via `CancellationToken` on form close, and `Environment.Exit(0)` is called on `FormClosed` as a backstop to ensure the process cannot linger.
+- **Single instance enforced.** A per-session mutex prevents multiple instances from running simultaneously in the same logon session (other users on a shared host can run their own).
+- **Nothing outlives the app.** On close, the in-flight diagnostic run is cancelled, any external tool still running (and its child processes) is killed, and `Environment.Exit(0)` ensures the process cannot linger.
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
-- **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout.
+- **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
 
 ## Test Groups
 
@@ -133,11 +145,13 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 ## Architecture
 
-**Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun AOT).
+**Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** Single-file app (`MainForm.cs`). All UI and diagnostics in one compilation unit.
+**Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`gpresult`, `klist`, `nltest`, `w32tm`), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Dark theme. Test groups stream results in real-time as each completes.
+
+**Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. The exceptions are the Group Policy checks and tab (`gpresult /r` has no language-neutral output that doesn't require writing a file) and the Kerberos Tickets tab's field labels, which currently need English Windows.
 
 **Input Validation:**
 - `HostnamePattern`: `^[a-zA-Z0-9.\-]+$` — domain and DC fields
@@ -148,21 +162,21 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 | Process | Purpose | Timeout |
 |---|---|---|
-| `dsregcmd /status` | Domain join state | 15s |
+| `dsregcmd /status` | Domain join state (and startup domain auto-detect) | 15s (5s at startup) |
 | `nltest /sc_verify` | Secure channel verification | 10s |
 | `nltest /dsgetsite` | AD site assignment | 5s |
 | `nltest /dsgetdc` | DC locator | 8s |
 | `nltest /domain_trusts` | Trust enumeration | 8s |
 | `nslookup -type=SRV` | AD DNS SRV records | 5s |
-| `gpresult /r` | Group Policy status (diagnostics + tab) | 20s |
+| `gpresult /r` | Group Policy status (diagnostics + tab) | 20s (25s in tab) |
 | `gpupdate` / `gpupdate /force` | Manual policy refresh (Group Policy tab) | 90s |
 | `klist` | Kerberos ticket cache (diagnostics + tab) | 5s |
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
 | `w32tm /stripchart` | Clock skew measurement | 5s |
-| `w32tm /query /status` | Time source | 5s |
+| `w32tm /query /source` | Time source | 5s |
 | `powershell` ([adsisearcher]) | Computer password age from AD | 10s |
 
-All launched with `CreateNoWindow`, `UseShellExecute=false`, `RedirectStandardOutput`, async stdout read, killed on timeout.
+All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout.
 
 ## Build from Source
 
@@ -175,6 +189,18 @@ dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
 Output: `bin/Release/net8.0-windows/win-x64/publish/ad-diag.exe`
+
+Run the parser tests (works on Windows, Linux or macOS):
+
+```
+dotnet test tests/AdDiag.Tests
+```
+
+The tests use representative English-language tool output in `tests/AdDiag.Tests/Samples.cs`. When a parser misreads real output, add that output as a sample and a test.
+
+## Releasing
+
+Push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow takes the version from the tag, so the in-app badge and file version always match it; `<Version>` in `AdDiag.csproj` only sets the version for local builds. CI builds every push to `main` and every pull request.
 
 ## Version History
 

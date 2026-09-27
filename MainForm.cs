@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -9,6 +10,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -25,7 +27,7 @@ static class Program
     [STAThread]
     static void Main()
     {
-        using var mutex = new Mutex(true, "Global\\AdDiag_SingleInstance", out bool isNew);
+        using var mutex = new Mutex(true, "Local\\AdDiag_SingleInstance", out bool isNew);
         if (!isNew)
         {
             MessageBox.Show("AD Diagnostics is already running.", "AD Diag",
@@ -65,6 +67,11 @@ class MainForm : Form
     static readonly SolidBrush AccentBrush = new(AccentColor);
     static readonly Font TabFontActive = new("Segoe UI", 8.5f, FontStyle.Bold);
     static readonly Font TabFontInactive = new("Segoe UI", 8.5f);
+    static readonly Font GpBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font TicketsBoldFont = new("Cascadia Code", 9f, FontStyle.Bold);
+    static readonly Font HistoryLabelFont = new("Segoe UI", 8f);
+    static readonly Font HistoryFont = new("Segoe UI", 7.5f);
+    static readonly Font HistoryFontBold = new("Segoe UI", 7.5f, FontStyle.Bold);
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
@@ -76,7 +83,7 @@ class MainForm : Form
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
     bool _gpRunning;
     bool _showingExplainer;
-    List<TestGroup>? _lastResults;
+    bool _ticketsRunning;
     List<TestGroup>? _renderedGroups;
     string? _placeholderText;
     readonly List<DiagRun> _runHistory = [];
@@ -320,7 +327,11 @@ class MainForm : Form
         {
             _runCts?.Cancel();
         };
-        FormClosed += (s, e) => Environment.Exit(0);
+        FormClosed += (s, e) =>
+        {
+            KillRunningProcesses();
+            Environment.Exit(0);
+        };
         _ = DetectDomainAsync();
     }
 
@@ -405,9 +416,9 @@ class MainForm : Form
     void BtnClear_Click(object? sender, EventArgs e)
     {
         _runCts?.Cancel();
+        _btnRun.Enabled = true; // a cancelled run returns early and never re-enables it
         _runHistory.Clear();
         _selectedRunIndex = -1;
-        _lastResults = null;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
         _resultsCanvas.Height = 200;
@@ -610,17 +621,19 @@ class MainForm : Form
         _gpBox.SelectionLength = 0;
         _gpBox.SelectionColor = color;
         _gpBox.SelectionBackColor = backColor ?? _gpBox.BackColor;
-        _gpBox.SelectionFont = bold ? new Font(_gpBox.Font, FontStyle.Bold) : _gpBox.Font;
+        _gpBox.SelectionFont = bold ? GpBoldFont : _gpBox.Font;
         _gpBox.AppendText(text);
     }
 
-    async void RefreshGpTab()
+    // keepExisting preserves text already in the box (e.g. gpupdate output) and renders below it
+    async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
         _gpRunning = true;
+        int keep = keepExisting ? _gpBox.TextLength : 0;
         try
         {
-            _gpBox.Clear();
+            ResetGpBox(keep);
             AppendGpLine("Loading Group Policy details...\n", DimColor);
 
             string raw;
@@ -630,13 +643,13 @@ class MainForm : Form
             }
             catch (Exception ex)
             {
-                _gpBox.Clear();
+                ResetGpBox(keep);
                 AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
                 return;
             }
 
-            _gpBox.Clear();
-            var scopes = ParseGpResult(raw);
+            ResetGpBox(keep);
+            var scopes = Parsers.ParseGpResult(raw);
             if (scopes.Count == 0)
             {
                 AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
@@ -657,6 +670,13 @@ class MainForm : Form
         }
     }
 
+    void ResetGpBox(int keepLength)
+    {
+        if (keepLength == 0) { _gpBox.Clear(); return; }
+        _gpBox.Select(keepLength, _gpBox.TextLength - keepLength);
+        _gpBox.SelectedText = "";
+    }
+
     void RenderGpScope(GpScope scope)
     {
         AppendGpLine($"  ══════════════════════════════════════\n", BorderColor);
@@ -666,9 +686,9 @@ class MainForm : Form
         if (!string.IsNullOrEmpty(scope.LastApplied))
         {
             AppendGpLine("  Last Applied: ", DimColor);
-            bool parsed = DateTime.TryParse(Regex.Replace(scope.LastApplied, @"\s+at\s+", " "), out var lastTime);
-            string ageText = parsed ? $"  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)" : "";
-            Color ageColor = parsed && (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
+            var lastTime = Parsers.ParseGpTime(scope.LastApplied);
+            string ageText = lastTime is { } t ? $"  ({FormatTimeSpan(DateTime.Now - t)} ago)" : "";
+            Color ageColor = lastTime is { } t2 && (DateTime.Now - t2).TotalDays >= 7 ? WarnColor : TextColor;
             AppendGpLine(scope.LastApplied + ageText + "\n", ageColor, bold: true);
         }
 
@@ -710,66 +730,6 @@ class MainForm : Form
         AppendGpLine("\n\n", BorderColor);
     }
 
-    static List<GpScope> ParseGpResult(string raw)
-    {
-        var scopes = new List<GpScope>();
-        var sectionPattern = new Regex(@"(COMPUTER SETTINGS|USER SETTINGS)\s*\r?\n-+\s*\r?\n([\s\S]*?)(?=\r?\nCOMPUTER SETTINGS|\r?\nUSER SETTINGS|\z)", RegexOptions.IgnoreCase);
-
-        foreach (Match sm in sectionPattern.Matches(raw))
-        {
-            string name = sm.Groups[1].Value.Equals("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase) ? "Computer" : "User";
-            string body = sm.Groups[2].Value;
-
-            var lastAppliedMatch = Regex.Match(body, @"Last time Group Policy was applied:\s*(.+)", RegexOptions.IgnoreCase);
-            var siteMatch = Regex.Match(body, @"^\s*Site Name:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-            var applied = new List<string>();
-            var appliedSection = Regex.Match(body, @"Applied Group Policy Objects\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*\r?\n|\r?\n\s*The following GPOs|\z)", RegexOptions.IgnoreCase);
-            if (appliedSection.Success)
-            {
-                foreach (var line in appliedSection.Groups[1].Value.Split('\n'))
-                {
-                    string t = line.Trim();
-                    if (t.Length > 0 && !t.Equals("N/A", StringComparison.OrdinalIgnoreCase)) applied.Add(t);
-                }
-            }
-
-            var denied = new List<(string, string)>();
-            var deniedSection = Regex.Match(body, @"The following GPOs were not applied because they were filtered out\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*The \w+ is a part of the following security groups|\r?\n\s*\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
-            if (deniedSection.Success)
-            {
-                string? currentName = null;
-                foreach (var rawLine in deniedSection.Groups[1].Value.Split('\n'))
-                {
-                    string line = rawLine.TrimEnd('\r');
-                    string trimmed = line.Trim();
-                    if (trimmed.Length == 0) continue;
-
-                    // Indented "Filtering: <reason>" lines describe the GPO just above them
-                    if (trimmed.StartsWith("Filtering:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string reason = trimmed["Filtering:".Length..].Trim();
-                        if (currentName != null)
-                            denied.Add((currentName, reason));
-                        currentName = null;
-                    }
-                    else
-                    {
-                        if (currentName != null) denied.Add((currentName, ""));
-                        currentName = trimmed;
-                    }
-                }
-                if (currentName != null) denied.Add((currentName, ""));
-            }
-
-            scopes.Add(new GpScope(name,
-                lastAppliedMatch.Success ? lastAppliedMatch.Groups[1].Value.Trim() : "",
-                siteMatch.Success ? siteMatch.Groups[1].Value.Trim() : "",
-                applied, denied));
-        }
-
-        return scopes;
-    }
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
@@ -792,7 +752,6 @@ class MainForm : Form
         {
             string output = await Task.Run(() => RunProcess("gpupdate", force ? "/force" : "", timeoutMs: 90000));
             AppendGpLine("\n" + output.Trim() + "\n\n", DimColor);
-            AppendGpLine("Refreshing details...\n", DimColor);
         }
         catch (Exception ex)
         {
@@ -804,7 +763,7 @@ class MainForm : Form
             _gpRunning = false;
         }
 
-        RefreshGpTab();
+        RefreshGpTab(keepExisting: true);
     }
 
     // ── Kerberos Tickets tab ──────────────────────────────────
@@ -815,80 +774,39 @@ class MainForm : Form
         _ticketsBox.SelectionLength = 0;
         _ticketsBox.SelectionColor = color;
         _ticketsBox.SelectionBackColor = backColor ?? _ticketsBox.BackColor;
-        _ticketsBox.SelectionFont = bold ? new Font(_ticketsBox.Font, FontStyle.Bold) : _ticketsBox.Font;
+        _ticketsBox.SelectionFont = bold ? TicketsBoldFont : _ticketsBox.Font;
         _ticketsBox.AppendText(text);
     }
 
-    void RefreshTickets()
+    async void RefreshTickets()
     {
+        if (_ticketsRunning) return;
+        _ticketsRunning = true;
+        _showingExplainer = false;
         _ticketsBox.Clear();
+        AppendTicketsLine("Loading tickets...\n", DimColor);
         string raw;
-        try { raw = RunProcess("klist", "", timeoutMs: 5000); }
-        catch (Exception ex) { AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor); return; }
+        try { raw = await Task.Run(() => RunProcess("klist", "", timeoutMs: 5000)); }
+        catch (Exception ex)
+        {
+            if (!_showingExplainer)
+            {
+                _ticketsBox.Clear();
+                AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor);
+            }
+            return;
+        }
+        finally { _ticketsRunning = false; }
 
-        if (string.IsNullOrWhiteSpace(raw) || raw.Contains("no credentials", StringComparison.OrdinalIgnoreCase))
+        if (_showingExplainer || IsDisposed) return; // user opened the explainer while klist ran
+        _ticketsBox.Clear();
+
+        var (headers, tickets) = Parsers.ParseKlist(raw);
+        if (headers.Count == 0 && tickets.Count == 0)
         {
             AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
             return;
         }
-
-        var lines = raw.Split('\n');
-        var headers = new List<string>();
-        var tickets = new List<(string Server, Dictionary<string, string> Fields)>();
-        string? currentServer = null;
-        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        void ParseField(string text)
-        {
-            var kv = text.Split(':', 2);
-            if (kv.Length == 2)
-            {
-                string key = kv[0].Trim();
-                string val = kv[1].Trim();
-                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
-                    currentServer = val;
-                else
-                    fields[key] = val;
-                return;
-            }
-
-            // "Ticket Flags 0x... -> ..." has no colon separator
-            var flagsMatch = Regex.Match(text, @"^\s*Ticket Flags\s+(.*)$", RegexOptions.IgnoreCase);
-            if (flagsMatch.Success)
-                fields["Ticket Flags"] = flagsMatch.Groups[1].Value.Trim();
-        }
-
-        foreach (string rawLine in lines)
-        {
-            string line = rawLine.TrimEnd('\r');
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            if (line.StartsWith("Current LogonId", StringComparison.OrdinalIgnoreCase)
-                || line.StartsWith("Cached Tickets", StringComparison.OrdinalIgnoreCase))
-            {
-                headers.Add(line);
-                continue;
-            }
-
-            string trimmedLine = line.TrimStart();
-            if (trimmedLine.StartsWith("#"))
-            {
-                if (currentServer != null)
-                    tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
-                currentServer = null;
-                fields.Clear();
-
-                // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
-                int markerEnd = trimmedLine.IndexOf('>');
-                if (markerEnd >= 0 && markerEnd + 1 < trimmedLine.Length)
-                    ParseField(trimmedLine[(markerEnd + 1)..].Trim());
-                continue;
-            }
-
-            ParseField(line);
-        }
-        if (currentServer != null)
-            tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
 
         foreach (var h in headers)
         {
@@ -1063,7 +981,7 @@ class MainForm : Form
         AppendTicketsLine(" again to return to the ticket list.\n", DimColor);
     }
 
-    void BtnPurgeTickets_Click(object? sender, EventArgs e)
+    async void BtnPurgeTickets_Click(object? sender, EventArgs e)
     {
         var confirm = MessageBox.Show(
             "This will destroy all cached Kerberos tickets.\n\n"
@@ -1073,9 +991,10 @@ class MainForm : Form
             "Purge Kerberos Tickets", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
 
+        _btnPurgeTickets.Enabled = false;
         try
         {
-            RunProcess("klist", "purge", timeoutMs: 5000);
+            await Task.Run(() => RunProcess("klist", "purge", timeoutMs: 5000));
             _lblStatus.Text = "Tickets purged — run diagnostics twice (first run reacquires tickets, second shows true results)";
             _lblStatus.ForeColor = WarnColor;
             RefreshTickets();
@@ -1083,6 +1002,10 @@ class MainForm : Form
         catch (Exception ex)
         {
             _lblStatus.Text = $"Purge failed: {ex.Message}";
+        }
+        finally
+        {
+            _btnPurgeTickets.Enabled = true;
         }
     }
 
@@ -1222,7 +1145,7 @@ class MainForm : Form
         var results = BuildSkeleton();
         RenderResults(results);
 
-        var pendingRun = new DiagRun(DateTime.MinValue, domain, results);
+        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, results);
         _runHistory.Insert(0, pendingRun);
         _selectedRunIndex = 0;
         RebuildHistoryBar();
@@ -1238,7 +1161,7 @@ class MainForm : Form
             if (idx >= 0) results[idx] = result;
             completed++;
             _lblStatus.Text = $"Running diagnostics... ({completed}/{totalGroups})";
-            ShowResults(results);
+            if (ReferenceEquals(SelectedRun, pendingRun)) ShowResults(results);
         }
 
         var identityTask = Task.Run(() => TestDomainMembership(config));
@@ -1251,13 +1174,13 @@ class MainForm : Form
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
-            (identityTask, "Domain Membership & Identity", () => identityTask.Result),
-            (dcTask, "DC Discovery & Connectivity", () => dcTask.Result),
-            (dnsTask, "DNS for Active Directory", () => dnsTask.Result),
-            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.Result),
-            (gpTask, "Group Policy", () => gpTask.Result),
-            (trustTask, "Trust Relationships", () => trustTask.Result),
-            (kerbTask, "Kerberos & Time Sync", () => kerbTask.Result),
+            (identityTask, "Domain Membership & Identity", () => identityTask.GetAwaiter().GetResult()),
+            (dcTask, "DC Discovery & Connectivity", () => dcTask.GetAwaiter().GetResult()),
+            (dnsTask, "DNS for Active Directory", () => dnsTask.GetAwaiter().GetResult()),
+            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.GetAwaiter().GetResult()),
+            (gpTask, "Group Policy", () => gpTask.GetAwaiter().GetResult()),
+            (trustTask, "Trust Relationships", () => trustTask.GetAwaiter().GetResult()),
+            (kerbTask, "Kerberos & Time Sync", () => kerbTask.GetAwaiter().GetResult()),
         };
 
         while (pending.Count > 0)
@@ -1276,25 +1199,32 @@ class MainForm : Form
             }
         }
 
-        _lastResults = results;
-        int pendingIndex = _runHistory.IndexOf(pendingRun);
+        // The pending run may have been deleted, or another run selected, while it was running
+        int pendingIndex = _runHistory.FindIndex(r => ReferenceEquals(r, pendingRun));
         if (pendingIndex >= 0)
         {
-            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, results);
+            bool wasSelected = _selectedRunIndex == pendingIndex;
+            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, dc, results);
             if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
-            _selectedRunIndex = pendingIndex;
+            if (wasSelected || _selectedRunIndex >= _runHistory.Count)
+                _selectedRunIndex = pendingIndex;
         }
-        ShowResults(results);
+        if (SelectedRun is { } selected)
+            ShowResults(selected.Results);
         RebuildHistoryBar();
 
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
-        _btnExport.Enabled = true;
+        _btnExport.Enabled = SelectedRun is { IsPending: false };
     }
 
     void RebuildHistoryBar()
     {
+        // Deferred: this can run from one of these buttons' own Click handler
+        var old = _historyPanel.Controls.Cast<Control>().ToArray();
         _historyPanel.Controls.Clear();
+        if (old.Length > 0 && IsHandleCreated)
+            BeginInvoke(() => { foreach (var c in old) c.Dispose(); });
         if (_runHistory.Count == 0)
         {
             _historyPanel.Visible = false;
@@ -1302,7 +1232,7 @@ class MainForm : Form
         }
 
         int x = 10;
-        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = new Font("Segoe UI", 8f), AutoSize = true, Location = new Point(x, 6) };
+        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, 6) };
         _historyPanel.Controls.Add(lblRuns);
         x += lblRuns.PreferredWidth + 4;
 
@@ -1311,13 +1241,13 @@ class MainForm : Form
             int idx = ri;
             var run = _runHistory[ri];
             bool selected = ri == _selectedRunIndex;
-            bool isPending = run.Timestamp == DateTime.MinValue;
+            bool isPending = run.IsPending;
             string label = isPending ? "Pending..." : run.Timestamp.ToString("HH:mm:ss");
 
             var btn = new Button
             {
                 Text = label, FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 7.5f, selected ? FontStyle.Bold : FontStyle.Regular),
+                Font = selected ? HistoryFontBold : HistoryFont,
                 BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
                 ForeColor = selected ? Color.Black : (isPending ? WarnColor : DimColor),
                 Size = new Size(isPending ? 72 : 62, 20), Location = new Point(x, 4), Cursor = Cursors.Hand,
@@ -1331,7 +1261,7 @@ class MainForm : Form
         var del = new Button
         {
             Text = "Delete Run", FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 7.5f),
+            Font = HistoryFont,
             BackColor = SurfaceColor, ForeColor = FailColor,
             Size = new Size(70, 20), Cursor = Cursors.Hand,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
@@ -1348,10 +1278,7 @@ class MainForm : Form
     {
         if (index < 0 || index >= _runHistory.Count) return;
         _selectedRunIndex = index;
-        _lastResults = _runHistory[index].Results;
-        ShowResults(_runHistory[index].Results);
-        _lblStatus.Text = $"Run from {_runHistory[index].Timestamp:HH:mm:ss}";
-        _btnExport.Enabled = true;
+        ShowSelectedRun();
         RebuildHistoryBar();
     }
 
@@ -1363,7 +1290,6 @@ class MainForm : Form
         if (_runHistory.Count == 0)
         {
             _selectedRunIndex = -1;
-            _lastResults = null;
             _renderedGroups = null;
             _placeholderText = "Run diagnostics for this domain";
             _resultsCanvas.Height = 200;
@@ -1376,11 +1302,19 @@ class MainForm : Form
         {
             if (_selectedRunIndex >= _runHistory.Count)
                 _selectedRunIndex = _runHistory.Count - 1;
-            _lastResults = _runHistory[_selectedRunIndex].Results;
-            ShowResults(_runHistory[_selectedRunIndex].Results);
-            _lblStatus.Text = $"Run from {_runHistory[_selectedRunIndex].Timestamp:HH:mm:ss}";
+            ShowSelectedRun();
         }
         RebuildHistoryBar();
+    }
+
+    DiagRun? SelectedRun => _selectedRunIndex >= 0 && _selectedRunIndex < _runHistory.Count ? _runHistory[_selectedRunIndex] : null;
+
+    void ShowSelectedRun()
+    {
+        if (SelectedRun is not { } run) return;
+        ShowResults(run.Results);
+        _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
+        _btnExport.Enabled = !run.IsPending;
     }
 
     void ShowResults(List<TestGroup> results)
@@ -1397,11 +1331,11 @@ class MainForm : Form
 
     void BtnExport_Click(object? sender, EventArgs e)
     {
-        if (_lastResults == null) return;
+        if (SelectedRun is not { IsPending: false } run) return;
 
         using var dlg = new SaveFileDialog
         {
-            FileName = $"ad-diag-{Regex.Replace(_txtDomain.Text.Trim(), @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Text files (*.txt)|*.txt",
             DefaultExt = ".txt"
         };
@@ -1411,14 +1345,15 @@ class MainForm : Form
         sb.AppendLine("===================================================");
         sb.AppendLine("  AD Diagnostics Report");
         sb.AppendLine($"  Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"  Run at:    {run.Timestamp:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine("===================================================");
         sb.AppendLine();
         sb.AppendLine("Configuration:");
-        sb.AppendLine($"  Domain:  {_txtDomain.Text.Trim()}");
-        sb.AppendLine($"  DC Host: {_txtDc.Text.Trim()}");
+        sb.AppendLine($"  Domain:  {run.Domain}");
+        sb.AppendLine($"  DC Host: {run.Dc}");
         sb.AppendLine();
 
-        foreach (var group in _lastResults)
+        foreach (var group in run.Results)
         {
             sb.AppendLine("---------------------------------------------------");
             sb.AppendLine($"  {group.Name.ToUpperInvariant()}");
@@ -1431,8 +1366,15 @@ class MainForm : Form
             sb.AppendLine();
         }
 
-        File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
-        _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
+        try
+        {
+            File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
+            _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Export failed: {ex.Message}";
+        }
     }
 
     // ── Test skeleton ───────────────────────────────────────
@@ -1506,34 +1448,31 @@ class MainForm : Form
         try
         {
             string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000);
-            bool ok = scVerify.Contains("ERROR_SUCCESS", StringComparison.OrdinalIgnoreCase)
-                   || scVerify.Contains("The command completed successfully", StringComparison.OrdinalIgnoreCase);
-            bool accessDenied = scVerify.Contains("ACCESS_DENIED", StringComparison.OrdinalIgnoreCase)
-                             || scVerify.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
-            var trustMatch = Regex.Match(scVerify, @"Trust Verification Status\s*=\s*(.+)", RegexOptions.IgnoreCase);
-            if (accessDenied)
+            var sc = Parsers.ParseScVerify(scVerify);
+            if (sc.AccessDenied)
                 tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
             else
-                tests.Add(new("Secure Channel",
-                    ok ? Status.Pass : Status.Fail,
-                    trustMatch.Success ? trustMatch.Groups[1].Value.Trim() : (ok ? "Verified" : scVerify.Trim())));
+                tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         try
         {
             string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000);
-            string site = dsGetSite.Trim().Split('\n').FirstOrDefault(l => !l.Contains("command completed", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "";
+            string? siteError = Parsers.NltestError(dsGetSite);
+            string site = Parsers.ParseSite(dsGetSite) ?? "";
+            string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
+                + " - subnet may not be registered in AD Sites and Services";
             tests.Add(new("Site Assignment",
                 !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
-                !string.IsNullOrEmpty(site) ? $"Site: {site}" : "No site returned - subnet may not be registered in AD Sites and Services"));
+                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         try
@@ -1544,16 +1483,21 @@ class MainForm : Form
             {
                 tests.Add(new("Computer Password Age", Status.Skip, "Computer object not found in AD"));
             }
-            else if (DateTime.TryParse(dateStr, out var lastChanged))
+            else if (!DateTime.TryParse(dateStr, out var lastChanged))
+            {
+                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
+            }
+            else if (lastChanged.Year < 1700)
+            {
+                // pwdLastSet = 0 converts to 1601-01-01
+                tests.Add(new("Computer Password Age", Status.Warn, "pwdLastSet is 0 — the computer account password was reset or never set"));
+            }
+            else
             {
                 var age = DateTime.Now - lastChanged;
                 tests.Add(new("Computer Password Age",
                     age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
                     $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "")));
-            }
-            else
-            {
-                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
             }
         }
         catch (Exception ex)
@@ -1572,10 +1516,9 @@ class MainForm : Form
         try
         {
             string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000);
-            var m = Regex.Match(dsGetDc, @"DC:\s*\\\\(\S+)", RegexOptions.IgnoreCase);
-            if (m.Success)
+            dcHost = Parsers.ParseDcLocator(dsGetDc);
+            if (dcHost != null)
             {
-                dcHost = m.Groups[1].Value;
                 tests.Add(new("Locate DC", Status.Pass, $"Found {dcHost}"));
             }
             else
@@ -1691,9 +1634,9 @@ class MainForm : Form
             return new(testName, required ? Status.Fail : Status.Warn,
                 $"No {record} record" + (required ? "" : " (optional)"));
         }
-        catch
+        catch (Exception ex)
         {
-            return new(testName, Status.Warn, "nslookup not available");
+            return new(testName, Status.Warn, $"nslookup failed: {ex.Message}");
         }
     }
 
@@ -1751,7 +1694,7 @@ class MainForm : Form
                 return new("Group Policy", tests);
             }
 
-            var scopes = ParseGpResult(gpresult);
+            var scopes = Parsers.ParseGpResult(gpresult);
             var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
             var user = scopes.FirstOrDefault(s => s.Name == "User");
             var primary = computer ?? user;
@@ -1759,7 +1702,7 @@ class MainForm : Form
             string elevationNote = !hasComputer ? " (run as Administrator for Computer scope)" : "";
 
             if (primary != null && !string.IsNullOrEmpty(primary.LastApplied)
-                && DateTime.TryParse(Regex.Replace(primary.LastApplied, @"\s+at\s+", " "), out var lastTime))
+                && Parsers.ParseGpTime(primary.LastApplied) is { } lastTime)
             {
                 var age = DateTime.Now - lastTime;
                 tests.Add(new("GP Last Refresh",
@@ -1800,19 +1743,19 @@ class MainForm : Form
         try
         {
             string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
-            var lines = trusts.Split('\n')
-                .Select(l => l.Trim())
-                .Where(l => l.Length > 0 && Regex.IsMatch(l, @"^\S+\s+\S+\s+\("))
-                .ToList();
+            string? trustError = Parsers.NltestError(trusts);
+            var lines = Parsers.ParseTrusts(trusts, GetOwnDomainNames());
 
-            if (lines.Count > 0)
+            if (trustError != null)
+                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError}"));
+            else if (lines.Count > 0)
                 tests.Add(new("Domain Trusts", Status.Pass, $"{lines.Count} trust(s): {string.Join(" | ", lines.Take(5))}"));
             else
                 tests.Add(new("Domain Trusts", Status.Pass, "No additional trusts found (single-domain environment)"));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest not available: {ex.Message}"));
+            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
         }
 
         return new("Trust Relationships", tests);
@@ -1825,7 +1768,7 @@ class MainForm : Form
 
         try
         {
-            string klist = RunProcess("klist", "");
+            string klist = RunProcess("klist", "", timeoutMs: 5000);
             var tgtPattern = new Regex($@"krbtgt/{Regex.Escape(realm)}\s*@\s*{Regex.Escape(realm)}", RegexOptions.IgnoreCase);
             tests.Add(new("TGT Present",
                 tgtPattern.IsMatch(klist) ? Status.Pass : Status.Fail,
@@ -1840,10 +1783,8 @@ class MainForm : Form
         try
         {
             string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000);
-            var m = Regex.Match(w32, @"([+-]?\d+\.\d+)s");
-            if (m.Success)
+            if (Parsers.ParseStripchartSkew(w32) is { } skew)
             {
-                double skew = Math.Abs(double.Parse(m.Groups[1].Value));
                 tests.Add(new("Clock Skew",
                     skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
                     $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
@@ -1851,21 +1792,21 @@ class MainForm : Form
             else
                 tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
         }
-        catch { tests.Add(new("Clock Skew", Status.Warn, "w32tm not available")); }
+        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
 
         try
         {
-            string w32status = RunProcess("w32tm", "/query /status", timeoutMs: 5000);
-            var srcMatch = Regex.Match(w32status, @"Source:\s*(.+)", RegexOptions.IgnoreCase);
-            string source = srcMatch.Success ? srcMatch.Groups[1].Value.Trim() : "unknown";
-            bool isLocalCmos = source.Contains("Local CMOS", StringComparison.OrdinalIgnoreCase);
+            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000);
+            if (Parsers.ParseTimeSource(w32source) is not { } source)
+                throw new InvalidOperationException(w32source.Trim());
+            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, Dns.GetHostAddresses);
             tests.Add(new("Time Source",
-                isLocalCmos ? Status.Warn : Status.Pass,
-                source + (isLocalCmos ? " - not syncing from domain hierarchy" : "")));
+                fromDomain ? Status.Pass : Status.Warn,
+                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm not available: {ex.Message}"));
+            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
         }
 
         return new("Kerberos & Time Sync", tests);
@@ -1873,6 +1814,63 @@ class MainForm : Form
 
     // ── Helpers ─────────────────────────────────────────────
 
+    // Console tools write redirected output in the OEM code page (e.g. 437, 850), not UTF-8;
+    // decoding it as UTF-8 garbles any non-ASCII GPO, site or user name.
+    static readonly Encoding ConsoleEncoding = GetConsoleEncoding();
+
+    static Encoding GetConsoleEncoding()
+    {
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding((int)GetOEMCP());
+        }
+        catch { return Encoding.UTF8; }
+    }
+
+    [DllImport("kernel32.dll")]
+    static extern uint GetOEMCP();
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetGetJoinInformation(string? server, out IntPtr nameBuffer, out int joinStatus);
+
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buffer);
+
+    /// <summary>This machine's own domain: its NetBIOS name (from the join state) and its primary DNS suffix.</summary>
+    static string?[] GetOwnDomainNames()
+    {
+        string? netbios = null;
+        try
+        {
+            const int NetSetupDomainName = 3;
+            if (NetGetJoinInformation(null, out var buffer, out int status) == 0)
+            {
+                try { if (status == NetSetupDomainName) netbios = Marshal.PtrToStringUni(buffer); }
+                finally { NetApiBufferFree(buffer); }
+            }
+        }
+        catch { }
+
+        string? dns = null;
+        try { dns = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().DomainName; }
+        catch { }
+
+        return [netbios, dns];
+    }
+
+    // External tools still running; killed on exit so none outlive the app
+    static readonly ConcurrentDictionary<Process, byte> RunningProcesses = new();
+
+    static void KillRunningProcesses()
+    {
+        foreach (var proc in RunningProcesses.Keys)
+        {
+            try { proc.Kill(true); } catch { }
+        }
+    }
+
+    /// <summary>Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on timeout.</summary>
     static string RunProcess(string fileName, string arguments, int timeoutMs = 15000)
     {
         var psi = new ProcessStartInfo
@@ -1880,22 +1878,34 @@ class MainForm : Form
             FileName = fileName, Arguments = arguments,
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
+            // Closed immediately, so a tool that prompts (e.g. gpupdate's "OK to log off? (Y/N)") reads EOF instead of waiting
+            RedirectStandardInput = true,
+            StandardOutputEncoding = ConsoleEncoding,
+            StandardErrorEncoding = ConsoleEncoding,
         };
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        if (!proc.WaitForExit(timeoutMs))
+        RunningProcesses.TryAdd(proc, 0);
+        try
         {
-            try { proc.Kill(true); } catch { }
+            proc.StandardInput.Close();
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(timeoutMs))
+            {
+                try { proc.Kill(true); } catch { }
+                throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
+            }
+            string stdout = stdoutTask.GetAwaiter().GetResult();
+            string stderr = stderrTask.GetAwaiter().GetResult();
+            if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
+                return stderr;
+            return stdout;
         }
-        string stdout = stdoutTask.GetAwaiter().GetResult();
-        string stderr = stderrTask.GetAwaiter().GetResult();
-        if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
-            return stderr;
-        return stdout;
+        finally
+        {
+            RunningProcesses.TryRemove(proc, out _);
+        }
     }
 
     static bool TryTcpConnect(IPAddress? ip, string host, int port, int timeoutMs = 3000)
@@ -1930,5 +1940,7 @@ record DiagConfig(string Domain, string Dc);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
-record DiagRun(DateTime Timestamp, string Domain, List<TestGroup> Results);
-record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
+record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Results)
+{
+    public bool IsPending => Timestamp == DateTime.MinValue;
+}
