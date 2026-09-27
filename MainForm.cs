@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -53,7 +52,6 @@ class MainForm : Form
     static readonly Color AccentColor = Color.FromArgb(0x60, 0xa5, 0xfa);
     static readonly Color AccentDimColor = Color.FromArgb(0x25, 0x63, 0xeb);
     static readonly Regex HostnamePattern = new(@"^[a-zA-Z0-9.\-]+$");
-    static readonly Regex NltestError = new(@"Status\s*=\s*\d+\s+0x[0-9a-f]+\s*(\S*)", RegexOptions.IgnoreCase);
     static readonly Pen BorderPen = new(BorderColor);
 
     static readonly Font GroupHeaderFont = new("Segoe UI", 8f, FontStyle.Bold);
@@ -639,7 +637,7 @@ class MainForm : Form
             }
 
             ResetGpBox(keep);
-            var scopes = ParseGpResult(raw);
+            var scopes = Parsers.ParseGpResult(raw);
             if (scopes.Count == 0)
             {
                 AppendGpLine("Could not parse gpresult output. Raw output:\n\n", WarnColor);
@@ -676,9 +674,9 @@ class MainForm : Form
         if (!string.IsNullOrEmpty(scope.LastApplied))
         {
             AppendGpLine("  Last Applied: ", DimColor);
-            bool parsed = DateTime.TryParse(Regex.Replace(scope.LastApplied, @"\s+at\s+", " "), out var lastTime);
-            string ageText = parsed ? $"  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)" : "";
-            Color ageColor = parsed && (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
+            var lastTime = Parsers.ParseGpTime(scope.LastApplied);
+            string ageText = lastTime is { } t ? $"  ({FormatTimeSpan(DateTime.Now - t)} ago)" : "";
+            Color ageColor = lastTime is { } t2 && (DateTime.Now - t2).TotalDays >= 7 ? WarnColor : TextColor;
             AppendGpLine(scope.LastApplied + ageText + "\n", ageColor, bold: true);
         }
 
@@ -720,66 +718,6 @@ class MainForm : Form
         AppendGpLine("\n\n", BorderColor);
     }
 
-    static List<GpScope> ParseGpResult(string raw)
-    {
-        var scopes = new List<GpScope>();
-        var sectionPattern = new Regex(@"(COMPUTER SETTINGS|USER SETTINGS)\s*\r?\n-+\s*\r?\n([\s\S]*?)(?=\r?\nCOMPUTER SETTINGS|\r?\nUSER SETTINGS|\z)", RegexOptions.IgnoreCase);
-
-        foreach (Match sm in sectionPattern.Matches(raw))
-        {
-            string name = sm.Groups[1].Value.Equals("COMPUTER SETTINGS", StringComparison.OrdinalIgnoreCase) ? "Computer" : "User";
-            string body = sm.Groups[2].Value;
-
-            var lastAppliedMatch = Regex.Match(body, @"Last time Group Policy was applied:\s*(.+)", RegexOptions.IgnoreCase);
-            var siteMatch = Regex.Match(body, @"^\s*Site Name:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-            var applied = new List<string>();
-            var appliedSection = Regex.Match(body, @"Applied Group Policy Objects\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*\r?\n|\r?\n\s*The following GPOs|\z)", RegexOptions.IgnoreCase);
-            if (appliedSection.Success)
-            {
-                foreach (var line in appliedSection.Groups[1].Value.Split('\n'))
-                {
-                    string t = line.Trim();
-                    if (t.Length > 0 && !t.Equals("N/A", StringComparison.OrdinalIgnoreCase)) applied.Add(t);
-                }
-            }
-
-            var denied = new List<(string, string)>();
-            var deniedSection = Regex.Match(body, @"The following GPOs were not applied because they were filtered out\s*\r?\n\s*-+\s*\r?\n([\s\S]*?)(?=\r?\n\s*The \w+ is a part of the following security groups|\r?\n\s*\r?\n\s*\r?\n|\z)", RegexOptions.IgnoreCase);
-            if (deniedSection.Success)
-            {
-                string? currentName = null;
-                foreach (var rawLine in deniedSection.Groups[1].Value.Split('\n'))
-                {
-                    string line = rawLine.TrimEnd('\r');
-                    string trimmed = line.Trim();
-                    if (trimmed.Length == 0) continue;
-
-                    // Indented "Filtering: <reason>" lines describe the GPO just above them
-                    if (trimmed.StartsWith("Filtering:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string reason = trimmed["Filtering:".Length..].Trim();
-                        if (currentName != null)
-                            denied.Add((currentName, reason));
-                        currentName = null;
-                    }
-                    else
-                    {
-                        if (currentName != null) denied.Add((currentName, ""));
-                        currentName = trimmed;
-                    }
-                }
-                if (currentName != null) denied.Add((currentName, ""));
-            }
-
-            scopes.Add(new GpScope(name,
-                lastAppliedMatch.Success ? lastAppliedMatch.Groups[1].Value.Trim() : "",
-                siteMatch.Success ? siteMatch.Groups[1].Value.Trim() : "",
-                applied, denied));
-        }
-
-        return scopes;
-    }
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
@@ -835,69 +773,12 @@ class MainForm : Form
         try { raw = RunProcess("klist", "", timeoutMs: 5000); }
         catch (Exception ex) { AppendTicketsLine($"Error running klist: {ex.Message}\n", DimColor); return; }
 
-        if (string.IsNullOrWhiteSpace(raw) || raw.Contains("no credentials", StringComparison.OrdinalIgnoreCase))
+        var (headers, tickets) = Parsers.ParseKlist(raw);
+        if (headers.Count == 0 && tickets.Count == 0)
         {
             AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
             return;
         }
-
-        var lines = raw.Split('\n');
-        var headers = new List<string>();
-        var tickets = new List<(string Server, Dictionary<string, string> Fields)>();
-        string? currentServer = null;
-        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        void ParseField(string text)
-        {
-            var kv = text.Split(':', 2);
-            if (kv.Length == 2)
-            {
-                string key = kv[0].Trim();
-                string val = kv[1].Trim();
-                if (key.Equals("Server", StringComparison.OrdinalIgnoreCase))
-                    currentServer = val;
-                else
-                    fields[key] = val;
-                return;
-            }
-
-            // "Ticket Flags 0x... -> ..." has no colon separator
-            var flagsMatch = Regex.Match(text, @"^\s*Ticket Flags\s+(.*)$", RegexOptions.IgnoreCase);
-            if (flagsMatch.Success)
-                fields["Ticket Flags"] = flagsMatch.Groups[1].Value.Trim();
-        }
-
-        foreach (string rawLine in lines)
-        {
-            string line = rawLine.TrimEnd('\r');
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            if (line.StartsWith("Current LogonId", StringComparison.OrdinalIgnoreCase)
-                || line.StartsWith("Cached Tickets", StringComparison.OrdinalIgnoreCase))
-            {
-                headers.Add(line);
-                continue;
-            }
-
-            string trimmedLine = line.TrimStart();
-            if (trimmedLine.StartsWith("#"))
-            {
-                if (currentServer != null)
-                    tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
-                currentServer = null;
-                fields.Clear();
-
-                // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
-                int markerEnd = trimmedLine.IndexOf('>');
-                if (markerEnd >= 0 && markerEnd + 1 < trimmedLine.Length)
-                    ParseField(trimmedLine[(markerEnd + 1)..].Trim());
-                continue;
-            }
-
-            ParseField(line);
-        }
-        if (currentServer != null)
-            tickets.Add((currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
 
         foreach (var h in headers)
         {
@@ -1550,11 +1431,9 @@ class MainForm : Form
         try
         {
             string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000);
-            // On failure nltest prints e.g. "Getting DC Site failed: Status = 1919 0x77f ERROR_NO_SITENAME"
-            var siteError = NltestError.Match(dsGetSite);
-            string site = siteError.Success ? ""
-                : dsGetSite.Trim().Split('\n').FirstOrDefault(l => !l.Contains("command completed", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "";
-            string noSite = "No site returned" + (siteError.Success ? $" ({siteError.Groups[1].Value})" : "")
+            string? siteError = Parsers.NltestError(dsGetSite);
+            string site = Parsers.ParseSite(dsGetSite) ?? "";
+            string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
                 + " - subnet may not be registered in AD Sites and Services";
             tests.Add(new("Site Assignment",
                 !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
@@ -1601,10 +1480,9 @@ class MainForm : Form
         try
         {
             string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000);
-            var m = Regex.Match(dsGetDc, @"DC:\s*\\\\(\S+)", RegexOptions.IgnoreCase);
-            if (m.Success)
+            dcHost = Parsers.ParseDcLocator(dsGetDc);
+            if (dcHost != null)
             {
-                dcHost = m.Groups[1].Value;
                 tests.Add(new("Locate DC", Status.Pass, $"Found {dcHost}"));
             }
             else
@@ -1780,7 +1658,7 @@ class MainForm : Form
                 return new("Group Policy", tests);
             }
 
-            var scopes = ParseGpResult(gpresult);
+            var scopes = Parsers.ParseGpResult(gpresult);
             var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
             var user = scopes.FirstOrDefault(s => s.Name == "User");
             var primary = computer ?? user;
@@ -1788,7 +1666,7 @@ class MainForm : Form
             string elevationNote = !hasComputer ? " (run as Administrator for Computer scope)" : "";
 
             if (primary != null && !string.IsNullOrEmpty(primary.LastApplied)
-                && DateTime.TryParse(Regex.Replace(primary.LastApplied, @"\s+at\s+", " "), out var lastTime))
+                && Parsers.ParseGpTime(primary.LastApplied) is { } lastTime)
             {
                 var age = DateTime.Now - lastTime;
                 tests.Add(new("GP Last Refresh",
@@ -1829,17 +1707,11 @@ class MainForm : Form
         try
         {
             string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
-            var trustError = NltestError.Match(trusts);
-            // Entries look like "0: CONTOSO contoso.com (NT 5) (Forest Tree Root) (Primary Domain) (Native)";
-            // the machine's own domain is listed too, flagged "(Primary Domain)".
-            var lines = trusts.Split('\n')
-                .Select(l => l.Trim())
-                .Where(l => Regex.IsMatch(l, @"^\d+:\s+\S") && !l.Contains("(Primary Domain)", StringComparison.OrdinalIgnoreCase))
-                .Select(l => Regex.Replace(l, @"^\d+:\s+", ""))
-                .ToList();
+            string? trustError = Parsers.NltestError(trusts);
+            var lines = Parsers.ParseTrusts(trusts);
 
-            if (trustError.Success)
-                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError.Groups[1].Value}"));
+            if (trustError != null)
+                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError}"));
             else if (lines.Count > 0)
                 tests.Add(new("Domain Trusts", Status.Pass, $"{lines.Count} trust(s): {string.Join(" | ", lines.Take(5))}"));
             else
@@ -1875,10 +1747,8 @@ class MainForm : Form
         try
         {
             string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000);
-            var m = Regex.Match(w32, @"([+-]?\d+\.\d+)s");
-            if (m.Success)
+            if (Parsers.ParseStripchartSkew(w32) is { } skew)
             {
-                double skew = Math.Abs(double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture));
                 tests.Add(new("Clock Skew",
                     skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
                     $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
@@ -1891,18 +1761,8 @@ class MainForm : Form
         try
         {
             string w32status = RunProcess("w32tm", "/query /status", timeoutMs: 5000);
-            var srcMatch = Regex.Match(w32status, @"Source:\s*(.+)", RegexOptions.IgnoreCase);
-            string source = srcMatch.Success ? srcMatch.Groups[1].Value.Trim() : "unknown";
-            // Source is a DC hostname (optionally with a ",0x9"-style flag suffix) or IP when syncing from
-            // the domain hierarchy; anything else (Local CMOS, Free-running, VM IC, external NTP) isn't.
-            string sourceHost = Regex.Replace(source, @",0x[0-9a-f]+$", "", RegexOptions.IgnoreCase).Trim();
-            bool fromDomain = sourceHost.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase)
-                || sourceHost.EndsWith("." + cfg.Domain, StringComparison.OrdinalIgnoreCase);
-            if (!fromDomain && IPAddress.TryParse(sourceHost, out var sourceIp))
-            {
-                try { fromDomain = Dns.GetHostAddresses(cfg.Domain).Contains(sourceIp); }
-                catch { }
-            }
+            string source = Parsers.ParseTimeSource(w32status) ?? "unknown";
+            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, Dns.GetHostAddresses);
             tests.Add(new("Time Source",
                 fromDomain ? Status.Pass : Status.Warn,
                 source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
@@ -1978,4 +1838,3 @@ record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Res
 {
     public bool IsPending => Timestamp == DateTime.MinValue;
 }
-record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);

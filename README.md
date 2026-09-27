@@ -147,7 +147,7 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 **Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun AOT).
 
-**Structure:** Single-file app (`MainForm.cs`). All UI and diagnostics in one compilation unit.
+**Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`gpresult`, `klist`, `nltest`, `w32tm`), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Dark theme. Test groups stream results in real-time as each completes.
 
@@ -187,6 +187,14 @@ dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
 Output: `bin/Release/net8.0-windows/win-x64/publish/ad-diag.exe`
+
+Run the parser tests (works on Windows, Linux or macOS):
+
+```
+dotnet test tests/AdDiag.Tests
+```
+
+The tests use representative English-language tool output in `tests/AdDiag.Tests/Samples.cs`. When a parser misreads real output, add that output as a sample and a test.
 
 ## Releasing
 

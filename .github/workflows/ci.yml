@@ -28,5 +28,8 @@ jobs:
       - name: Build
         run: dotnet build AdDiag.csproj -c Release -warnaserror
 
+      - name: Test
+        run: dotnet test tests/AdDiag.Tests -c Release -warnaserror
+
       - name: Publish (single-file smoke test)
         run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish

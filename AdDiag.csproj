@@ -18,4 +18,8 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Version>1.0.2</Version>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Test project lives under tests/ and is built separately -->
+    <Compile Remove="tests/**" />
+  </ItemGroup>
 </Project>
