@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Screenshot harness: the app's own MainForm/Parsers with a separate entry point that loads mock data.
+       Run through run.sh (Wine + Xvfb); see README.md in this folder. Not part of the shipped app. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>ad-diag</AssemblyName>
+    <RootNamespace>AdDiag</RootNamespace>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <StartupObject>AdDiag.Shots</StartupObject>
+    <ApplicationIcon>../../app.ico</ApplicationIcon>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Nullable>enable</Nullable>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../MainForm.cs" />
+    <Compile Include="../../Parsers.cs" />
+  </ItemGroup>
+</Project>
