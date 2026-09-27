@@ -125,6 +125,38 @@ static class Parsers
         catch { return false; }
     }
 
+    /// <summary>
+    /// Whether <c>klist</c> (or <c>klist get</c>) output holds a TGT for <paramref name="realm"/>: either the
+    /// realm's own "krbtgt/REALM @ REALM" or a cross-realm referral "krbtgt/REALM @ OTHERREALM".
+    /// </summary>
+    public static bool HasTgt(string klistOutput, string realm) =>
+        Regex.IsMatch(klistOutput, $@"krbtgt/{Regex.Escape(realm)}\s*@\s*\S", RegexOptions.IgnoreCase);
+
+    /// <summary>The NTSTATUS error from a failed <c>klist get</c>, e.g. "0xc000018b"; null if none.</summary>
+    public static string? KlistError(string output)
+    {
+        var m = Regex.Match(output, @"\b0xc0[0-9a-f]{6}\b", RegexOptions.IgnoreCase);
+        return m.Success ? m.Value.ToLowerInvariant() : null;
+    }
+
+    /// <summary>
+    /// Parses the password-age query's output: "OK|&lt;domain&gt;|&lt;ISO 8601 UTC&gt;", "NOTFOUND|&lt;domain&gt;"
+    /// or "ERROR|&lt;message&gt;". Anything else (e.g. PowerShell failing to start the script) is also an error.
+    /// </summary>
+    public static PasswordAgeResult ParsePasswordAgeQuery(string output)
+    {
+        string line = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
+        var parts = line.Split('|');
+        if (parts.Length >= 2 && parts[0] == "ERROR")
+            return new(null, null, string.Join("|", parts[1..]).Trim());
+        if (parts.Length == 2 && parts[0] == "NOTFOUND")
+            return new(parts[1], null, null);
+        if (parts.Length == 3 && parts[0] == "OK"
+            && DateTime.TryParse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var utc))
+            return new(parts[1], utc.ToUniversalTime(), null);
+        return new(null, null, line.Length > 0 ? line : "No output from PowerShell");
+    }
+
     /// <summary>Parses a gpresult timestamp such as "7/16/2026 at 10:00:00 AM" in the current culture.</summary>
     public static DateTime? ParseGpTime(string value) =>
         DateTime.TryParse(Regex.Replace(value, @"\s+at\s+", " "), out var t) ? t : null;
@@ -264,6 +296,8 @@ static class Parsers
     }
 }
 
+/// <summary>Computer account's domain and pwdLastSet (UTC); both null with <c>Error</c> set if the query failed. LastSetUtc null with Domain set means not found.</summary>
+record PasswordAgeResult(string? Domain, DateTime? LastSetUtc, string? Error);
 record ScVerifyResult(bool Ok, bool AccessDenied, string Detail);
 record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);

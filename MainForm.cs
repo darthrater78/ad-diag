@@ -602,8 +602,8 @@ class MainForm : Form
 
             ("Kerberos & Time Sync",
                 "Kerberos requires tight time synchronization and functioning ticket acquisition.\n\n" +
-                "• TGT Present — a krbtgt ticket in klist proves this session has contacted the KDC\n" +
-                "  Fix: If missing, run 'klist get krbtgt' to attempt acquisition and check the DC connectivity and account status\n\n" +
+                "• TGT Present — checks for a krbtgt ticket in klist; if none is cached, requests one from the KDC ('klist get krbtgt/<REALM>'), proving the KDC can be reached\n" +
+                "  Fix: If a TGT can't be obtained, check DC connectivity (port 88), clock skew, and the account's status (locked, disabled, expired password)\n\n" +
                 "• Clock Skew — Kerberos has a strict 5-minute tolerance between client and DC\n" +
                 "  Fix: Run 'w32tm /resync'. Verify the Windows Time service (W32Time) is running and syncing from the domain hierarchy: 'w32tm /query /status'\n\n" +
                 "• Time Source — confirms this client is syncing from the domain hierarchy, not an external NTP server\n" +
@@ -1477,27 +1477,30 @@ class MainForm : Form
 
         try
         {
-            string ps = RunProcess("powershell", "-NoProfile -Command \"$s=[adsisearcher]\\\"(&(objectCategory=computer)(name=$env:COMPUTERNAME))\\\";$s.PropertiesToLoad.Add('pwdLastSet')|Out-Null;$r=$s.FindOne();if($r){[datetime]::FromFileTime($r.Properties['pwdlastset'][0]).ToString('o')}else{'NOTFOUND'}\"", timeoutMs: 10000);
-            string dateStr = ps.Trim();
-            if (dateStr == "NOTFOUND")
+            var result = Parsers.ParsePasswordAgeQuery(RunPowerShell(PasswordAgeScript, timeoutMs: 15000));
+            string where = result.Domain == null ? ""
+                : result.Domain.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase) ? ""
+                : $" (account is in {result.Domain}, not the target domain)";
+            if (result.Error != null)
             {
-                tests.Add(new("Computer Password Age", Status.Skip, "Computer object not found in AD"));
+                tests.Add(new("Computer Password Age", Status.Warn, $"Could not query AD: {result.Error}"));
             }
-            else if (!DateTime.TryParse(dateStr, out var lastChanged))
+            else if (result.LastSetUtc is not { } lastSetUtc)
             {
-                tests.Add(new("Computer Password Age", Status.Warn, "Could not query AD — check domain connectivity"));
+                tests.Add(new("Computer Password Age", Status.Skip, $"Computer object not found in {result.Domain}"));
             }
-            else if (lastChanged.Year < 1700)
+            else if (lastSetUtc.Year < 1700)
             {
                 // pwdLastSet = 0 converts to 1601-01-01
-                tests.Add(new("Computer Password Age", Status.Warn, "pwdLastSet is 0 — the computer account password was reset or never set"));
+                tests.Add(new("Computer Password Age", Status.Warn, $"pwdLastSet is 0 — the computer account password was reset or never set{where}"));
             }
             else
             {
+                var lastChanged = lastSetUtc.ToLocalTime();
                 var age = DateTime.Now - lastChanged;
                 tests.Add(new("Computer Password Age",
                     age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
-                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "")));
+                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "") + where));
             }
         }
         catch (Exception ex)
@@ -1533,7 +1536,13 @@ class MainForm : Form
 
         string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : (dcHost ?? cfg.Domain);
         IPAddress? kdcIp = null;
-        try { kdcIp = Dns.GetHostAddresses(kdc).FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork); }
+        try
+        {
+            kdcIp = Dns.GetHostAddresses(kdc)
+                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
+                .OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1) // prefer IPv4, fall back to IPv6
+                .FirstOrDefault();
+        }
         catch { }
 
         var portTasks = new List<(string Name, int Port, Task<bool> Task)>
@@ -1559,7 +1568,7 @@ class MainForm : Form
             else
                 tests.Add(new(name,
                     open ? Status.Pass : (required ? Status.Fail : Status.Warn),
-                    open ? $"Reachable at {kdc}" : $"Unreachable at {kdc}"));
+                    open ? $"Reachable at {kdc} ({kdcIp})" : $"Unreachable at {kdc} ({kdcIp})"));
         }
 
         return new("DC Discovery & Connectivity", tests);
@@ -1577,7 +1586,9 @@ class MainForm : Form
         try
         {
             string host = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-            var addrs = Dns.GetHostAddresses(host).Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToArray();
+            var addrs = Dns.GetHostAddresses(host)
+                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
+                .ToArray();
             tests.Add(new("DC A Record",
                 addrs.Length > 0 ? Status.Pass : Status.Fail,
                 addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}"));
@@ -1768,11 +1779,22 @@ class MainForm : Form
 
         try
         {
+            // The cache alone is unreliable: other tests running in parallel may populate it, and an
+            // elevated session starts with its own empty cache. So if no TGT is cached, request one.
             string klist = RunProcess("klist", "", timeoutMs: 5000);
-            var tgtPattern = new Regex($@"krbtgt/{Regex.Escape(realm)}\s*@\s*{Regex.Escape(realm)}", RegexOptions.IgnoreCase);
-            tests.Add(new("TGT Present",
-                tgtPattern.IsMatch(klist) ? Status.Pass : Status.Fail,
-                tgtPattern.IsMatch(klist) ? $"krbtgt/{realm} present" : "No TGT found - no KDC contact"));
+            if (Parsers.HasTgt(klist, realm))
+            {
+                tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} cached"));
+            }
+            else
+            {
+                string get = RunProcess("klist", $"get krbtgt/{realm}", timeoutMs: 10000);
+                if (Parsers.HasTgt(get, realm))
+                    tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)"));
+                else
+                    tests.Add(new("TGT Present", Status.Fail,
+                        $"Could not obtain a TGT for {realm}" + (Parsers.KlistError(get) is { } err ? $" ({err})" : "") + " - no KDC contact"));
+            }
         }
         catch (Exception ex)
         {
@@ -1813,6 +1835,33 @@ class MainForm : Form
     }
 
     // ── Helpers ─────────────────────────────────────────────
+
+    // The computer account lives in the computer's domain, which isn't necessarily the logged-on user's
+    // (the default [adsisearcher] root) or the target domain. Output: "OK|<domain>|<UTC ISO>", "NOTFOUND|<domain>"
+    // or "ERROR|<message>" — errors go to stdout because -EncodedCommand serializes stderr as CLIXML.
+    const string PasswordAgeScript = """
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain().Name
+            $filter = "(&(objectCategory=computer)(sAMAccountName=$($env:COMPUTERNAME)`$))"
+            $s = New-Object System.DirectoryServices.DirectorySearcher([adsi]"LDAP://$d", $filter, @('pwdLastSet'))
+            $r = $s.FindOne()
+            if ($r) { "OK|$d|" + [datetime]::FromFileTimeUtc([int64]$r.Properties['pwdlastset'][0]).ToString('o') }
+            else { "NOTFOUND|$d" }
+        } catch {
+            $e = $_.Exception
+            if ($e.InnerException) { $e = $e.InnerException }
+            "ERROR|" + ($e.Message -replace '\s+', ' ')
+        }
+        """;
+
+    /// <summary>Runs a PowerShell script passed via -EncodedCommand, avoiding command-line quoting entirely.</summary>
+    static string RunPowerShell(string script, int timeoutMs)
+    {
+        string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        return RunProcess("powershell", $"-NoProfile -NonInteractive -EncodedCommand {encoded}", timeoutMs);
+    }
 
     // Console tools write redirected output in the OEM code page (e.g. 437, 850), not UTF-8;
     // decoding it as UTF-8 garbles any non-ASCII GPO, site or user name.
@@ -1912,7 +1961,7 @@ class MainForm : Form
     {
         try
         {
-            using var client = new TcpClient();
+            using var client = ip != null ? new TcpClient(ip.AddressFamily) : new TcpClient();
             var task = ip != null ? client.ConnectAsync(ip, port) : client.ConnectAsync(host, port);
             if (!task.Wait(timeoutMs))
             {
