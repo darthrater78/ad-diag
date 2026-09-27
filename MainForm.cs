@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -25,7 +26,7 @@ static class Program
     [STAThread]
     static void Main()
     {
-        using var mutex = new Mutex(true, "Global\\AdDiag_SingleInstance", out bool isNew);
+        using var mutex = new Mutex(true, "Local\\AdDiag_SingleInstance", out bool isNew);
         if (!isNew)
         {
             MessageBox.Show("AD Diagnostics is already running.", "AD Diag",
@@ -52,6 +53,7 @@ class MainForm : Form
     static readonly Color AccentColor = Color.FromArgb(0x60, 0xa5, 0xfa);
     static readonly Color AccentDimColor = Color.FromArgb(0x25, 0x63, 0xeb);
     static readonly Regex HostnamePattern = new(@"^[a-zA-Z0-9.\-]+$");
+    static readonly Regex NltestError = new(@"Status\s*=\s*\d+\s+0x[0-9a-f]+\s*(\S*)", RegexOptions.IgnoreCase);
     static readonly Pen BorderPen = new(BorderColor);
 
     static readonly Font GroupHeaderFont = new("Segoe UI", 8f, FontStyle.Bold);
@@ -76,7 +78,6 @@ class MainForm : Form
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
     bool _gpRunning;
     bool _showingExplainer;
-    List<TestGroup>? _lastResults;
     List<TestGroup>? _renderedGroups;
     string? _placeholderText;
     readonly List<DiagRun> _runHistory = [];
@@ -405,9 +406,9 @@ class MainForm : Form
     void BtnClear_Click(object? sender, EventArgs e)
     {
         _runCts?.Cancel();
+        _btnRun.Enabled = true; // a cancelled run returns early and never re-enables it
         _runHistory.Clear();
         _selectedRunIndex = -1;
-        _lastResults = null;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
         _resultsCanvas.Height = 200;
@@ -614,13 +615,15 @@ class MainForm : Form
         _gpBox.AppendText(text);
     }
 
-    async void RefreshGpTab()
+    // keepExisting preserves text already in the box (e.g. gpupdate output) and renders below it
+    async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
         _gpRunning = true;
+        int keep = keepExisting ? _gpBox.TextLength : 0;
         try
         {
-            _gpBox.Clear();
+            ResetGpBox(keep);
             AppendGpLine("Loading Group Policy details...\n", DimColor);
 
             string raw;
@@ -630,12 +633,12 @@ class MainForm : Form
             }
             catch (Exception ex)
             {
-                _gpBox.Clear();
+                ResetGpBox(keep);
                 AppendGpLine($"Error running gpresult: {ex.Message}\n", FailColor);
                 return;
             }
 
-            _gpBox.Clear();
+            ResetGpBox(keep);
             var scopes = ParseGpResult(raw);
             if (scopes.Count == 0)
             {
@@ -655,6 +658,13 @@ class MainForm : Form
         {
             _gpRunning = false;
         }
+    }
+
+    void ResetGpBox(int keepLength)
+    {
+        if (keepLength == 0) { _gpBox.Clear(); return; }
+        _gpBox.Select(keepLength, _gpBox.TextLength - keepLength);
+        _gpBox.SelectedText = "";
     }
 
     void RenderGpScope(GpScope scope)
@@ -792,7 +802,6 @@ class MainForm : Form
         {
             string output = await Task.Run(() => RunProcess("gpupdate", force ? "/force" : "", timeoutMs: 90000));
             AppendGpLine("\n" + output.Trim() + "\n\n", DimColor);
-            AppendGpLine("Refreshing details...\n", DimColor);
         }
         catch (Exception ex)
         {
@@ -804,7 +813,7 @@ class MainForm : Form
             _gpRunning = false;
         }
 
-        RefreshGpTab();
+        RefreshGpTab(keepExisting: true);
     }
 
     // ── Kerberos Tickets tab ──────────────────────────────────
@@ -1222,7 +1231,7 @@ class MainForm : Form
         var results = BuildSkeleton();
         RenderResults(results);
 
-        var pendingRun = new DiagRun(DateTime.MinValue, domain, results);
+        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, results);
         _runHistory.Insert(0, pendingRun);
         _selectedRunIndex = 0;
         RebuildHistoryBar();
@@ -1238,7 +1247,7 @@ class MainForm : Form
             if (idx >= 0) results[idx] = result;
             completed++;
             _lblStatus.Text = $"Running diagnostics... ({completed}/{totalGroups})";
-            ShowResults(results);
+            if (ReferenceEquals(SelectedRun, pendingRun)) ShowResults(results);
         }
 
         var identityTask = Task.Run(() => TestDomainMembership(config));
@@ -1276,20 +1285,23 @@ class MainForm : Form
             }
         }
 
-        _lastResults = results;
-        int pendingIndex = _runHistory.IndexOf(pendingRun);
+        // The pending run may have been deleted, or another run selected, while it was running
+        int pendingIndex = _runHistory.FindIndex(r => ReferenceEquals(r, pendingRun));
         if (pendingIndex >= 0)
         {
-            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, results);
+            bool wasSelected = _selectedRunIndex == pendingIndex;
+            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, dc, results);
             if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
-            _selectedRunIndex = pendingIndex;
+            if (wasSelected || _selectedRunIndex >= _runHistory.Count)
+                _selectedRunIndex = pendingIndex;
         }
-        ShowResults(results);
+        if (SelectedRun is { } selected)
+            ShowResults(selected.Results);
         RebuildHistoryBar();
 
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
-        _btnExport.Enabled = true;
+        _btnExport.Enabled = SelectedRun is { IsPending: false };
     }
 
     void RebuildHistoryBar()
@@ -1311,7 +1323,7 @@ class MainForm : Form
             int idx = ri;
             var run = _runHistory[ri];
             bool selected = ri == _selectedRunIndex;
-            bool isPending = run.Timestamp == DateTime.MinValue;
+            bool isPending = run.IsPending;
             string label = isPending ? "Pending..." : run.Timestamp.ToString("HH:mm:ss");
 
             var btn = new Button
@@ -1348,10 +1360,7 @@ class MainForm : Form
     {
         if (index < 0 || index >= _runHistory.Count) return;
         _selectedRunIndex = index;
-        _lastResults = _runHistory[index].Results;
-        ShowResults(_runHistory[index].Results);
-        _lblStatus.Text = $"Run from {_runHistory[index].Timestamp:HH:mm:ss}";
-        _btnExport.Enabled = true;
+        ShowSelectedRun();
         RebuildHistoryBar();
     }
 
@@ -1363,7 +1372,6 @@ class MainForm : Form
         if (_runHistory.Count == 0)
         {
             _selectedRunIndex = -1;
-            _lastResults = null;
             _renderedGroups = null;
             _placeholderText = "Run diagnostics for this domain";
             _resultsCanvas.Height = 200;
@@ -1376,11 +1384,19 @@ class MainForm : Form
         {
             if (_selectedRunIndex >= _runHistory.Count)
                 _selectedRunIndex = _runHistory.Count - 1;
-            _lastResults = _runHistory[_selectedRunIndex].Results;
-            ShowResults(_runHistory[_selectedRunIndex].Results);
-            _lblStatus.Text = $"Run from {_runHistory[_selectedRunIndex].Timestamp:HH:mm:ss}";
+            ShowSelectedRun();
         }
         RebuildHistoryBar();
+    }
+
+    DiagRun? SelectedRun => _selectedRunIndex >= 0 && _selectedRunIndex < _runHistory.Count ? _runHistory[_selectedRunIndex] : null;
+
+    void ShowSelectedRun()
+    {
+        if (SelectedRun is not { } run) return;
+        ShowResults(run.Results);
+        _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
+        _btnExport.Enabled = !run.IsPending;
     }
 
     void ShowResults(List<TestGroup> results)
@@ -1397,11 +1413,11 @@ class MainForm : Form
 
     void BtnExport_Click(object? sender, EventArgs e)
     {
-        if (_lastResults == null) return;
+        if (SelectedRun is not { IsPending: false } run) return;
 
         using var dlg = new SaveFileDialog
         {
-            FileName = $"ad-diag-{Regex.Replace(_txtDomain.Text.Trim(), @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Text files (*.txt)|*.txt",
             DefaultExt = ".txt"
         };
@@ -1411,14 +1427,15 @@ class MainForm : Form
         sb.AppendLine("===================================================");
         sb.AppendLine("  AD Diagnostics Report");
         sb.AppendLine($"  Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"  Run at:    {run.Timestamp:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine("===================================================");
         sb.AppendLine();
         sb.AppendLine("Configuration:");
-        sb.AppendLine($"  Domain:  {_txtDomain.Text.Trim()}");
-        sb.AppendLine($"  DC Host: {_txtDc.Text.Trim()}");
+        sb.AppendLine($"  Domain:  {run.Domain}");
+        sb.AppendLine($"  DC Host: {run.Dc}");
         sb.AppendLine();
 
-        foreach (var group in _lastResults)
+        foreach (var group in run.Results)
         {
             sb.AppendLine("---------------------------------------------------");
             sb.AppendLine($"  {group.Name.ToUpperInvariant()}");
@@ -1431,8 +1448,15 @@ class MainForm : Form
             sb.AppendLine();
         }
 
-        File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
-        _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
+        try
+        {
+            File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
+            _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Export failed: {ex.Message}";
+        }
     }
 
     // ── Test skeleton ───────────────────────────────────────
@@ -1526,10 +1550,15 @@ class MainForm : Form
         try
         {
             string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000);
-            string site = dsGetSite.Trim().Split('\n').FirstOrDefault(l => !l.Contains("command completed", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "";
+            // On failure nltest prints e.g. "Getting DC Site failed: Status = 1919 0x77f ERROR_NO_SITENAME"
+            var siteError = NltestError.Match(dsGetSite);
+            string site = siteError.Success ? ""
+                : dsGetSite.Trim().Split('\n').FirstOrDefault(l => !l.Contains("command completed", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "";
+            string noSite = "No site returned" + (siteError.Success ? $" ({siteError.Groups[1].Value})" : "")
+                + " - subnet may not be registered in AD Sites and Services";
             tests.Add(new("Site Assignment",
                 !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
-                !string.IsNullOrEmpty(site) ? $"Site: {site}" : "No site returned - subnet may not be registered in AD Sites and Services"));
+                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite));
         }
         catch (Exception ex)
         {
@@ -1800,12 +1829,18 @@ class MainForm : Form
         try
         {
             string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
+            var trustError = NltestError.Match(trusts);
+            // Entries look like "0: CONTOSO contoso.com (NT 5) (Forest Tree Root) (Primary Domain) (Native)";
+            // the machine's own domain is listed too, flagged "(Primary Domain)".
             var lines = trusts.Split('\n')
                 .Select(l => l.Trim())
-                .Where(l => l.Length > 0 && Regex.IsMatch(l, @"^\S+\s+\S+\s+\("))
+                .Where(l => Regex.IsMatch(l, @"^\d+:\s+\S") && !l.Contains("(Primary Domain)", StringComparison.OrdinalIgnoreCase))
+                .Select(l => Regex.Replace(l, @"^\d+:\s+", ""))
                 .ToList();
 
-            if (lines.Count > 0)
+            if (trustError.Success)
+                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError.Groups[1].Value}"));
+            else if (lines.Count > 0)
                 tests.Add(new("Domain Trusts", Status.Pass, $"{lines.Count} trust(s): {string.Join(" | ", lines.Take(5))}"));
             else
                 tests.Add(new("Domain Trusts", Status.Pass, "No additional trusts found (single-domain environment)"));
@@ -1843,7 +1878,7 @@ class MainForm : Form
             var m = Regex.Match(w32, @"([+-]?\d+\.\d+)s");
             if (m.Success)
             {
-                double skew = Math.Abs(double.Parse(m.Groups[1].Value));
+                double skew = Math.Abs(double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture));
                 tests.Add(new("Clock Skew",
                     skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
                     $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
@@ -1858,10 +1893,19 @@ class MainForm : Form
             string w32status = RunProcess("w32tm", "/query /status", timeoutMs: 5000);
             var srcMatch = Regex.Match(w32status, @"Source:\s*(.+)", RegexOptions.IgnoreCase);
             string source = srcMatch.Success ? srcMatch.Groups[1].Value.Trim() : "unknown";
-            bool isLocalCmos = source.Contains("Local CMOS", StringComparison.OrdinalIgnoreCase);
+            // Source is a DC hostname (optionally with a ",0x9"-style flag suffix) or IP when syncing from
+            // the domain hierarchy; anything else (Local CMOS, Free-running, VM IC, external NTP) isn't.
+            string sourceHost = Regex.Replace(source, @",0x[0-9a-f]+$", "", RegexOptions.IgnoreCase).Trim();
+            bool fromDomain = sourceHost.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase)
+                || sourceHost.EndsWith("." + cfg.Domain, StringComparison.OrdinalIgnoreCase);
+            if (!fromDomain && IPAddress.TryParse(sourceHost, out var sourceIp))
+            {
+                try { fromDomain = Dns.GetHostAddresses(cfg.Domain).Contains(sourceIp); }
+                catch { }
+            }
             tests.Add(new("Time Source",
-                isLocalCmos ? Status.Warn : Status.Pass,
-                source + (isLocalCmos ? " - not syncing from domain hierarchy" : "")));
+                fromDomain ? Status.Pass : Status.Warn,
+                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
         }
         catch (Exception ex)
         {
@@ -1930,5 +1974,8 @@ record DiagConfig(string Domain, string Dc);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
-record DiagRun(DateTime Timestamp, string Domain, List<TestGroup> Results);
+record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Results)
+{
+    public bool IsPending => Timestamp == DateTime.MinValue;
+}
 record GpScope(string Name, string LastApplied, string Site, List<string> Applied, List<(string Name, string Reason)> Denied);
