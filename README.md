@@ -6,6 +6,10 @@ Standalone Windows diagnostic tool that checks the health of a domain-joined mac
 
 ![Results tab showing a completed diagnostic run](docs/screenshots/results.png)
 
+The header button switches to **Dark mode**, and back to the light theme, **Flashbang**:
+
+![The same Results tab in Dark mode](docs/screenshots/results-dark.png)
+
 ## Download
 
 Grab `ad-diag-vX.Y.Z-win-x64.exe` from the [latest release](https://github.com/darthrater78/ad-diag/releases/latest). No installation — just run.

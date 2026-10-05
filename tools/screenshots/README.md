@@ -10,7 +10,7 @@ tools/screenshots/run.sh
 
 Requires: .NET 10 SDK, `wine`, `xvfb-run`, `python3` (with `venv`), `curl`, `unzip` and DejaVu Sans (`fonts-dejavu-core`). The script downloads pinned, checksum-verified copies of Cascadia Code and Selawik, and installs `fonttools` and `pillow` into a private venv. Its working files (Wine prefix, fonts, build) go in `~/.cache/winforms-screenshots`; set `SHOTS_WORK` to use another folder.
 
-The screenshots use the light theme. Passing `dark` as a second argument to the built harness renders the dark theme instead.
+The three tab screenshots use the light theme. `run.sh` then runs the harness a second time with `dark` as its second argument and keeps that run's Results tab as `results-dark.png`.
 
 Change the mock data in `Shots.cs` (`MockResults`, `MockRsop`, `MockKlist`). The harness reaches the form's private fields and methods by name, so renaming one of those in `MainForm.cs` fails the `ScreenshotHarness_NamesStillExistInMainForm` unit test.
 

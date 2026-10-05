@@ -99,7 +99,14 @@ rm -f "$work/out/"*.png
 xvfb-run -a -s "-screen 0 1280x1800x24" wine "$exe" "Z:${work//\//\\}\\out"
 "$work/venv/bin/python" "$here/prep.py" crop "$work/out/"*.png
 
+# The same Results tab in the dark theme (the harness's second argument), kept as results-dark.png
+mkdir -p "$work/out-dark"
+rm -f "$work/out-dark/"*.png
+xvfb-run -a -s "-screen 0 1280x1800x24" wine "$exe" "Z:${work//\//\\}\\out-dark" dark
+"$work/venv/bin/python" "$here/prep.py" crop "$work/out-dark/results.png"
+
 mkdir -p "$out"
 cp "$work/out/"*.png "$out/"
+cp "$work/out-dark/results.png" "$out/results-dark.png"
 echo "Screenshots written to $out:"
 ls -1 "$out"
