@@ -158,7 +158,7 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 ## Architecture
 
-**Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
+**Runtime:** .NET 10 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
 **Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
@@ -193,7 +193,7 @@ All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/s
 
 ## Build from Source
 
-Requires [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
+Requires [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 
 ```
 git clone https://github.com/darthrater78/ad-diag.git
@@ -201,7 +201,7 @@ cd ad-diag
 dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
-Output: `bin/Release/net8.0-windows/win-x64/publish/ad-diag.exe`
+Output: `bin/Release/net10.0-windows/win-x64/publish/ad-diag.exe`
 
 Run the parser tests (works on Windows, Linux or macOS):
 

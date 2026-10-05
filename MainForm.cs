@@ -419,8 +419,10 @@ class MainForm : Form
     {
         bool _hover, _pressed, _selected;
 
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool IsTab { get; init; }
 
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool Selected
         {
             get => _selected;

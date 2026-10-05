@@ -3,7 +3,7 @@
        Run through run.sh (Wine + Xvfb); see README.md in this folder. Not part of the shipped app. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>ad-diag</AssemblyName>

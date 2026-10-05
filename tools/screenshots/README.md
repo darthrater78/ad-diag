@@ -8,7 +8,7 @@ It builds a harness from the app's own `MainForm.cs` and `Parsers.cs` plus `Shot
 tools/screenshots/run.sh
 ```
 
-Requires: .NET 8 SDK, `wine`, `xvfb-run`, `python3` (with `venv`), `curl`, `unzip` and DejaVu Sans (`fonts-dejavu-core`). The script downloads pinned, checksum-verified copies of Cascadia Code and Selawik, and installs `fonttools` and `pillow` into a private venv. Its working files (Wine prefix, fonts, build) go in `~/.cache/winforms-screenshots`; set `SHOTS_WORK` to use another folder.
+Requires: .NET 10 SDK, `wine`, `xvfb-run`, `python3` (with `venv`), `curl`, `unzip` and DejaVu Sans (`fonts-dejavu-core`). The script downloads pinned, checksum-verified copies of Cascadia Code and Selawik, and installs `fonttools` and `pillow` into a private venv. Its working files (Wine prefix, fonts, build) go in `~/.cache/winforms-screenshots`; set `SHOTS_WORK` to use another folder.
 
 The screenshots use the light theme. Passing `dark` as a second argument to the built harness renders the dark theme instead.
 
