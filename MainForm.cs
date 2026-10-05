@@ -104,7 +104,8 @@ class MainForm : Form
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
     readonly CheckBox _chkGpForce;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
-    readonly Panel _summaryPanel, _resultsCanvas, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
+    readonly ResultsCanvas _resultsCanvas;
+    readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
     bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
@@ -234,10 +235,7 @@ class MainForm : Form
 
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
-        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results", AccessibleRole = AccessibleRole.StaticText };
-        _resultsCanvas.GetType().GetProperty("DoubleBuffered",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?.SetValue(_resultsCanvas, true);
+        _resultsCanvas = new ResultsCanvas { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results" };
         _resultsCanvas.Paint += PaintResults;
         _resultsScrollPanel.Controls.Add(_resultsCanvas);
 
@@ -835,7 +833,7 @@ class MainForm : Form
             List<GpScope> scopes;
             try
             {
-                scopes = await Task.Run(() => QueryRsop(out raw));
+                scopes = await Task.Run(() => Diagnostics.QueryRsop(Probe, out raw));
             }
             catch (Exception ex)
             {
@@ -879,7 +877,7 @@ class MainForm : Form
 
         if (scope.State != GpScopeState.Ok)
         {
-            AppendGpLine("  " + GpScopeUnavailable(scope) + "\n\n\n", scope.State == GpScopeState.Error ? FailColor : WarnColor);
+            AppendGpLine("  " + Diagnostics.GpScopeUnavailable(scope) + "\n\n\n", scope.State == GpScopeState.Error ? FailColor : WarnColor);
             return;
         }
 
@@ -888,7 +886,7 @@ class MainForm : Form
             var lastTime = lastUtc.ToLocalTime();
             AppendGpLine("  Last Applied: ", DimColor);
             Color ageColor = (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
-            AppendGpLine($"{lastTime:g}  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
+            AppendGpLine($"{lastTime:g}  ({Diagnostics.FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
         }
 
         if (!string.IsNullOrEmpty(scope.Site))
@@ -929,13 +927,6 @@ class MainForm : Form
         AppendGpLine("\n\n", BorderColor);
     }
 
-
-    static string GpScopeUnavailable(GpScope scope) => scope.State switch
-    {
-        GpScopeState.AccessDenied => $"{scope.Name} scope requires running as Administrator",
-        GpScopeState.NoData => $"No Group Policy results recorded for the {scope.Name} scope (RSoP logging may be disabled)",
-        _ => $"Could not read the {scope.Name} scope: {scope.Detail}",
-    };
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
@@ -1307,6 +1298,7 @@ class MainForm : Form
         int y = S(4);
         int left = S(GridLeft), right = w - S(GridLeft);
         int detailW = DetailWidth(w);
+        _resultsCanvas.Rows.Clear();
 
         foreach (var group in _renderedGroups)
         {
@@ -1342,9 +1334,22 @@ class MainForm : Form
                     new Rectangle(S(DetailX), y + S(1), detailW, detailSize.Height),
                     test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
 
-                y += Math.Max(S(20), detailSize.Height + S(4));
+                int rowHeight = Math.Max(S(20), detailSize.Height + S(4));
+                _resultsCanvas.Rows.Add(new(group.Name, test.Name, word, test.Detail, new Rectangle(left, y, right - left, rowHeight)));
+                y += rowHeight;
             }
         }
+    }
+
+    /// <summary>The painted results list, with the rows as last painted.</summary>
+    sealed class ResultsCanvas : Panel
+    {
+        public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds);
+
+        public readonly List<Row> Rows = [];
+
+        public ResultsCanvas() { DoubleBuffered = true; }
+
     }
 
     void RenderResults(List<TestGroup> groups)
@@ -1354,9 +1359,6 @@ class MainForm : Form
         int h = MeasureResultsHeight(_resultsCanvas.Width);
         _resultsCanvas.Height = h;
         _resultsCanvas.Invalidate();
-        // The list is painted, not made of controls, so a screen reader gets its text from here
-        _resultsCanvas.AccessibleDescription = string.Join("\n", groups.SelectMany(g => g.Tests.Select(t =>
-            $"{g.Name}, {t.Name}: {(IsPending(t) ? "running" : $"{t.Status}. {t.Detail}")}")));
     }
 
     // ── Events ──────────────────────────────────────────────
@@ -1422,13 +1424,13 @@ class MainForm : Form
         Task<TestGroup> StartGroup(Func<DiagConfig, TestGroup> test) =>
             Task.Factory.StartNew(() => test(config), cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-        var identityTask = StartGroup(TestDomainMembership);
-        var dcTask = StartGroup(TestDcConnectivity);
-        var dnsTask = StartGroup(TestDnsForAd);
-        var sysvolTask = StartGroup(TestSysvolNetlogon);
-        var gpTask = StartGroup(TestGroupPolicy);
-        var trustTask = StartGroup(TestTrusts);
-        var kerbTask = StartGroup(TestKerberosAndTime);
+        var identityTask = StartGroup(cfg => Diagnostics.TestDomainMembership(cfg, Probe));
+        var dcTask = StartGroup(cfg => Diagnostics.TestDcConnectivity(cfg, Probe));
+        var dnsTask = StartGroup(cfg => Diagnostics.TestDnsForAd(cfg, Probe));
+        var sysvolTask = StartGroup(cfg => Diagnostics.TestSysvolNetlogon(cfg, Probe));
+        var gpTask = StartGroup(cfg => Diagnostics.TestGroupPolicy(cfg, Probe));
+        var trustTask = StartGroup(cfg => Diagnostics.TestTrusts(cfg, Probe));
+        var kerbTask = StartGroup(cfg => Diagnostics.TestKerberosAndTime(cfg, Probe));
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
@@ -1691,227 +1693,37 @@ class MainForm : Form
         return groups;
     }
 
-    // ── Diagnostics engine ──────────────────────────────────
+    // ── What the diagnostics (Diagnostics.cs) ask of this machine ──
 
-    static TestGroup TestDomainMembership(DiagConfig cfg)
+    static readonly IProbe Probe = new WindowsProbe();
+
+    sealed class WindowsProbe : IProbe
     {
-        var tests = new List<TestEntry>();
-        string? dsreg = null;
+        public string RunTool(string tool, string arguments, int timeoutMs, CancellationToken ct) => RunProcess(tool, arguments, timeoutMs, ct);
+        public string RunPowerShell(string script, int timeoutMs, CancellationToken ct) => MainForm.RunPowerShell(script, timeoutMs, ct);
+        public IPAddress[] Resolve(string host, CancellationToken ct) => Runner.ResolveHost(host, ct);
+        public Task<bool> TcpConnect(IPAddress ip, int port, CancellationToken ct) => Runner.TryTcpConnectAsync(ip, port, ct);
 
-        try
-        {
-            dsreg = RunProcess("dsregcmd", "/status", ct: cfg.Cancel);
-            var m = Regex.Match(dsreg, @"DomainJoined\s*:\s*(\S+)");
-            bool domJoined = m.Success && m.Groups[1].Value == "YES";
-            tests.Add(new("Domain Joined",
-                domJoined ? Status.Pass : Status.Fail,
-                m.Success ? $"DomainJoined: {m.Groups[1].Value}" : "Could not determine"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Domain Joined", Status.Fail, $"dsregcmd error: {ex.Message}"));
-        }
+        public List<string>? QuerySrv(string record, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => MainForm.QuerySrv(record), Runner.DnsTimeoutMs, $"{record} query", ct);
 
-        try
+        public int? ShareEntries(string path, CancellationToken ct) => Runner.RunWithTimeout<int?>(
+            () => Directory.Exists(path) ? Directory.GetFileSystemEntries(path).Length : null,
+            ShareTimeoutMs, $"Opening {path}", ct);
+
+        public string CurrentUser()
         {
-            var id = WindowsIdentity.GetCurrent();
-            tests.Add(new("Logged-on User", Status.Pass, id.Name));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Logged-on User", Status.Fail, $"Cannot get identity: {ex.Message}"));
+            using var id = WindowsIdentity.GetCurrent();
+            return id.Name;
         }
 
-        try
-        {
-            string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000, ct: cfg.Cancel);
-            var sc = Parsers.ParseScVerify(scVerify);
-            if (sc.AccessDenied)
-                tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
-            else
-                tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        try
-        {
-            string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000, ct: cfg.Cancel);
-            string? siteError = Parsers.NltestError(dsGetSite);
-            string site = Parsers.ParseSite(dsGetSite) ?? "";
-            string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
-                + " - subnet may not be registered in AD Sites and Services";
-            tests.Add(new("Site Assignment",
-                !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
-                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        try
-        {
-            var result = Parsers.ParsePasswordAgeQuery(RunPowerShell(PasswordAgeScript, timeoutMs: 15000, cfg.Cancel));
-            string where = result.Domain == null ? ""
-                : result.Domain.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase) ? ""
-                : $" (account is in {result.Domain}, not the target domain)";
-            if (result.Error != null)
-            {
-                tests.Add(new("Computer Password Age", Status.Warn, $"Could not query AD: {result.Error}"));
-            }
-            else if (result.LastSetUtc is not { } lastSetUtc)
-            {
-                tests.Add(new("Computer Password Age", Status.Skip, $"Computer object not found in {result.Domain}"));
-            }
-            else if (lastSetUtc.Year < 1700)
-            {
-                // pwdLastSet = 0 converts to 1601-01-01
-                tests.Add(new("Computer Password Age", Status.Warn, $"pwdLastSet is 0 — the computer account password was reset or never set{where}"));
-            }
-            else
-            {
-                var lastChanged = lastSetUtc.ToLocalTime();
-                var age = DateTime.Now - lastChanged;
-                tests.Add(new("Computer Password Age",
-                    age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
-                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "") + where));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Computer Password Age", Status.Warn, $"AD query failed: {ex.Message}"));
-        }
-
-        return new("Domain Membership & Identity", tests);
-    }
-
-    static TestGroup TestDcConnectivity(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-        string? dcHost = null;
-
-        try
-        {
-            string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000, ct: cfg.Cancel);
-            dcHost = Parsers.ParseDcLocator(dsGetDc);
-            if (dcHost != null)
-            {
-                tests.Add(new("Locate DC", Status.Pass, $"Found {dcHost}"));
-            }
-            else
-            {
-                tests.Add(new("Locate DC", Status.Fail, "Could not locate a domain controller"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Locate DC", Status.Fail, $"nltest error: {ex.Message}"));
-        }
-
-        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : (dcHost ?? cfg.Domain);
-        IPAddress? kdcIp = null;
-        try
-        {
-            kdcIp = ResolveHost(kdc, cfg.Cancel)
-                .OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1) // prefer IPv4, fall back to IPv6
-                .FirstOrDefault();
-        }
-        catch { }
-
-        var ports = new (string Name, int Port)[]
-        {
-            ("Port 389 (LDAP)", 389), ("Port 636 (LDAPS)", 636), ("Port 88 (Kerberos)", 88), ("Port 445 (SMB)", 445),
-            ("Port 135 (RPC)", 135), ("Port 464 (Kpasswd)", 464), ("Port 53 (DNS)", 53), ("Port 3268 (Global Catalog)", 3268),
-        };
-        bool[] reachable = kdcIp == null ? new bool[ports.Length]
-            : Task.WhenAll(ports.Select(p => TryTcpConnectAsync(kdcIp, p.Port, cfg.Cancel))).GetAwaiter().GetResult();
-
-        foreach (var ((name, port), open) in ports.Zip(reachable))
-        {
-            bool required = port is 389 or 88 or 445;
-            if (kdcIp == null)
-                tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
-            else
-                tests.Add(new(name,
-                    open ? Status.Pass : (required ? Status.Fail : Status.Warn),
-                    open ? $"Reachable at {kdc} ({kdcIp})" : $"Unreachable at {kdc} ({kdcIp})"));
-        }
-
-        return new("DC Discovery & Connectivity", tests);
-    }
-
-    static TestGroup TestDnsForAd(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>
-        {
-            LookupSrv($"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true, cfg.Cancel),
-            LookupSrv($"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true, cfg.Cancel),
-            LookupSrv($"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false, cfg.Cancel),
-        };
-
-        try
-        {
-            string host = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-            var addrs = ResolveHost(host, cfg.Cancel);
-            tests.Add(new("DC A Record",
-                addrs.Length > 0 ? Status.Pass : Status.Fail,
-                addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("DC A Record", Status.Fail, $"Resolution failed: {ex.Message}"));
-        }
-
-        try
+        public (string SearchList, string Domain) DnsSuffixConfig()
         {
             using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters");
-            var searchList = key?.GetValue("SearchList") as string ?? "";
-            var domain = key?.GetValue("Domain") as string ?? "";
-            var suffixes = new List<string>();
-            if (!string.IsNullOrWhiteSpace(searchList))
-                suffixes.AddRange(searchList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0));
-            else if (!string.IsNullOrWhiteSpace(domain))
-                suffixes.Add(domain);
-
-            if (suffixes.Count > 0)
-            {
-                bool hasDomain = suffixes.Any(s => s.Contains(cfg.Domain, StringComparison.OrdinalIgnoreCase));
-                tests.Add(new("DNS Suffix Search List",
-                    hasDomain ? Status.Pass : Status.Warn,
-                    string.Join(", ", suffixes) + (hasDomain ? "" : $" — target domain {cfg.Domain} not in suffix list")));
-            }
-            else
-            {
-                tests.Add(new("DNS Suffix Search List", Status.Warn, "No DNS suffix configured"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("DNS Suffix Search List", Status.Warn, $"Registry read failed: {ex.Message}"));
+            return (key?.GetValue("SearchList") as string ?? "", key?.GetValue("Domain") as string ?? "");
         }
 
-        return new("DNS for Active Directory", tests);
-    }
-
-    static TestEntry LookupSrv(string record, string testName, bool required, CancellationToken ct)
-    {
-        string optional = required ? "" : " (optional)";
-        try
-        {
-            var targets = Runner.RunWithTimeout(() => QuerySrv(record), Runner.DnsTimeoutMs, $"{record} query", ct);
-            if (targets == null)
-                return new(testName, required ? Status.Fail : Status.Warn, $"No {record} record{optional}");
-
-            string hosts = string.Join(", ", targets.Take(3)) + (targets.Count > 3 ? $" (+{targets.Count - 3} more)" : "");
-            return new(testName, Status.Pass, $"{record} -> {hosts}{optional}");
-        }
-        catch (Exception ex)
-        {
-            return new(testName, Status.Warn, $"DNS query failed: {ex.Message}");
-        }
+        public string?[] OwnDomainNames() => GetOwnDomainNames();
     }
 
     const ushort DnsTypeSrv = 33;
@@ -1974,277 +1786,7 @@ class MainForm : Form
     [DllImport("dnsapi.dll")]
     static extern void DnsRecordListFree(IntPtr recordList, int freeType);
 
-    static TestGroup TestSysvolNetlogon(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        // Opening a share on a domain that doesn't answer blocks for 30s or more inside Windows, where nothing
-        // can cancel it, and the app can't exit while a thread is stuck there. So prove SMB answers first.
-        string? unreachable = null;
-        try
-        {
-            var addrs = ResolveHost(cfg.Domain, cfg.Cancel);
-            if (addrs.Length == 0)
-                unreachable = $"cannot resolve {cfg.Domain}";
-            else if (!Task.WhenAll(addrs.Take(8).Select(a => TryTcpConnectAsync(a, 445, cfg.Cancel))).GetAwaiter().GetResult().Any(open => open))
-                unreachable = $"no domain controller for {cfg.Domain} answers on port 445 (SMB)";
-        }
-        catch (Exception ex)
-        {
-            unreachable = ex.Message;
-        }
-
-        void TestShare(string shareName, string testName)
-        {
-            string path = $@"\\{cfg.Domain}\{shareName}";
-            if (unreachable != null)
-            {
-                tests.Add(new(testName, Status.Fail, $"{path} not accessible — {unreachable}"));
-                return;
-            }
-            try
-            {
-                int? entries = Runner.RunWithTimeout<int?>(
-                    () => Directory.Exists(path) ? Directory.GetFileSystemEntries(path).Length : null,
-                    ShareTimeoutMs, $"Opening {path}", cfg.Cancel);
-                if (entries != null)
-                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries} entries)"));
-                else
-                    tests.Add(new(testName, Status.Fail, $"{path} not accessible"));
-            }
-            catch (UnauthorizedAccessException)
-            {
-                tests.Add(new(testName, Status.Warn, $"{path} exists but access denied — check permissions"));
-            }
-            catch (Exception ex)
-            {
-                tests.Add(new(testName, Status.Fail, $"{path} — {ex.Message}"));
-            }
-        }
-
-        TestShare("SYSVOL", "SYSVOL Access");
-        TestShare("NETLOGON", "NETLOGON Access");
-
-        return new("SYSVOL & NETLOGON", tests);
-    }
-
-    static TestGroup TestGroupPolicy(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        try
-        {
-            var scopes = QueryRsop(out _, cfg.Cancel);
-            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
-            var user = scopes.FirstOrDefault(s => s.Name == "User");
-            var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
-
-            if (primary == null)
-            {
-                string why = scopes.Count == 0 ? "Could not read Group Policy results"
-                    : string.Join("; ", scopes.Select(GpScopeUnavailable));
-                tests.Add(new("GP Last Refresh", Status.Warn, why));
-                tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
-                tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
-                return new("Group Policy", tests);
-            }
-
-            string scopeLabel = primary.Name;
-            string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
-
-            if (primary.LastAppliedUtc is { } lastUtc)
-            {
-                var lastTime = lastUtc.ToLocalTime();
-                var age = DateTime.Now - lastTime;
-                tests.Add(new("GP Last Refresh",
-                    age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
-                    $"{scopeLabel}: {lastTime:g} ({FormatTimeSpan(age)} ago){elevationNote}"));
-            }
-            else
-            {
-                tests.Add(new("GP Last Refresh", Status.Warn,
-                    $"Could not determine last refresh time{elevationNote}"));
-            }
-
-            int appliedCount = primary.Applied.Count;
-            tests.Add(new("Applied GPOs",
-                appliedCount > 0 ? Status.Pass : Status.Warn,
-                appliedCount > 0
-                    ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
-                    : $"{scopeLabel}: No applied GPOs found{elevationNote}"));
-
-            int deniedCount = primary.Denied.Count;
-            tests.Add(new("Denied GPOs", Status.Pass,
-                $"{scopeLabel}: {deniedCount} GPO(s) filtered out (informational){elevationNote}"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("GP Last Refresh", Status.Fail, $"Group Policy query error: {ex.Message}"));
-            tests.Add(new("Applied GPOs", Status.Skip, "Group Policy results unavailable"));
-            tests.Add(new("Denied GPOs", Status.Skip, "Group Policy results unavailable"));
-        }
-
-        return new("Group Policy", tests);
-    }
-
-    static TestGroup TestTrusts(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        try
-        {
-            string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000, ct: cfg.Cancel);
-            string? trustError = Parsers.NltestError(trusts);
-            var lines = Parsers.ParseTrusts(trusts, GetOwnDomainNames());
-
-            if (trustError != null)
-                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError}"));
-            else if (lines.Count > 0)
-                tests.Add(new("Domain Trusts", Status.Pass, $"{lines.Count} trust(s): {string.Join(" | ", lines.Take(5))}"));
-            else
-                tests.Add(new("Domain Trusts", Status.Pass, "No additional trusts found (single-domain environment)"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        return new("Trust Relationships", tests);
-    }
-
-    static TestGroup TestKerberosAndTime(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-        string realm = cfg.Domain.ToUpperInvariant();
-
-        try
-        {
-            // The cache alone is unreliable: other tests running in parallel may populate it, and an
-            // elevated session starts with its own empty cache. So if no TGT is cached, request one.
-            string klist = RunProcess("klist", "", timeoutMs: 5000, ct: cfg.Cancel);
-            if (Parsers.HasTgt(klist, realm))
-            {
-                tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} cached"));
-            }
-            else
-            {
-                string get = RunProcess("klist", $"get krbtgt/{realm}", timeoutMs: 10000, ct: cfg.Cancel);
-                if (Parsers.HasTgt(get, realm))
-                    tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)"));
-                else
-                    tests.Add(new("TGT Present", Status.Fail,
-                        $"Could not obtain a TGT for {realm}" + (Parsers.KlistError(get) is { } err ? $" ({err})" : "") + " - no KDC contact"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("TGT Present", Status.Fail, $"klist error: {ex.Message}"));
-        }
-
-        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-        try
-        {
-            string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000, ct: cfg.Cancel);
-            if (Parsers.ParseStripchartSkew(w32) is { } skew)
-            {
-                tests.Add(new("Clock Skew",
-                    skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
-                    $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
-            }
-            else
-                tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
-        }
-        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
-
-        try
-        {
-            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000, ct: cfg.Cancel);
-            if (Parsers.ParseTimeSource(w32source) is not { } source)
-                throw new InvalidOperationException(w32source.Trim());
-            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, host => ResolveHost(host, cfg.Cancel));
-            tests.Add(new("Time Source",
-                fromDomain ? Status.Pass : Status.Warn,
-                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
-        }
-
-        return new("Kerberos & Time Sync", tests);
-    }
-
     // ── Helpers ─────────────────────────────────────────────
-
-    // The computer account lives in the computer's domain, which isn't necessarily the logged-on user's
-    // (the default [adsisearcher] root) or the target domain. Output: "OK|<domain>|<UTC ISO>", "NOTFOUND|<domain>"
-    // or "ERROR|<message>" — errors go to stdout because -EncodedCommand serializes stderr as CLIXML.
-    const string PasswordAgeScript = """
-        $ErrorActionPreference = 'Stop'
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain().Name
-            $filter = "(&(objectCategory=computer)(sAMAccountName=$($env:COMPUTERNAME)`$))"
-            $s = New-Object System.DirectoryServices.DirectorySearcher([adsi]"LDAP://$d", $filter, @('pwdLastSet'))
-            $r = $s.FindOne()
-            if ($r) { "OK|$d|" + [datetime]::FromFileTimeUtc([int64]$r.Properties['pwdlastset'][0]).ToString('o') }
-            else { "NOTFOUND|$d" }
-        } catch {
-            $e = $_.Exception
-            if ($e.InnerException) { $e = $e.InnerException }
-            "ERROR|" + ($e.Message -replace '\s+', ' ')
-        }
-        """;
-
-    // Group Policy results from the RSoP logging data in WMI (what gpresult itself reads), which, unlike gpresult's
-    // text, is the same in every display language. Output format: see Parsers.ParseRsop. The last-applied time
-    // comes from the GP engine's own State key, falling back to when the RSoP session was logged.
-    const string RsopScript = """
-        $ErrorActionPreference = 'Stop'
-        $ProgressPreference = 'SilentlyContinue'
-        function Clean($s) { "$s" -replace '\s+', ' ' }
-        function Flag($b) { if ($b) { '1' } else { '0' } }
-        function Get-LastApplied($stateKey) {
-            try {
-                $p = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\$stateKey\Extension-List\{00000000-0000-0000-0000-000000000000}"
-                $ft = ([int64]$p.EndTimeHi -shl 32) -bor ([int64]$p.EndTimeLo -band 0xFFFFFFFF)
-                if ($ft -gt 0) { [datetime]::FromFileTimeUtc($ft) }
-            } catch { }
-        }
-        function Write-Scope($scope, $ns, $stateKey) {
-            try {
-                $session = Get-CimInstance -Namespace $ns -ClassName RSOP_Session | Select-Object -First 1
-                $gpos = @{}
-                Get-CimInstance -Namespace $ns -ClassName RSOP_GPO | ForEach-Object { $gpos[$_.id] = $_ }
-                $links = @(Get-CimInstance -Namespace $ns -ClassName RSOP_GPLink)
-            } catch {
-                $e = $_.Exception
-                $code = if ($e -is [Microsoft.Management.Infrastructure.CimException]) { "$($e.NativeErrorCode)" } else { '' }
-                if ($code -eq 'AccessDenied') { "SCOPE|$scope|DENIED" }
-                elseif ($code -eq 'InvalidNamespace') { "SCOPE|$scope|NODATA" }
-                else { "SCOPE|$scope|ERROR|" + (Clean $e.Message) }
-                return
-            }
-            if (-not $session) { "SCOPE|$scope|NODATA"; return }
-            $last = Get-LastApplied $stateKey
-            if (-not $last -and $session.creationTime) { $last = $session.creationTime.ToUniversalTime() }
-            "SCOPE|$scope|OK|" + $(if ($last) { $last.ToString('o') } else { '' }) + '|' + (Clean $session.site)
-            foreach ($l in $links) {
-                $g = $gpos[$l.GPO.id]
-                if (-not $g) { continue }
-                "GPO|$scope|$($g.id)|$([int]$l.appliedOrder)|$(Flag $l.enabled)|$(Flag $g.enabled)|$(Flag $g.accessDenied)|$(Flag $g.filterAllowed)|" + (Clean $g.name)
-            }
-        }
-        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        Write-Scope 'Computer' 'root\rsop\computer' 'Machine'
-        Write-Scope 'User' "root\rsop\user\$($sid -replace '-', '_')" $sid
-        """;
-
-    static List<GpScope> QueryRsop(out string raw, CancellationToken ct = default)
-    {
-        raw = RunPowerShell(RsopScript, timeoutMs: 25000, ct);
-        return Parsers.ParseRsop(raw);
-    }
 
     /// <summary>Runs a PowerShell script passed via -EncodedCommand, avoiding command-line quoting entirely.</summary>
     static string RunPowerShell(string script, int timeoutMs, CancellationToken ct = default)
@@ -2395,30 +1937,16 @@ class MainForm : Form
         Runner.RunProcess(SystemTool(fileName), arguments, timeoutMs, ct, ConsoleEncoding,
             proc => { if (ChildJob != IntPtr.Zero) AssignProcessToJobObject(ChildJob, proc.Handle); });
 
-    static IPAddress[] ResolveHost(string host, CancellationToken ct) => Runner.ResolveHost(host, ct);
-
-    static Task<bool> TryTcpConnectAsync(IPAddress ip, int port, CancellationToken ct) => Runner.TryTcpConnectAsync(ip, port, ct);
-
     static bool FontInstalled(string family)
     {
         using var probe = new Font(family, 9f);
         return probe.Name.Equals(family, StringComparison.OrdinalIgnoreCase);
     }
 
-    static string FormatTimeSpan(TimeSpan ts)
-    {
-        if (ts.TotalDays >= 1) return $"{(int)ts.TotalDays}d {ts.Hours}h";
-        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
-        return $"{(int)ts.TotalMinutes}m";
-    }
 }
 
 // ── Data types ──────────────────────────────────────────
 
-record DiagConfig(string Domain, string Dc, CancellationToken Cancel);
-enum Status { Pass, Fail, Warn, Skip }
-record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
-record TestGroup(string Name, List<TestEntry> Tests);
 record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Results)
 {
     public bool IsPending => Timestamp == DateTime.MinValue;

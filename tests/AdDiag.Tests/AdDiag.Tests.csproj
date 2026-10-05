@@ -11,6 +11,7 @@
   <ItemGroup>
     <Compile Include="../../Parsers.cs" Link="Parsers.cs" />
     <Compile Include="../../Runner.cs" Link="Runner.cs" />
+    <Compile Include="../../Diagnostics.cs" Link="Diagnostics.cs" />
   </ItemGroup>
 
   <ItemGroup>

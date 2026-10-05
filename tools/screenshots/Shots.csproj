@@ -20,5 +20,6 @@
     <Compile Include="../../MainForm.cs" />
     <Compile Include="../../Parsers.cs" />
     <Compile Include="../../Runner.cs" />
+    <Compile Include="../../Diagnostics.cs" />
   </ItemGroup>
 </Project>
