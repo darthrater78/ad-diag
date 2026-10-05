@@ -39,7 +39,8 @@ Up to 5 diagnostic runs are stored with timestamps — click any run to review i
 
 - **Clear** — clears results and run history, keeps input fields
 - **Reset** — clears everything including input fields
-- **Export Results** — saves a timestamped text report via Save dialog
+- **Export results** — saves a timestamped text report via Save dialog
+- **Copy results** — puts the same report on the clipboard, for pasting into a ticket
 
 ## Security
 
@@ -162,7 +163,7 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 **Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
-**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Follows the Windows light or dark app setting (read at startup) and scales with the display DPI; every status has its own shape as well as its own colour. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
+**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Starts in the Windows light or dark app setting; the header button switches between **Dark mode** and the light theme, **Flashbang**, at any time (the choice is not saved, since the app writes nothing to disk). Scales with the display DPI; every status has its own shape as well as its own colour. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
 **Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and SRV lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too.
 
@@ -215,7 +216,7 @@ The README screenshots are generated from mock data by `tools/screenshots/run.sh
 
 ## Releasing
 
-Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to `main` and every pull request, and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
+Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to `main` and every pull request, and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, plus the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
 
 ## Version History
 

@@ -45,28 +45,29 @@ static class Program
 
 class MainForm : Form
 {
-    // Tokens: see DESIGN.md. The app follows the Windows light/dark app setting, read once at startup.
-    static readonly bool Dark = DetectDarkMode();
+    // Tokens: see DESIGN.md. The theme starts from the Windows light/dark app setting and the header button
+    // switches it (SetTheme); nothing is saved, so the next launch follows Windows again.
+    static bool Dark = DetectDarkMode();
     static Color Themed(int light, int dark) => Color.FromArgb(unchecked((int)0xFF000000) | (Dark ? dark : light));
-    static readonly Color BgColor = Themed(0xf3f3f3, 0x202020);       // window
-    static readonly Color PanelColor = Themed(0xffffff, 0x1c1c1c);    // results and text panes
-    static readonly Color SurfaceColor = Themed(0xffffff, 0x2d2d2d);  // buttons and inputs
-    static readonly Color BorderColor = Themed(0xd1d1d1, 0x3d3d3d);
-    static readonly Color RowLineColor = Themed(0xededed, 0x2a2a2a);
-    static readonly Color TextColor = Themed(0x1b1b1b, 0xf2f2f2);
-    static readonly Color DimColor = Themed(0x5f5f5f, 0xa3a3a3);
-    static readonly Color PassColor = Themed(0x0f7b0f, 0x6ccb5f);
-    static readonly Color FailColor = Themed(0xc42b1c, 0xff99a4);
-    static readonly Color WarnColor = Themed(0x9d5d00, 0xfce100);
-    static readonly Color SkipColor = Themed(0x767676, 0x8a8a8a);
-    static readonly Color AccentColor = Themed(0x005fb8, 0x4cc2ff);
-    static readonly Color OnAccentColor = Themed(0xffffff, 0x000000); // text on Accent, Pass and Warn fills
+    static Color BgColor => Themed(0xf3f3f3, 0x202020);       // window
+    static Color PanelColor => Themed(0xffffff, 0x1c1c1c);    // results and text panes
+    static Color SurfaceColor => Themed(0xfbfbfb, 0x2d2d2d);  // buttons and inputs
+    static Color BorderColor => Themed(0xd1d1d1, 0x3d3d3d);
+    static Color RowLineColor => Themed(0xededed, 0x2a2a2a);
+    static Color TextColor => Themed(0x1b1b1b, 0xf2f2f2);
+    static Color DimColor => Themed(0x5f5f5f, 0xa3a3a3);
+    static Color PassColor => Themed(0x0f7b0f, 0x6ccb5f);
+    static Color FailColor => Themed(0xc42b1c, 0xff99a4);
+    static Color WarnColor => Themed(0x9d5d00, 0xfce100);
+    static Color SkipColor => Themed(0x767676, 0x8a8a8a);
+    static Color AccentColor => Themed(0x005fb8, 0x4cc2ff);
+    static Color OnAccentColor => Themed(0xffffff, 0x000000); // text on Accent, Pass and Warn fills
     // Cascadia Code ships with Windows 11 but not Windows 10 or Server; without a fallback GDI substitutes a
     // proportional font and the ticket boxes stop lining up
     static readonly string MonoFamily = FontInstalled("Cascadia Code") ? "Cascadia Code" : "Consolas";
     static readonly Regex HostnamePattern = new(@"^[a-zA-Z0-9.\-]+$");
-    static readonly Pen BorderPen = new(BorderColor);
-    static readonly Pen RowLinePen = new(RowLineColor);
+    static Pen BorderPen = new(BorderColor);
+    static Pen RowLinePen = new(RowLineColor);
 
     static bool DetectDarkMode()
     {
@@ -84,10 +85,10 @@ class MainForm : Form
     static readonly Font TestNameFont = new("Segoe UI", 9f);
     static readonly Font TestDetailFont = new(MonoFamily, 8.5f);
     static readonly Font PlaceholderFont = new("Segoe UI", 10f);
-    static readonly SolidBrush PassBrush = new(PassColor);
-    static readonly SolidBrush FailBrush = new(FailColor);
-    static readonly SolidBrush WarnBrush = new(WarnColor);
-    static readonly SolidBrush SkipBrush = new(SkipColor);
+    static SolidBrush PassBrush = new(PassColor);
+    static SolidBrush FailBrush = new(FailColor);
+    static SolidBrush WarnBrush = new(WarnColor);
+    static SolidBrush SkipBrush = new(SkipColor);
     static readonly Font TabFontInactive = new("Segoe UI", 9f);
     static readonly Font TabFontActive = new("Segoe UI", 9f, FontStyle.Bold);
     static readonly Font GpBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
@@ -98,14 +99,14 @@ class MainForm : Form
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnExport, _btnClear;
+    readonly Button _btnRun, _btnExport, _btnCopy, _btnClear, _btnTheme;
     readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
     readonly CheckBox _chkGpForce;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
     readonly Panel _summaryPanel, _resultsCanvas, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
-    bool _gpRunning;
+    bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
     bool _ticketsRunning;
     List<TestGroup>? _renderedGroups;
@@ -156,12 +157,16 @@ class MainForm : Form
         lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
         var lnkRelease = new LinkLabel { Text = "Release Notes", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkRelease.LinkClicked += (s, e) => OpenUrl($"https://github.com/darthrater78/ad-diag/releases/tag/v{appVersion}");
-        header.Controls.AddRange([lblTitle, lblTag, lnkGithub, lnkRelease]);
+        // Names the theme it switches to; the light theme is called Flashbang
+        _btnTheme = new ThemedButton { Text = ThemeButtonText, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 8f), Size = new Size(84, 22), Location = new Point(0, 6) };
+        _btnTheme.Click += (s, e) => SetTheme(!Dark);
+        header.Controls.AddRange([lblTitle, lblTag, _btnTheme, lnkGithub, lnkRelease]);
         header.Resize += (s, e) =>
         {
             lblTag.Left = lblTitle.Right + S(8);
             lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(10));
             lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
+            _btnTheme.Left = lnkGithub.Left - _btnTheme.Width - S(14);
         };
         layout.Controls.Add(header, 0, 0);
 
@@ -188,12 +193,14 @@ class MainForm : Form
         _btnRun.Click += BtnRun_Click;
         _btnExport = new ThemedButton { Text = "Export results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false };
         _btnExport.Click += BtnExport_Click;
-        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4) };
+        _btnCopy = new ThemedButton { Text = "Copy results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4), Enabled = false };
+        _btnCopy.Click += BtnCopy_Click;
+        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(374, 4) };
         _btnClear.Click += BtnClear_Click;
-        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(374, 4) };
+        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(482, 4) };
         btnReset.Click += BtnReset_Click;
-        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(460, 4), Size = new Size(340, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-        actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnClear, btnReset, _lblStatus]);
+        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(566, 4), Size = new Size(234, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+        actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
         layout.Controls.Add(actionsPanel, 0, 2);
 
         // Summary bar
@@ -227,7 +234,7 @@ class MainForm : Form
 
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
-        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = PanelColor, Height = 100 };
+        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results", AccessibleRole = AccessibleRole.StaticText };
         _resultsCanvas.GetType().GetProperty("DoubleBuffered",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?.SetValue(_resultsCanvas, true);
@@ -321,6 +328,9 @@ class MainForm : Form
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
 
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+            ThemeScrollbars(scrolling);
+
         mainPanel.Controls.Add(layout);
         Controls.Add(mainPanel);
         AcceptButton = _btnRun; // Enter in the domain or DC field starts a run
@@ -397,10 +407,77 @@ class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        if (!Dark) return;
-        int on = 1;
-        try { DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref on, sizeof(int)); } catch { }
+        ApplyTitleBarTheme();
     }
+
+    void ApplyTitleBarTheme()
+    {
+        int dark = Dark ? 1 : 0;
+        try { DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref dark, sizeof(int)); } catch { }
+    }
+
+    static string ThemeButtonText => Dark ? "Flashbang" : "Dark mode";
+
+    // Colours a control can hold as its background or text; SetTheme maps each to the same token in the other theme
+    static Color[] BackTokens() => [BgColor, PanelColor, SurfaceColor, AccentColor, WarnColor];
+    static Color[] ForeTokens() => [TextColor, DimColor, PassColor, FailColor, WarnColor, AccentColor, OnAccentColor];
+
+    /// <summary>Switches between the dark theme and the light one ("Flashbang") while the app is running.</summary>
+    void SetTheme(bool dark)
+    {
+        if (dark == Dark) return;
+        Color[] oldBack = BackTokens(), oldFore = ForeTokens();
+        Dark = dark;
+        Color[] newBack = BackTokens(), newFore = ForeTokens();
+
+        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, SkipBrush })
+            old.Dispose();
+        BorderPen = new(BorderColor);
+        RowLinePen = new(RowLineColor);
+        PassBrush = new(PassColor);
+        FailBrush = new(FailColor);
+        WarnBrush = new(WarnColor);
+        SkipBrush = new(SkipColor);
+
+        static Color Map(Color c, Color[] from, Color[] to)
+        {
+            int i = Array.FindIndex(from, f => f.ToArgb() == c.ToArgb());
+            return i >= 0 ? to[i] : c;
+        }
+        void Retheme(Control control)
+        {
+            control.BackColor = Map(control.BackColor, oldBack, newBack);
+            control.ForeColor = Map(control.ForeColor, oldFore, newFore);
+            if (control is LinkLabel link)
+                link.LinkColor = link.ActiveLinkColor = link.VisitedLinkColor = AccentColor;
+            foreach (Control child in control.Controls) Retheme(child);
+        }
+        Retheme(this);
+        _btnTheme.Text = ThemeButtonText;
+        ApplyTitleBarTheme();
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+            if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
+
+        // The text panes hold coloured runs, so they are written again in the new colours
+        PopulateGuide();
+        if (_gpLoaded) RefreshGpTab();
+        else { _gpBox.Clear(); AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor); }
+        if (_showingExplainer) ShowTicketsExplainer();
+        else if (_ticketsLoaded) RefreshTickets();
+        RebuildHistoryBar();
+        Invalidate(true);
+    }
+
+    /// <summary>Asks Windows to draw this control's scrollbars to match the theme, now and whenever its handle is created.</summary>
+    static void ThemeScrollbars(Control control) => control.HandleCreated += (s, e) => ApplyScrollbarTheme(control);
+
+    static void ApplyScrollbarTheme(Control control)
+    {
+        try { SetWindowTheme(control.Handle, Dark ? "DarkMode_Explorer" : "Explorer", null); } catch { }
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hwnd, string? appName, string? idList);
 
     const int DwmwaUseImmersiveDarkMode = 20; // dark title bar, Windows 10 2004 and later
 
@@ -545,7 +622,7 @@ class MainForm : Form
         _resultsCanvas.Height = S(200);
         _resultsCanvas.Invalidate();
         _summaryPanel.Visible = false;
-        _btnExport.Enabled = false;
+        _btnExport.Enabled = _btnCopy.Enabled = false;
         RebuildHistoryBar();
         _lblStatus.Text = "Results cleared";
     }
@@ -584,7 +661,7 @@ class MainForm : Form
     static readonly Font GuideBodyFont = new("Segoe UI", 9f);
     static readonly Font GuideFixFont = new("Segoe UI", 8.5f);
     static readonly Font GuideFixLabelFont = new("Segoe UI", 8.5f, FontStyle.Bold);
-    static readonly Color FixLabelColor = WarnColor;
+    static Color FixLabelColor => WarnColor;
 
     void PopulateGuide()
     {
@@ -747,7 +824,7 @@ class MainForm : Form
     async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
-        _gpRunning = true;
+        _gpRunning = _gpLoaded = true;
         int keep = keepExisting ? _gpBox.TextLength : 0;
         try
         {
@@ -910,7 +987,7 @@ class MainForm : Form
     async void RefreshTickets()
     {
         if (_ticketsRunning) return;
-        _ticketsRunning = true;
+        _ticketsRunning = _ticketsLoaded = true;
         _showingExplainer = false;
         _ticketsBox.Clear();
         AppendTicketsLine("Loading tickets...\n", DimColor);
@@ -1277,6 +1354,9 @@ class MainForm : Form
         int h = MeasureResultsHeight(_resultsCanvas.Width);
         _resultsCanvas.Height = h;
         _resultsCanvas.Invalidate();
+        // The list is painted, not made of controls, so a screen reader gets its text from here
+        _resultsCanvas.AccessibleDescription = string.Join("\n", groups.SelectMany(g => g.Tests.Select(t =>
+            $"{g.Name}, {t.Name}: {(IsPending(t) ? "running" : $"{t.Status}. {t.Detail}")}")));
     }
 
     // ── Events ──────────────────────────────────────────────
@@ -1309,7 +1389,7 @@ class MainForm : Form
         var cts = _runCts;
 
         _btnRun.Enabled = false;
-        _btnExport.Enabled = false;
+        _btnExport.Enabled = _btnCopy.Enabled = false;
         _summaryPanel.Visible = false;
         _lblStatus.ForeColor = DimColor;
         _lblStatus.Text = "Running diagnostics...";
@@ -1393,7 +1473,7 @@ class MainForm : Form
 
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
-        _btnExport.Enabled = SelectedRun is { IsPending: false };
+        _btnExport.Enabled = _btnCopy.Enabled = SelectedRun is { IsPending: false };
     }
 
     void RebuildHistoryBar()
@@ -1472,7 +1552,7 @@ class MainForm : Form
             _resultsCanvas.Invalidate();
             _summaryPanel.Visible = false;
             _lblStatus.Text = "";
-            _btnExport.Enabled = false;
+            _btnExport.Enabled = _btnCopy.Enabled = false;
         }
         else
         {
@@ -1490,7 +1570,7 @@ class MainForm : Form
         if (SelectedRun is not { } run) return;
         ShowResults(run.Results);
         _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
-        _btnExport.Enabled = !run.IsPending;
+        _btnExport.Enabled = _btnCopy.Enabled = !run.IsPending;
     }
 
     void ShowResults(List<TestGroup> results)
@@ -1505,18 +1585,9 @@ class MainForm : Form
         _summaryPanel.Visible = true;
     }
 
-    void BtnExport_Click(object? sender, EventArgs e)
+    /// <summary>The selected run as plain text: what Export saves and Copy puts on the clipboard.</summary>
+    static string BuildReport(DiagRun run)
     {
-        if (SelectedRun is not { IsPending: false } run) return;
-
-        using var dlg = new SaveFileDialog
-        {
-            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
-            Filter = "Text files (*.txt)|*.txt",
-            DefaultExt = ".txt"
-        };
-        if (dlg.ShowDialog() != DialogResult.OK) return;
-
         var sb = new StringBuilder();
         sb.AppendLine("===================================================");
         sb.AppendLine("  AD Diagnostics Report");
@@ -1541,10 +1612,40 @@ class MainForm : Form
             }
             sb.AppendLine();
         }
+        return sb.ToString();
+    }
+
+    void BtnCopy_Click(object? sender, EventArgs e)
+    {
+        if (SelectedRun is not { IsPending: false } run) return;
+        try
+        {
+            Clipboard.SetText(BuildReport(run));
+            _lblStatus.Text = "Results copied to the clipboard";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Copy failed: {ex.Message}";
+        }
+    }
+
+    void BtnExport_Click(object? sender, EventArgs e)
+    {
+        if (SelectedRun is not { IsPending: false } run) return;
+
+        using var dlg = new SaveFileDialog
+        {
+            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            Filter = "Text files (*.txt)|*.txt",
+            DefaultExt = ".txt"
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+
+        string report = BuildReport(run);
 
         try
         {
-            File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(dlg.FileName, report, Encoding.UTF8);
             _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
         }
         catch (Exception ex)
@@ -1800,7 +1901,7 @@ class MainForm : Form
         string optional = required ? "" : " (optional)";
         try
         {
-            var targets = RunWithTimeout(() => QuerySrv(record), DnsTimeoutMs, $"{record} query", ct);
+            var targets = Runner.RunWithTimeout(() => QuerySrv(record), Runner.DnsTimeoutMs, $"{record} query", ct);
             if (targets == null)
                 return new(testName, required ? Status.Fail : Status.Warn, $"No {record} record{optional}");
 
@@ -1903,7 +2004,7 @@ class MainForm : Form
             }
             try
             {
-                int? entries = RunWithTimeout<int?>(
+                int? entries = Runner.RunWithTimeout<int?>(
                     () => Directory.Exists(path) ? Directory.GetFileSystemEntries(path).Length : null,
                     ShareTimeoutMs, $"Opening {path}", cfg.Cancel);
                 if (entries != null)
@@ -2287,113 +2388,16 @@ class MainForm : Form
         catch { }
     }
 
-    const int DnsTimeoutMs = 8000;
     const int ShareTimeoutMs = 20000;
-    const int ConnectTimeoutMs = 3000;
-    const int PipeDrainMs = 3000;
 
-    /// <summary>
-    /// Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on
-    /// timeout; cancelling <paramref name="ct"/> kills the tool and throws <see cref="OperationCanceledException"/>.
-    /// </summary>
-    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000, CancellationToken ct = default)
-    {
-        ct.ThrowIfCancellationRequested();
-        var psi = new ProcessStartInfo
-        {
-            FileName = SystemTool(fileName), Arguments = arguments,
-            UseShellExecute = false, RedirectStandardOutput = true,
-            RedirectStandardError = true, CreateNoWindow = true,
-            // Closed immediately, so a tool that prompts (e.g. gpupdate's "OK to log off? (Y/N)") reads EOF instead of waiting
-            RedirectStandardInput = true,
-            StandardOutputEncoding = ConsoleEncoding,
-            StandardErrorEncoding = ConsoleEncoding,
-        };
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        if (ChildJob != IntPtr.Zero) AssignProcessToJobObject(ChildJob, proc.Handle);
-        // Runs on the cancelling (UI) thread, so not Kill(true): walking the process tree takes too long there
-        using var killOnCancel = ct.Register(() => { try { proc.Kill(); } catch { } });
+    /// <summary>Runs a System32 tool inside the kill-on-close job; see <see cref="Runner.RunProcess"/>.</summary>
+    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000, CancellationToken ct = default) =>
+        Runner.RunProcess(SystemTool(fileName), arguments, timeoutMs, ct, ConsoleEncoding,
+            proc => { if (ChildJob != IntPtr.Zero) AssignProcessToJobObject(ChildJob, proc.Handle); });
 
-        proc.StandardInput.Close();
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        // The pipes reach EOF only when every process holding them has exited, so a child the tool left
-        // behind would block the reads forever; they get a deadline of their own.
-        bool finished = proc.WaitForExit(timeoutMs);
-        try { finished = finished && Task.WhenAll(stdoutTask, stderrTask).Wait(PipeDrainMs); }
-        catch (AggregateException) { } // a failed read is rethrown below
-        if (!finished)
-        {
-            try { proc.Kill(true); } catch { }
-            ct.ThrowIfCancellationRequested();
-            throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
-        }
-        ct.ThrowIfCancellationRequested();
+    static IPAddress[] ResolveHost(string host, CancellationToken ct) => Runner.ResolveHost(host, ct);
 
-        string stdout = stdoutTask.GetAwaiter().GetResult();
-        string stderr = stderrTask.GetAwaiter().GetResult();
-        if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
-            return stderr;
-        return stdout;
-    }
-
-    /// <summary>
-    /// Runs a blocking Windows call that has no timeout of its own, giving up after <paramref name="timeoutMs"/>
-    /// (<see cref="TimeoutException"/>) or when <paramref name="ct"/> is cancelled. The call can't be interrupted,
-    /// so on giving up it is left to finish on its own background thread.
-    /// </summary>
-    static T RunWithTimeout<T>(Func<T> call, int timeoutMs, string what, CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
-        var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            try { done.SetResult(call()); }
-            catch (Exception ex) { done.SetException(ex); }
-        }) { IsBackground = true };
-        thread.Start();
-        try
-        {
-            if (!done.Task.Wait(timeoutMs, ct))
-                throw new TimeoutException($"{what} timed out after {timeoutMs / 1000}s");
-        }
-        catch (AggregateException) { } // the call's own exception is rethrown below, unwrapped
-        return done.Task.GetAwaiter().GetResult();
-    }
-
-    /// <summary>
-    /// IPv4 and IPv6 addresses of <paramref name="host"/>. The resolver has no timeout of its own and can take
-    /// over a minute when no DNS server answers.
-    /// </summary>
-    static IPAddress[] ResolveHost(string host, CancellationToken ct)
-    {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(DnsTimeoutMs);
-        try
-        {
-            return Dns.GetHostAddressesAsync(host, deadline.Token).WaitAsync(deadline.Token).GetAwaiter().GetResult()
-                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
-                .ToArray();
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            throw new TimeoutException($"Resolving {host} timed out after {DnsTimeoutMs / 1000}s");
-        }
-    }
-
-    static async Task<bool> TryTcpConnectAsync(IPAddress ip, int port, CancellationToken ct)
-    {
-        try
-        {
-            using var client = new TcpClient(ip.AddressFamily);
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(ConnectTimeoutMs);
-            await client.ConnectAsync(ip, port, deadline.Token).ConfigureAwait(false);
-            return client.Connected;
-        }
-        catch { return false; }
-    }
+    static Task<bool> TryTcpConnectAsync(IPAddress ip, int port, CancellationToken ct) => Runner.TryTcpConnectAsync(ip, port, ct);
 
     static bool FontInstalled(string family)
     {

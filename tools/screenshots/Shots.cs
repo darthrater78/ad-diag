@@ -16,7 +16,7 @@ static class Shots
     static T Get<T>(object o, string name) => (T)o.GetType().GetField(name, F)!.GetValue(o)!;
     static void Set(object o, string name, object? v) => o.GetType().GetField(name, F)!.SetValue(o, v);
     static object? Call(object o, string name, params object?[] args) => o.GetType().GetMethod(name, F)!.Invoke(o, args);
-    static Color Theme(string name) => (Color)typeof(MainForm).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    static Color Theme(string name) => (Color)typeof(MainForm).GetProperty(name, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
 
     [STAThread]
     static void Main(string[] args)

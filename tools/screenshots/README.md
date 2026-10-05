@@ -12,7 +12,7 @@ Requires: .NET 10 SDK, `wine`, `xvfb-run`, `python3` (with `venv`), `curl`, `unz
 
 The screenshots use the light theme. Passing `dark` as a second argument to the built harness renders the dark theme instead.
 
-Change the mock data in `Shots.cs` (`MockResults`, `MockRsop`, `MockKlist`). The harness reaches the form's private fields and methods by name, so renaming one of those in `MainForm.cs` makes the run fail with the missing name.
+Change the mock data in `Shots.cs` (`MockResults`, `MockRsop`, `MockKlist`). The harness reaches the form's private fields and methods by name, so renaming one of those in `MainForm.cs` fails the `ScreenshotHarness_NamesStillExistInMainForm` unit test.
 
 ## How it differs from real Windows
 

@@ -1,13 +1,13 @@
 ---
 version: alpha
 name: AD Diagnostics
-description: A Windows admin utility that looks like it shipped with the OS. Light and dark follow the Windows app setting.
+description: A Windows admin utility that looks like it shipped with the OS. Two themes, Dark mode and the light one, Flashbang.
 colors:
   primary: "#005fb8"
   on-primary: "#ffffff"
   background: "#f3f3f3"
   panel: "#ffffff"
-  surface: "#ffffff"
+  surface: "#fbfbfb"
   border: "#d1d1d1"
   row-line: "#ededed"
   text: "#1b1b1b"
@@ -138,14 +138,14 @@ components:
 
 A diagnostic utility that domain admins and helpdesk staff run on a domain-joined Windows PC to see why Active Directory isn't working. It should look like it shipped with Windows, beside Event Viewer and Resource Monitor: plain, dense, and trusted. It is not a dashboard and has no brand of its own.
 
-The tokens live in `MainForm.cs` (the `Themed(light, dark)` fields). The theme is read once at startup from the Windows app setting (`AppsUseLightTheme`).
+The tokens live in `MainForm.cs` (the `Themed(light, dark)` properties). The theme starts from the Windows app setting (`AppsUseLightTheme`); the header button switches it while the app runs and is labelled with the theme it switches to: "Dark mode" or "Flashbang" (the light theme's name in this app). The choice is not saved.
 
 ## Colors
 
 Windows 11's own system values, so the app matches the OS around it.
 
 - **Primary (#005fb8, dark #4cc2ff):** the Windows default accent. Used for the primary button, links, the selected tab's underline, the selected run and the running ring. Nothing else.
-- **Background (#f3f3f3, dark #202020):** the window. **Panel (#ffffff, dark #1c1c1c):** the results list and text panes. **Surface (#ffffff, dark #2d2d2d):** buttons and inputs.
+- **Background (#f3f3f3, dark #202020):** the window. **Panel (#ffffff, dark #1c1c1c):** the results list and text panes. **Surface (#fbfbfb, dark #2d2d2d):** buttons and inputs. Background, panel and surface must stay three different values in each theme: `SetTheme` maps a control's colour to the same token in the other theme by value.
 - **Status:** pass #0f7b0f, warn #9d5d00, fail #c42b1c, skip #767676 (dark: #6ccb5f, #fce100, #ff99a4, #8a8a8a). Status colour goes on the mark and the status word only.
 - **Text (#1b1b1b, dark #f2f2f2)** and **text-dim (#5f5f5f, dark #a3a3a3)** for captions, counts and skipped details.
 
@@ -184,7 +184,7 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 
 - Do keep status colour on marks and status words; result details stay in text colour.
 - Do give every status a shape or a word as well as a colour.
-- Do add a `Themed(light, dark)` token for any new colour, and list it here.
+- Do add a `Themed(light, dark)` token for any new colour, list it here, and add it to `BackTokens` or `ForeTokens` if a control can hold it.
 - Don't use raw colours (`Color.White`, hex literals) in controls.
 - Don't use all-caps headings, pills or badges for metadata, hand cursors on buttons, gradients, shadows or emoji.
 - Don't print whole lines in status colour or in monospace unless the line is a system value.
