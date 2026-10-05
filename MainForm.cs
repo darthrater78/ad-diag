@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -37,6 +36,7 @@ static class Program
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new MainForm());
@@ -45,46 +45,69 @@ static class Program
 
 class MainForm : Form
 {
-    static readonly Color BgColor = Color.FromArgb(0x0f, 0x11, 0x17);
-    static readonly Color SurfaceColor = Color.FromArgb(0x1a, 0x1d, 0x27);
-    static readonly Color BorderColor = Color.FromArgb(0x2a, 0x2d, 0x3a);
-    static readonly Color TextColor = Color.FromArgb(0xe2, 0xe4, 0xea);
-    static readonly Color DimColor = Color.FromArgb(0x8b, 0x8f, 0xa3);
-    static readonly Color PassColor = Color.FromArgb(0x34, 0xd3, 0x99);
-    static readonly Color FailColor = Color.FromArgb(0xf8, 0x71, 0x71);
-    static readonly Color WarnColor = Color.FromArgb(0xfb, 0xbf, 0x24);
-    static readonly Color SkipColor = Color.FromArgb(0x6b, 0x72, 0x80);
-    static readonly Color AccentColor = Color.FromArgb(0x60, 0xa5, 0xfa);
-    static readonly Color AccentDimColor = Color.FromArgb(0x25, 0x63, 0xeb);
+    // Tokens: see DESIGN.md. The theme starts from the Windows light/dark app setting and the header button
+    // switches it (SetTheme); nothing is saved, so the next launch follows Windows again.
+    static bool Dark = DetectDarkMode();
+    static Color Themed(int light, int dark) => Color.FromArgb(unchecked((int)0xFF000000) | (Dark ? dark : light));
+    static Color BgColor => Themed(0xf3f3f3, 0x202020);       // window
+    static Color PanelColor => Themed(0xffffff, 0x1c1c1c);    // results and text panes
+    static Color SurfaceColor => Themed(0xfbfbfb, 0x2d2d2d);  // buttons and inputs
+    static Color BorderColor => Themed(0xd1d1d1, 0x3d3d3d);
+    static Color RowLineColor => Themed(0xededed, 0x2a2a2a);
+    static Color TextColor => Themed(0x1b1b1b, 0xf2f2f2);
+    static Color DimColor => Themed(0x5f5f5f, 0xa3a3a3);
+    static Color PassColor => Themed(0x0f7b0f, 0x6ccb5f);
+    static Color FailColor => Themed(0xc42b1c, 0xff99a4);
+    static Color WarnColor => Themed(0x9d5d00, 0xfce100);
+    static Color SkipColor => Themed(0x767676, 0x8a8a8a);
+    static Color AccentColor => Themed(0x005fb8, 0x4cc2ff);
+    static Color OnAccentColor => Themed(0xffffff, 0x000000); // text on Accent, Pass and Warn fills
+    // Cascadia Code ships with Windows 11 but not Windows 10 or Server; without a fallback GDI substitutes a
+    // proportional font and the ticket boxes stop lining up
+    static readonly string MonoFamily = FontInstalled("Cascadia Code") ? "Cascadia Code" : "Consolas";
     static readonly Regex HostnamePattern = new(@"^[a-zA-Z0-9.\-]+$");
-    static readonly Pen BorderPen = new(BorderColor);
+    static Pen BorderPen = new(BorderColor);
+    static Pen RowLinePen = new(RowLineColor);
 
-    static readonly Font GroupHeaderFont = new("Segoe UI", 8f, FontStyle.Bold);
-    static readonly Font TestNameFont = new("Segoe UI", 9f, FontStyle.Bold);
-    static readonly Font TestDetailFont = new("Cascadia Code", 8f);
+    static bool DetectDarkMode()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("AppsUseLightTheme") is int light && light == 0;
+        }
+        catch { return false; }
+    }
+
+    static readonly Font GroupHeaderFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font GroupCountFont = new("Segoe UI", 8.5f);
+    static readonly Font StatusFont = new("Segoe UI", 8.5f);
+    static readonly Font TestNameFont = new("Segoe UI", 9f);
+    static readonly Font TestDetailFont = new(MonoFamily, 8.5f);
     static readonly Font PlaceholderFont = new("Segoe UI", 10f);
-    static readonly SolidBrush PassBrush = new(PassColor);
-    static readonly SolidBrush FailBrush = new(FailColor);
-    static readonly SolidBrush WarnBrush = new(WarnColor);
-    static readonly SolidBrush SkipBrush = new(SkipColor);
-    static readonly SolidBrush AccentBrush = new(AccentColor);
-    static readonly Font TabFontActive = new("Segoe UI", 8.5f, FontStyle.Bold);
-    static readonly Font TabFontInactive = new("Segoe UI", 8.5f);
+    static SolidBrush PassBrush = new(PassColor);
+    static SolidBrush FailBrush = new(FailColor);
+    static SolidBrush WarnBrush = new(WarnColor);
+    static SolidBrush SkipBrush = new(SkipColor);
+    static readonly Font TabFontInactive = new("Segoe UI", 9f);
+    static readonly Font TabFontActive = new("Segoe UI", 9f, FontStyle.Bold);
     static readonly Font GpBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
-    static readonly Font TicketsBoldFont = new("Cascadia Code", 9f, FontStyle.Bold);
+    static readonly Font TicketsBoldFont = new(MonoFamily, 9f, FontStyle.Bold);
     static readonly Font HistoryLabelFont = new("Segoe UI", 8f);
     static readonly Font HistoryFont = new("Segoe UI", 7.5f);
     static readonly Font HistoryFontBold = new("Segoe UI", 7.5f, FontStyle.Bold);
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnExport, _btnClear, _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
+    readonly Button _btnRun, _btnExport, _btnCopy, _btnClear, _btnTheme;
+    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
     readonly CheckBox _chkGpForce;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
-    readonly Panel _summaryPanel, _resultsCanvas, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
+    readonly ResultsCanvas _resultsCanvas;
+    readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
-    bool _gpRunning;
+    bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
     bool _ticketsRunning;
     List<TestGroup>? _renderedGroups;
@@ -130,30 +153,36 @@ class MainForm : Form
         header.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, header.Height - 1, header.Width, header.Height - 1);
         var lblTitle = new Label { Text = "AD Diagnostics", ForeColor = TextColor, Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(10, 6) };
         var appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
-        var lblTag = new Label { Text = $" v{appVersion} ", ForeColor = AccentColor, BackColor = AccentDimColor, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), AutoSize = true, Location = new Point(148, 10) };
+        var lblTag = new Label { Text = appVersion, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(148, 9) };
         var lnkGithub = new LinkLabel { Text = "GitHub", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
         var lnkRelease = new LinkLabel { Text = "Release Notes", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkRelease.LinkClicked += (s, e) => OpenUrl($"https://github.com/darthrater78/ad-diag/releases/tag/v{appVersion}");
-        header.Controls.AddRange([lblTitle, lblTag, lnkGithub, lnkRelease]);
+        // Names the theme it switches to; the light theme is called Flashbang
+        _btnTheme = new ThemedButton { Text = ThemeButtonText, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 8f), Size = new Size(84, 22), Location = new Point(0, 6) };
+        _btnTheme.Click += (s, e) => SetTheme(!Dark);
+        header.Controls.AddRange([lblTitle, lblTag, _btnTheme, lnkGithub, lnkRelease]);
         header.Resize += (s, e) =>
         {
-            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - 10, 10);
-            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - 12, 10);
+            lblTag.Left = lblTitle.Right + S(8);
+            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(10));
+            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
+            _btnTheme.Left = lnkGithub.Left - _btnTheme.Width - S(14);
         };
         layout.Controls.Add(header, 0, 0);
 
         // Config
-        var configPanel = new Panel { Height = 60, Dock = DockStyle.Fill };
+        var configPanel = new Panel { Height = 50, Dock = DockStyle.Fill };
         configPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, configPanel.Height - 1, configPanel.Width, configPanel.Height - 1);
-        _txtDomain = MakeInput(configPanel, "DOMAIN", 0, 0);
-        _txtDc = MakeInput(configPanel, "DC HOSTNAME (optional)", 1, 0);
+        _txtDomain = MakeInput(configPanel, "Domain", 0, 0);
+        _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0);
 
-        _chkDcSuffix = new CheckBox { Text = "+ domain suffix", ForeColor = Color.White, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 2) };
+        _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
         configPanel.Resize += (s, e) =>
         {
-            _chkDcSuffix.Location = new Point(configPanel.ClientSize.Width / 2 + 4 + 130, 2);
+            // Right-aligned over the DC field, clear of its label whatever the font or DPI
+            _chkDcSuffix.Location = new Point(_txtDc.Right - _chkDcSuffix.Width, _txtDc.Top - _chkDcSuffix.Height - S(1));
         };
 
         layout.Controls.Add(configPanel, 0, 1);
@@ -161,33 +190,32 @@ class MainForm : Form
         // Actions
         var actionsPanel = new Panel { Height = 36, Dock = DockStyle.Fill };
         actionsPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, actionsPanel.Height - 1, actionsPanel.Width, actionsPanel.Height - 1);
-        _btnRun = new Button { Text = "Run Diagnostics", BackColor = AccentColor, ForeColor = Color.Black, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4), Cursor = Cursors.Hand };
-        _btnRun.FlatAppearance.BorderSize = 0;
+        _btnRun = new ThemedButton { Text = "Run diagnostics", BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4) };
         _btnRun.Click += BtnRun_Click;
-        _btnExport = new Button { Text = "Export Results", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false, Cursor = Cursors.Hand };
-        _btnExport.FlatAppearance.BorderColor = BorderColor;
+        _btnExport = new ThemedButton { Text = "Export results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false };
         _btnExport.Click += BtnExport_Click;
-        _btnClear = new Button { Text = "Clear Results", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4), Cursor = Cursors.Hand };
-        _btnClear.FlatAppearance.BorderColor = BorderColor;
+        _btnCopy = new ThemedButton { Text = "Copy results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4), Enabled = false };
+        _btnCopy.Click += BtnCopy_Click;
+        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(374, 4) };
         _btnClear.Click += BtnClear_Click;
-        var btnReset = new Button { Text = "Reset All", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(374, 4), Cursor = Cursors.Hand };
-        btnReset.FlatAppearance.BorderColor = BorderColor;
+        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(482, 4) };
         btnReset.Click += BtnReset_Click;
-        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(460, 4), Size = new Size(340, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-        actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnClear, btnReset, _lblStatus]);
+        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(566, 4), Size = new Size(234, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+        actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
         layout.Controls.Add(actionsPanel, 0, 2);
 
         // Summary bar
         _summaryPanel = new Panel { Height = 26, Dock = DockStyle.Fill, Visible = false };
         _summaryPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _summaryPanel.Height - 1, _summaryPanel.Width, _summaryPanel.Height - 1);
-        var monoFont = new Font("Cascadia Code", 9f, FontStyle.Bold);
-        _lblPassCount = new Label { Text = "0", ForeColor = PassColor, Font = monoFont, AutoSize = true, Location = new Point(10, 4) };
-        var lblPassText = new Label { Text = "passed", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(24, 5) };
-        _lblFailCount = new Label { Text = "0", ForeColor = FailColor, Font = monoFont, AutoSize = true, Location = new Point(80, 4) };
-        var lblFailText = new Label { Text = "failed", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(94, 5) };
-        _lblWarnCount = new Label { Text = "0", ForeColor = WarnColor, Font = monoFont, AutoSize = true, Location = new Point(140, 4) };
-        var lblWarnText = new Label { Text = "warnings", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(154, 5) };
-        _summaryPanel.Controls.AddRange([_lblPassCount, lblPassText, _lblFailCount, lblFailText, _lblWarnCount, lblWarnText]);
+        var countFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+        var summaryFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(8, 4, 0, 0), Margin = Padding.Empty };
+        Label Count(Color color) => new() { Text = "0", ForeColor = color, Font = countFont, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
+        Label Caption(string text) => new() { Text = text, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Margin = new Padding(0, 0, 14, 0) };
+        _lblPassCount = Count(PassColor);
+        _lblFailCount = Count(FailColor);
+        _lblWarnCount = Count(WarnColor);
+        summaryFlow.Controls.AddRange([_lblPassCount, Caption("passed"), _lblFailCount, Caption("failed"), _lblWarnCount, Caption("warnings")]);
+        _summaryPanel.Controls.Add(summaryFlow);
         layout.Controls.Add(_summaryPanel, 0, 3);
 
         // Content area with tab bar
@@ -195,30 +223,19 @@ class MainForm : Form
 
         var tabBar = new Panel { Height = 30, Dock = DockStyle.Top, BackColor = BgColor };
         tabBar.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, tabBar.Height - 1, tabBar.Width, tabBar.Height - 1);
-        _btnTabResults = new Button { Text = "Results", FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = AccentColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Size = new Size(80, 26), Location = new Point(10, 2), Cursor = Cursors.Hand };
-        _btnTabResults.FlatAppearance.BorderColor = BorderColor;
-        _btnTabResults.FlatAppearance.BorderSize = 1;
+        _btnTabResults = new ThemedButton { Text = "Results", IsTab = true, Selected = true, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(10, 2) };
         _btnTabResults.Click += (s, e) => SwitchTab("results");
-        _btnTabGuide = new Button { Text = "Guide", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(80, 26), Location = new Point(94, 2), Cursor = Cursors.Hand };
-        _btnTabGuide.FlatAppearance.BorderColor = BorderColor;
-        _btnTabGuide.FlatAppearance.BorderSize = 1;
+        _btnTabGuide = new ThemedButton { Text = "Guide", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(94, 2) };
         _btnTabGuide.Click += (s, e) => SwitchTab("guide");
-        _btnTabGp = new Button { Text = "Group Policy", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(110, 26), Location = new Point(178, 2), Cursor = Cursors.Hand };
-        _btnTabGp.FlatAppearance.BorderColor = BorderColor;
-        _btnTabGp.FlatAppearance.BorderSize = 1;
+        _btnTabGp = new ThemedButton { Text = "Group Policy", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(110, 26), Location = new Point(178, 2) };
         _btnTabGp.Click += (s, e) => { SwitchTab("gp"); RefreshGpTab(); };
-        _btnTabTickets = new Button { Text = "Kerberos Tickets", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(130, 26), Location = new Point(292, 2), Cursor = Cursors.Hand };
-        _btnTabTickets.FlatAppearance.BorderColor = BorderColor;
-        _btnTabTickets.FlatAppearance.BorderSize = 1;
+        _btnTabTickets = new ThemedButton { Text = "Kerberos tickets", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(292, 2) };
         _btnTabTickets.Click += (s, e) => { SwitchTab("tickets"); RefreshTickets(); };
         tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets]);
 
         // Results canvas (owner-drawn)
-        _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = BgColor };
-        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = BgColor, Height = 100 };
-        _resultsCanvas.GetType().GetProperty("DoubleBuffered",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?.SetValue(_resultsCanvas, true);
+        _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
+        _resultsCanvas = new ResultsCanvas { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results" };
         _resultsCanvas.Paint += PaintResults;
         _resultsScrollPanel.Controls.Add(_resultsCanvas);
 
@@ -237,7 +254,7 @@ class MainForm : Form
         _guideBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
@@ -250,20 +267,18 @@ class MainForm : Form
         _gpBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
         };
-        _btnGpRefresh = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
-        _btnGpRefresh.FlatAppearance.BorderColor = BorderColor;
+        _btnGpRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28) };
         _btnGpRefresh.Click += (s, e) => RefreshGpTab();
-        _btnGpUpdate = new Button { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Cursor = Cursors.Hand };
-        _btnGpUpdate.FlatAppearance.BorderColor = BorderColor;
+        _btnGpUpdate = new ThemedButton { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28) };
         _btnGpUpdate.Click += BtnGpUpdate_Click;
-        _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
+        _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat };
         var gpBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
         _btnGpRefresh.Location = new Point(10, 3);
         _btnGpUpdate.Location = new Point(100, 3);
@@ -278,21 +293,18 @@ class MainForm : Form
         _ticketsBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
-            Font = new Font("Cascadia Code", 9f),
+            Font = new Font(MonoFamily, 9f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
         };
-        _btnPurgeTickets = new Button { Text = "Purge All Tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28), Cursor = Cursors.Hand };
-        _btnPurgeTickets.FlatAppearance.BorderColor = BorderColor;
+        _btnPurgeTickets = new ThemedButton { Text = "Purge all tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28) };
         _btnPurgeTickets.Click += BtnPurgeTickets_Click;
-        var ticketsRefreshBtn = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
-        ticketsRefreshBtn.FlatAppearance.BorderColor = BorderColor;
+        var ticketsRefreshBtn = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28) };
         ticketsRefreshBtn.Click += (s, e) => RefreshTickets();
-        var ticketsInfoBtn = new Button { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Cursor = Cursors.Hand };
-        ticketsInfoBtn.FlatAppearance.BorderColor = BorderColor;
+        var ticketsInfoBtn = new ThemedButton { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28) };
         ticketsInfoBtn.Click += (s, e) => { if (_showingExplainer) { _showingExplainer = false; RefreshTickets(); } else ShowTicketsExplainer(); };
         var ticketsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
         _btnPurgeTickets.Location = new Point(10, 3);
@@ -314,8 +326,17 @@ class MainForm : Form
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
 
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+            ThemeScrollbars(scrolling);
+
         mainPanel.Controls.Add(layout);
         Controls.Add(mainPanel);
+        AcceptButton = _btnRun; // Enter in the domain or DC field starts a run
+
+        // Everything above is laid out for 96 DPI; this scales it once to the display's DPI. Code that
+        // positions or draws afterwards scales its own pixel values with S().
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
 
         _placeholderText = "Enter target domain and run diagnostics";
 
@@ -332,8 +353,11 @@ class MainForm : Form
         };
         FormClosed += (s, e) =>
         {
-            KillRunningProcesses();
-            Environment.Exit(0);
+            KillChildProcesses();
+            // Not Environment.Exit: that runs the runtime's orderly shutdown, which can wait on worker threads
+            // still inside a Windows call and leave ad-diag.exe running with no window. There is nothing to
+            // flush (the app writes no files), so end the process outright.
+            TerminateProcess(GetCurrentProcess(), 0);
         };
         _ = DetectDomainAsync();
     }
@@ -378,6 +402,175 @@ class MainForm : Form
         catch { }
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyTitleBarTheme();
+    }
+
+    void ApplyTitleBarTheme()
+    {
+        int dark = Dark ? 1 : 0;
+        try { DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref dark, sizeof(int)); } catch { }
+    }
+
+    static string ThemeButtonText => Dark ? "Flashbang" : "Dark mode";
+
+    // Colours a control can hold as its background or text; SetTheme maps each to the same token in the other theme
+    static Color[] BackTokens() => [BgColor, PanelColor, SurfaceColor, AccentColor, WarnColor];
+    static Color[] ForeTokens() => [TextColor, DimColor, PassColor, FailColor, WarnColor, AccentColor, OnAccentColor];
+
+    /// <summary>Switches between the dark theme and the light one ("Flashbang") while the app is running.</summary>
+    void SetTheme(bool dark)
+    {
+        if (dark == Dark) return;
+        Color[] oldBack = BackTokens(), oldFore = ForeTokens();
+        Dark = dark;
+        Color[] newBack = BackTokens(), newFore = ForeTokens();
+
+        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, SkipBrush })
+            old.Dispose();
+        BorderPen = new(BorderColor);
+        RowLinePen = new(RowLineColor);
+        PassBrush = new(PassColor);
+        FailBrush = new(FailColor);
+        WarnBrush = new(WarnColor);
+        SkipBrush = new(SkipColor);
+
+        static Color Map(Color c, Color[] from, Color[] to)
+        {
+            int i = Array.FindIndex(from, f => f.ToArgb() == c.ToArgb());
+            return i >= 0 ? to[i] : c;
+        }
+        void Retheme(Control control)
+        {
+            control.BackColor = Map(control.BackColor, oldBack, newBack);
+            control.ForeColor = Map(control.ForeColor, oldFore, newFore);
+            if (control is LinkLabel link)
+                link.LinkColor = link.ActiveLinkColor = link.VisitedLinkColor = AccentColor;
+            foreach (Control child in control.Controls) Retheme(child);
+        }
+        Retheme(this);
+        _btnTheme.Text = ThemeButtonText;
+        ApplyTitleBarTheme();
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+            if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
+
+        // The text panes hold coloured runs, so they are written again in the new colours
+        PopulateGuide();
+        if (_gpLoaded) RefreshGpTab();
+        else { _gpBox.Clear(); AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor); }
+        if (_showingExplainer) ShowTicketsExplainer();
+        else if (_ticketsLoaded) RefreshTickets();
+        RebuildHistoryBar();
+        Invalidate(true);
+    }
+
+    /// <summary>Asks Windows to draw this control's scrollbars to match the theme, now and whenever its handle is created.</summary>
+    static void ThemeScrollbars(Control control) => control.HandleCreated += (s, e) => ApplyScrollbarTheme(control);
+
+    static void ApplyScrollbarTheme(Control control)
+    {
+        try { SetWindowTheme(control.Handle, Dark ? "DarkMode_Explorer" : "Explorer", null); } catch { }
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hwnd, string? appName, string? idList);
+
+    const int DwmwaUseImmersiveDarkMode = 20; // dark title bar, Windows 10 2004 and later
+
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    static Color Blend(Color a, Color b, double amount) => Color.FromArgb(
+        (int)(a.R + (b.R - a.R) * amount), (int)(a.G + (b.G - a.G) * amount), (int)(a.B + (b.B - a.B) * amount));
+
+    /// <summary>
+    /// The app's button: a 4px-radius fill in its BackColor with a border when that is the plain surface, or, as
+    /// a tab (<see cref="IsTab"/>), bare text with an accent underline when selected. Drawn here because a
+    /// standard WinForms button can't follow the dark theme.
+    /// </summary>
+    sealed class ThemedButton : Button
+    {
+        bool _hover, _pressed, _selected;
+
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public bool IsTab { get; init; }
+
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public bool Selected
+        {
+            get => _selected;
+            set { _selected = value; Invalidate(); }
+        }
+
+        public ThemedButton()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _hover = _pressed = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { _pressed = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { _pressed = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        int Px(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Parent?.BackColor ?? BgColor);
+            var box = new Rectangle(0, 0, Width - 1, Height - 1);
+            const TextFormatFlags centered = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine;
+
+            if (IsTab)
+            {
+                TextRenderer.DrawText(g, Text, _selected ? TabFontActive : Font, box, _selected || _hover ? TextColor : DimColor, centered);
+                if (_selected)
+                {
+                    using var underline = new SolidBrush(AccentColor);
+                    g.FillRectangle(underline, Px(8), Height - Px(3), Width - Px(16), Px(3));
+                }
+                if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(box, -Px(3), -Px(3)));
+                return;
+            }
+
+            bool plain = BackColor.ToArgb() == SurfaceColor.ToArgb();
+            Color fill = !Enabled ? Blend(BackColor, BgColor, 0.6)
+                : _pressed ? Blend(BackColor, TextColor, 0.14)
+                : _hover ? Blend(BackColor, TextColor, 0.07)
+                : BackColor;
+            using (var path = RoundedRect(box, Px(4)))
+            {
+                using var brush = new SolidBrush(fill);
+                g.FillPath(brush, path);
+                if (plain || (Focused && ShowFocusCues))
+                {
+                    using var pen = new Pen(Focused && ShowFocusCues ? AccentColor : BorderColor);
+                    g.DrawPath(pen, path);
+                }
+            }
+            TextRenderer.DrawText(g, Text, Font, box, Enabled ? ForeColor : Blend(DimColor, fill, 0.45), centered);
+        }
+
+        static GraphicsPath RoundedRect(Rectangle r, int radius)
+        {
+            int d = radius * 2;
+            var path = new GraphicsPath();
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    /// <summary>A 96-DPI pixel value scaled to the display's DPI.</summary>
+    int S(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
+
     TextBox MakeInput(Panel parent, string label, int col, int row)
     {
         int x = col == 0 ? 14 : parent.Width / 2 + 4;
@@ -387,7 +580,7 @@ class MainForm : Form
         var lbl = new Label
         {
             Text = label, ForeColor = DimColor,
-            Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 8.5f),
             Location = new Point(x, y), AutoSize = true,
         };
 
@@ -396,16 +589,16 @@ class MainForm : Form
             Text = "",
             BackColor = SurfaceColor, ForeColor = TextColor,
             BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Cascadia Code", 9f),
-            Location = new Point(x, y + 13), Width = w,
+            Font = new Font(MonoFamily, 9f),
+            Location = new Point(x, y + 18), Width = w,
         };
 
         parent.Controls.AddRange([lbl, txt]);
 
         parent.Resize += (s, e) =>
         {
-            int newX = col == 0 ? 14 : parent.ClientSize.Width / 2 + 4;
-            int newW = parent.ClientSize.Width / 2 - 24;
+            int newX = col == 0 ? S(14) : parent.ClientSize.Width / 2 + S(4);
+            int newW = parent.ClientSize.Width / 2 - S(24);
             lbl.Location = new Point(newX, lbl.Location.Y);
             txt.Location = new Point(newX, txt.Location.Y);
             txt.Width = newW;
@@ -424,10 +617,10 @@ class MainForm : Form
         _selectedRunIndex = -1;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
-        _resultsCanvas.Height = 200;
+        _resultsCanvas.Height = S(200);
         _resultsCanvas.Invalidate();
         _summaryPanel.Visible = false;
-        _btnExport.Enabled = false;
+        _btnExport.Enabled = _btnCopy.Enabled = false;
         RebuildHistoryBar();
         _lblStatus.Text = "Results cleared";
     }
@@ -456,9 +649,7 @@ class MainForm : Form
 
         foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets") })
         {
-            btn.BackColor = tab == key ? SurfaceColor : BgColor;
-            btn.ForeColor = tab == key ? AccentColor : DimColor;
-            btn.Font = tab == key ? TabFontActive : TabFontInactive;
+            btn.Selected = tab == key;
         }
     }
 
@@ -468,17 +659,16 @@ class MainForm : Form
     static readonly Font GuideBodyFont = new("Segoe UI", 9f);
     static readonly Font GuideFixFont = new("Segoe UI", 8.5f);
     static readonly Font GuideFixLabelFont = new("Segoe UI", 8.5f, FontStyle.Bold);
-    static readonly Color FixLabelColor = Color.FromArgb(0xfb, 0xbf, 0x24);
+    static Color FixLabelColor => WarnColor;
 
     void PopulateGuide()
     {
         _guideBox.Clear();
-        AppendGuide("AD Diagnostics — Test Guide\n\n", new Font("Segoe UI", 12f, FontStyle.Bold), AccentColor);
+        AppendGuide("Test guide\n", new Font("Segoe UI", 13f, FontStyle.Bold), TextColor);
 
         foreach (var (title, body) in GetGuideSections())
         {
-            AppendGuide($"\n{title}\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
-            AppendGuide("─────────────────────────────────────────\n\n", GuideBodyFont, BorderColor);
+            AppendGuide($"\n{title}\n\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
 
             var lines = body.Split('\n');
             foreach (var line in lines)
@@ -491,12 +681,12 @@ class MainForm : Form
                     int dash = line.IndexOf(" — ", StringComparison.Ordinal);
                     if (dash > 0)
                     {
-                        AppendGuide(line[..(dash + 3)], GuideTestNameFont, AccentColor);
+                        AppendGuide(line[..(dash + 3)], GuideTestNameFont, TextColor);
                         AppendGuide(line[(dash + 3)..] + "\n", GuideBodyFont, TextColor);
                     }
                     else
                     {
-                        AppendGuide(line + "\n", GuideTestNameFont, AccentColor);
+                        AppendGuide(line + "\n", GuideTestNameFont, TextColor);
                     }
                 }
                 else if (line.TrimStart().StartsWith("Fix:"))
@@ -632,7 +822,7 @@ class MainForm : Form
     async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
-        _gpRunning = true;
+        _gpRunning = _gpLoaded = true;
         int keep = keepExisting ? _gpBox.TextLength : 0;
         try
         {
@@ -643,7 +833,7 @@ class MainForm : Form
             List<GpScope> scopes;
             try
             {
-                scopes = await Task.Run(() => QueryRsop(out raw));
+                scopes = await Task.Run(() => Diagnostics.QueryRsop(Probe, out raw));
             }
             catch (Exception ex)
             {
@@ -682,13 +872,12 @@ class MainForm : Form
 
     void RenderGpScope(GpScope scope)
     {
-        AppendGpLine($"  ══════════════════════════════════════\n", BorderColor);
-        AppendGpLine($"   {scope.Name.ToUpperInvariant()} SCOPE\n", AccentColor, bold: true);
-        AppendGpLine($"  ══════════════════════════════════════\n\n", BorderColor);
+        AppendGpLine($"  {scope.Name} scope\n", TextColor, bold: true);
+        AppendGpLine("  ────────────────────────────────────────\n\n", BorderColor);
 
         if (scope.State != GpScopeState.Ok)
         {
-            AppendGpLine("  " + GpScopeUnavailable(scope) + "\n\n\n", scope.State == GpScopeState.Error ? FailColor : WarnColor);
+            AppendGpLine("  " + Diagnostics.GpScopeUnavailable(scope) + "\n\n\n", scope.State == GpScopeState.Error ? FailColor : WarnColor);
             return;
         }
 
@@ -697,7 +886,7 @@ class MainForm : Form
             var lastTime = lastUtc.ToLocalTime();
             AppendGpLine("  Last Applied: ", DimColor);
             Color ageColor = (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
-            AppendGpLine($"{lastTime:g}  ({FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
+            AppendGpLine($"{lastTime:g}  ({Diagnostics.FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
         }
 
         if (!string.IsNullOrEmpty(scope.Site))
@@ -738,13 +927,6 @@ class MainForm : Form
         AppendGpLine("\n\n", BorderColor);
     }
 
-
-    static string GpScopeUnavailable(GpScope scope) => scope.State switch
-    {
-        GpScopeState.AccessDenied => $"{scope.Name} scope requires running as Administrator",
-        GpScopeState.NoData => $"No Group Policy results recorded for the {scope.Name} scope (RSoP logging may be disabled)",
-        _ => $"Could not read the {scope.Name} scope: {scope.Detail}",
-    };
 
     async void BtnGpUpdate_Click(object? sender, EventArgs e)
     {
@@ -796,7 +978,7 @@ class MainForm : Form
     async void RefreshTickets()
     {
         if (_ticketsRunning) return;
-        _ticketsRunning = true;
+        _ticketsRunning = _ticketsLoaded = true;
         _showingExplainer = false;
         _ticketsBox.Clear();
         AppendTicketsLine("Loading tickets...\n", DimColor);
@@ -867,7 +1049,7 @@ class MainForm : Form
         Color badgeBg = svc == "KRBTGT" ? AccentColor : PassColor;
 
         AppendTicketsLine($"\n ┌─ ", BorderColor);
-        AppendTicketsLine($" {label} ", Color.Black, bold: true, backColor: badgeBg);
+        AppendTicketsLine($" {label} ", OnAccentColor, bold: true, backColor: badgeBg);
         AppendTicketsLine($"  {desc}\n", DimColor);
         AppendTicketsLine($" │\n", BorderColor);
 
@@ -948,7 +1130,7 @@ class MainForm : Form
 
         AppendTicketsLine("TICKET TYPES\n\n", AccentColor, bold: true);
 
-        AppendTicketsLine(" TGT  ", Color.Black, bold: true, backColor: AccentColor);
+        AppendTicketsLine(" TGT  ", OnAccentColor, bold: true, backColor: AccentColor);
         AppendTicketsLine("  Ticket Granting Ticket\n", TextColor, bold: true);
         AppendTicketsLine("       Your master Kerberos credential from the domain controller.\n", DimColor);
         AppendTicketsLine("       Server field shows: krbtgt/REALM @ REALM\n", DimColor);
@@ -960,23 +1142,23 @@ class MainForm : Form
         AppendTicketsLine(" — a forwarded TGT for Kerberos delegation. Issued when a\n", DimColor);
         AppendTicketsLine("         service is trusted for delegation and needs to act on your behalf.\n\n", DimColor);
 
-        AppendTicketsLine(" CIFS ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" CIFS ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  SMB/File Share\n", TextColor, bold: true);
         AppendTicketsLine("       Grants access to Windows file shares (\\\\server\\share).\n\n", DimColor);
 
-        AppendTicketsLine(" LDAP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" LDAP ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Directory Service\n", TextColor, bold: true);
         AppendTicketsLine("       Used for Active Directory lookups and queries.\n\n", DimColor);
 
-        AppendTicketsLine(" HOST ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" HOST ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Host/Remote Admin\n", TextColor, bold: true);
         AppendTicketsLine("       Used for WinRM, remote management, and scheduled tasks.\n\n", DimColor);
 
-        AppendTicketsLine(" HTTP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" HTTP ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Web Service\n", TextColor, bold: true);
         AppendTicketsLine("       Used for Kerberos-authenticated web apps, ADFS, Exchange OWA.\n\n", DimColor);
 
-        AppendTicketsLine(" RDP  ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" RDP  ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Remote Desktop\n", TextColor, bold: true);
         AppendTicketsLine("       Authenticates Remote Desktop (TERMSRV) connections.\n\n", DimColor);
 
@@ -1026,27 +1208,77 @@ class MainForm : Form
 
     // ── Owner-drawn results ─────────────────────────────────
 
+    // NoPrefix: without it "&" is read as a mnemonic marker, so "SYSVOL & NETLOGON" drew as "SYSVOL _NETLOGON"
+    const TextFormatFlags DetailTextFlags = TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix;
+
+    // Results grid columns at 96 DPI: status mark and word, test name, then the detail to the right edge
+    const int GridLeft = 14, NameX = 100, DetailX = 280;
+
+    int DetailWidth(int width) => Math.Max(width - S(DetailX) - S(GridLeft), S(80));
+
+    static bool IsPending(TestEntry test) => test.Status == Status.Skip && test.Detail.Length == 0;
+
     int MeasureResultsHeight(int width)
     {
         if (_renderedGroups == null)
-            return 200;
+            return S(200);
 
-        int y = 8;
-        int detailW = Math.Max(width - 204, 80);
-
+        int y = S(4);
+        int detailW = DetailWidth(width);
         foreach (var group in _renderedGroups)
         {
-            y += 28;
+            y += S(34);
             foreach (var test in group.Tests)
             {
-                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
-                string detail = isPending ? "running..." : test.Detail;
-                var sz = TextRenderer.MeasureText(detail, TestDetailFont,
-                    new Size(detailW, 0), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
-                y += Math.Max(20, sz.Height + 4) + 2;
+                var sz = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+                y += S(4) + Math.Max(S(20), sz.Height + S(4));
             }
         }
-        return y + 14;
+        return y + S(14);
+    }
+
+    /// <summary>"9 checks · 1 failed · 1 warning", so a group's state reads without scanning its rows.</summary>
+    static string GroupCounts(TestGroup group)
+    {
+        int fail = group.Tests.Count(t => t.Status == Status.Fail);
+        int warn = group.Tests.Count(t => t.Status == Status.Warn);
+        int running = group.Tests.Count(IsPending);
+        string text = $"{group.Tests.Count} check{(group.Tests.Count == 1 ? "" : "s")}";
+        if (fail > 0) text += $" · {fail} failed";
+        if (warn > 0) text += $" · {warn} warning{(warn == 1 ? "" : "s")}";
+        if (running > 0) text += $" · {running} running";
+        return text;
+    }
+
+    // Each state has its own shape as well as its own colour, so it reads without colour vision
+    void DrawStatusMark(Graphics g, TestEntry test, int x, int y)
+    {
+        int d = S(10);
+        if (IsPending(test))
+        {
+            using var ring = new Pen(AccentColor, S(2));
+            g.DrawEllipse(ring, x + 1, y + 1, d - 2, d - 2);
+            return;
+        }
+        switch (test.Status)
+        {
+            case Status.Pass:
+                g.FillEllipse(PassBrush, x, y, d, d);
+                break;
+            case Status.Warn:
+                g.FillPolygon(WarnBrush, new Point[] { new(x + d / 2, y), new(x + d, y + d), new(x, y + d) });
+                break;
+            case Status.Fail:
+                using (var cross = new Pen(FailColor, S(2)))
+                {
+                    g.DrawLine(cross, x + 1, y + 1, x + d - 1, y + d - 1);
+                    g.DrawLine(cross, x + d - 1, y + 1, x + 1, y + d - 1);
+                }
+                break;
+            default:
+                g.FillRectangle(SkipBrush, x, y + d / 2 - S(1), d, S(2));
+                break;
+        }
     }
 
     void PaintResults(object? sender, PaintEventArgs e)
@@ -1059,56 +1291,87 @@ class MainForm : Form
         if (_renderedGroups == null)
         {
             string msg = _placeholderText ?? "Enter target domain and run diagnostics";
-            TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(16, 40), DimColor);
+            TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(S(GridLeft), S(40)), DimColor, TextFormatFlags.NoPrefix);
             return;
         }
 
-        int y = 8;
-        int nameX = 16;
-        int detailX = 190;
-        int detailW = Math.Max(w - 204, 80);
+        int y = S(4);
+        int left = S(GridLeft), right = w - S(GridLeft);
+        int detailW = DetailWidth(w);
+        _resultsCanvas.Rows.Clear();
 
         foreach (var group in _renderedGroups)
         {
-            y += 10;
-            TextRenderer.DrawText(g, group.Name.ToUpperInvariant(), GroupHeaderFont,
-                new Point(nameX, y), DimColor);
-            y += 18;
+            y += S(12);
+            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left - S(3), y), TextColor, TextFormatFlags.NoPrefix);
+            string counts = GroupCounts(group);
+            int countsW = TextRenderer.MeasureText(g, counts, GroupCountFont, Size.Empty, TextFormatFlags.NoPrefix).Width;
+            TextRenderer.DrawText(g, counts, GroupCountFont, new Point(right - countsW, y + S(2)), DimColor, TextFormatFlags.NoPrefix);
+            y += S(22);
 
             foreach (var test in group.Tests)
             {
-                Color detailColor;
-                string detail;
-                SolidBrush dotBrush;
-                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
-                if (isPending)
+                bool pending = IsPending(test);
+                var (word, color) = pending ? ("Running", DimColor) : test.Status switch
                 {
-                    dotBrush = AccentBrush;
-                    detailColor = DimColor;
-                    detail = "running...";
-                }
-                else
-                {
-                    dotBrush = test.Status switch { Status.Pass => PassBrush, Status.Fail => FailBrush, Status.Warn => WarnBrush, _ => SkipBrush };
-                    detailColor = test.Status switch { Status.Pass => PassColor, Status.Fail => FailColor, Status.Warn => WarnColor, _ => DimColor };
-                    detail = test.Detail;
-                }
+                    Status.Pass => ("Passed", PassColor),
+                    Status.Fail => ("Failed", FailColor),
+                    Status.Warn => ("Warning", WarnColor),
+                    _ => ("Skipped", DimColor),
+                };
 
-                g.FillEllipse(dotBrush, 2, y + 4, 8, 8);
-
+                g.DrawLine(RowLinePen, left, y, right, y);
+                y += S(4);
+                DrawStatusMark(g, test, left, y + S(4));
+                TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(1)), color, TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(g, test.Name, TestNameFont,
-                    new Rectangle(nameX, y, 170, 18), TextColor,
-                    TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                    new Rectangle(S(NameX), y, S(DetailX - NameX - 6), S(18)), TextColor,
+                    TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
-                var detailSize = TextRenderer.MeasureText(g, detail, TestDetailFont,
-                    new Size(detailW, 0), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
-                TextRenderer.DrawText(g, detail, TestDetailFont,
-                    new Rectangle(detailX, y + 1, detailW, detailSize.Height),
-                    detailColor, TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+                // The detail is plain text: the mark and word carry the status, so a long line stays readable
+                var detailSize = TextRenderer.MeasureText(g, test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+                TextRenderer.DrawText(g, test.Detail, TestDetailFont,
+                    new Rectangle(S(DetailX), y + S(1), detailW, detailSize.Height),
+                    test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
 
-                int rowH = Math.Max(20, detailSize.Height + 4);
-                y += rowH + 2;
+                int rowHeight = Math.Max(S(20), detailSize.Height + S(4));
+                _resultsCanvas.Rows.Add(new(group.Name, test.Name, word, test.Detail, new Rectangle(left, y, right - left, rowHeight)));
+                y += rowHeight;
             }
+        }
+    }
+
+    /// <summary>
+    /// The painted results list. It has no child controls, so it describes its rows to assistive technology
+    /// itself: a list whose items are the rows as last painted (name and status, the detail as the value).
+    /// </summary>
+    sealed class ResultsCanvas : Panel
+    {
+        public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds);
+
+        public readonly List<Row> Rows = [];
+
+        public ResultsCanvas() { DoubleBuffered = true; }
+
+        protected override AccessibleObject CreateAccessibilityInstance() => new ListAccessible(this);
+
+        sealed class ListAccessible(ResultsCanvas owner) : ControlAccessibleObject(owner)
+        {
+            public override AccessibleRole Role => AccessibleRole.List;
+            public override int GetChildCount() => owner.Rows.Count;
+            public override AccessibleObject? GetChild(int index) =>
+                index >= 0 && index < owner.Rows.Count ? new RowAccessible(owner, this, owner.Rows[index]) : null;
+        }
+
+        sealed class RowAccessible(ResultsCanvas owner, AccessibleObject list, Row row) : AccessibleObject
+        {
+            public override string? Name => $"{row.Name}, {row.Status}";
+            public override string? Value => row.Detail;
+            public override string? Description => row.Group;
+            public override AccessibleRole Role => AccessibleRole.ListItem;
+            public override AccessibleStates State => AccessibleStates.ReadOnly;
+            public override AccessibleObject? Parent => list;
+            public override Rectangle Bounds => owner.RectangleToScreen(row.Bounds);
         }
     }
 
@@ -1151,7 +1414,7 @@ class MainForm : Form
         var cts = _runCts;
 
         _btnRun.Enabled = false;
-        _btnExport.Enabled = false;
+        _btnExport.Enabled = _btnCopy.Enabled = false;
         _summaryPanel.Visible = false;
         _lblStatus.ForeColor = DimColor;
         _lblStatus.Text = "Running diagnostics...";
@@ -1165,7 +1428,7 @@ class MainForm : Form
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
-        var config = new DiagConfig(domain, dc);
+        var config = new DiagConfig(domain, dc, cts.Token);
         int completed = 0;
         int totalGroups = results.Count;
 
@@ -1179,13 +1442,18 @@ class MainForm : Form
             if (ReferenceEquals(SelectedRun, pendingRun)) ShowResults(results);
         }
 
-        var identityTask = Task.Run(() => TestDomainMembership(config));
-        var dcTask = Task.Run(() => TestDcConnectivity(config));
-        var dnsTask = Task.Run(() => TestDnsForAd(config));
-        var sysvolTask = Task.Run(() => TestSysvolNetlogon(config));
-        var gpTask = Task.Run(() => TestGroupPolicy(config));
-        var trustTask = Task.Run(() => TestTrusts(config));
-        var kerbTask = Task.Run(() => TestKerberosAndTime(config));
+        // Each group blocks on external tools and the network for seconds at a time, so it gets its own
+        // thread: on the shared pool they starve the continuations that read the tools' output
+        Task<TestGroup> StartGroup(Func<DiagConfig, TestGroup> test) =>
+            Task.Factory.StartNew(() => test(config), cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        var identityTask = StartGroup(cfg => Diagnostics.TestDomainMembership(cfg, Probe));
+        var dcTask = StartGroup(cfg => Diagnostics.TestDcConnectivity(cfg, Probe));
+        var dnsTask = StartGroup(cfg => Diagnostics.TestDnsForAd(cfg, Probe));
+        var sysvolTask = StartGroup(cfg => Diagnostics.TestSysvolNetlogon(cfg, Probe));
+        var gpTask = StartGroup(cfg => Diagnostics.TestGroupPolicy(cfg, Probe));
+        var trustTask = StartGroup(cfg => Diagnostics.TestTrusts(cfg, Probe));
+        var kerbTask = StartGroup(cfg => Diagnostics.TestKerberosAndTime(cfg, Probe));
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
@@ -1230,7 +1498,7 @@ class MainForm : Form
 
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
-        _btnExport.Enabled = SelectedRun is { IsPending: false };
+        _btnExport.Enabled = _btnCopy.Enabled = SelectedRun is { IsPending: false };
     }
 
     void RebuildHistoryBar()
@@ -1246,10 +1514,10 @@ class MainForm : Form
             return;
         }
 
-        int x = 10;
-        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, 6) };
+        int x = S(10);
+        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, S(6)) };
         _historyPanel.Controls.Add(lblRuns);
-        x += lblRuns.PreferredWidth + 4;
+        x += lblRuns.PreferredWidth + S(4);
 
         for (int ri = _runHistory.Count - 1; ri >= 0; ri--)
         {
@@ -1259,30 +1527,28 @@ class MainForm : Form
             bool isPending = run.IsPending;
             string label = isPending ? "Pending..." : run.Timestamp.ToString("HH:mm:ss");
 
-            var btn = new Button
+            var btn = new ThemedButton
             {
                 Text = label, FlatStyle = FlatStyle.Flat,
                 Font = selected ? HistoryFontBold : HistoryFont,
                 BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
-                ForeColor = selected ? Color.Black : (isPending ? WarnColor : DimColor),
-                Size = new Size(isPending ? 72 : 62, 20), Location = new Point(x, 4), Cursor = Cursors.Hand,
+                ForeColor = selected ? OnAccentColor : (isPending ? WarnColor : DimColor),
+                Size = new Size(S(isPending ? 72 : 62), S(20)), Location = new Point(x, S(4)),
             };
-            btn.FlatAppearance.BorderSize = 0;
             if (!isPending) btn.Click += (s, e) => SelectRun(idx);
             _historyPanel.Controls.Add(btn);
-            x += (isPending ? 76 : 66);
+            x += S(isPending ? 76 : 66);
         }
 
-        var del = new Button
+        var del = new ThemedButton
         {
-            Text = "Delete Run", FlatStyle = FlatStyle.Flat,
+            Text = "Delete run", FlatStyle = FlatStyle.Flat,
             Font = HistoryFont,
             BackColor = SurfaceColor, ForeColor = FailColor,
-            Size = new Size(70, 20), Cursor = Cursors.Hand,
+            Size = new Size(S(70), S(20)),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
-        del.FlatAppearance.BorderSize = 0;
-        del.Location = new Point(_historyPanel.ClientSize.Width - del.Width - 10, 4);
+        del.Location = new Point(_historyPanel.ClientSize.Width - del.Width - S(10), S(4));
         del.Click += (s, e) => DeleteRun(_selectedRunIndex);
         _historyPanel.Controls.Add(del);
 
@@ -1307,11 +1573,11 @@ class MainForm : Form
             _selectedRunIndex = -1;
             _renderedGroups = null;
             _placeholderText = "Run diagnostics for this domain";
-            _resultsCanvas.Height = 200;
+            _resultsCanvas.Height = S(200);
             _resultsCanvas.Invalidate();
             _summaryPanel.Visible = false;
             _lblStatus.Text = "";
-            _btnExport.Enabled = false;
+            _btnExport.Enabled = _btnCopy.Enabled = false;
         }
         else
         {
@@ -1329,7 +1595,7 @@ class MainForm : Form
         if (SelectedRun is not { } run) return;
         ShowResults(run.Results);
         _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
-        _btnExport.Enabled = !run.IsPending;
+        _btnExport.Enabled = _btnCopy.Enabled = !run.IsPending;
     }
 
     void ShowResults(List<TestGroup> results)
@@ -1344,18 +1610,9 @@ class MainForm : Form
         _summaryPanel.Visible = true;
     }
 
-    void BtnExport_Click(object? sender, EventArgs e)
+    /// <summary>The selected run as plain text: what Export saves and Copy puts on the clipboard.</summary>
+    static string BuildReport(DiagRun run)
     {
-        if (SelectedRun is not { IsPending: false } run) return;
-
-        using var dlg = new SaveFileDialog
-        {
-            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
-            Filter = "Text files (*.txt)|*.txt",
-            DefaultExt = ".txt"
-        };
-        if (dlg.ShowDialog() != DialogResult.OK) return;
-
         var sb = new StringBuilder();
         sb.AppendLine("===================================================");
         sb.AppendLine("  AD Diagnostics Report");
@@ -1380,10 +1637,40 @@ class MainForm : Form
             }
             sb.AppendLine();
         }
+        return sb.ToString();
+    }
+
+    void BtnCopy_Click(object? sender, EventArgs e)
+    {
+        if (SelectedRun is not { IsPending: false } run) return;
+        try
+        {
+            Clipboard.SetText(BuildReport(run));
+            _lblStatus.Text = "Results copied to the clipboard";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Copy failed: {ex.Message}";
+        }
+    }
+
+    void BtnExport_Click(object? sender, EventArgs e)
+    {
+        if (SelectedRun is not { IsPending: false } run) return;
+
+        using var dlg = new SaveFileDialog
+        {
+            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            Filter = "Text files (*.txt)|*.txt",
+            DefaultExt = ".txt"
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+
+        string report = BuildReport(run);
 
         try
         {
-            File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(dlg.FileName, report, Encoding.UTF8);
             _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
         }
         catch (Exception ex)
@@ -1429,237 +1716,37 @@ class MainForm : Form
         return groups;
     }
 
-    // ── Diagnostics engine ──────────────────────────────────
+    // ── What the diagnostics (Diagnostics.cs) ask of this machine ──
 
-    static TestGroup TestDomainMembership(DiagConfig cfg)
+    static readonly IProbe Probe = new WindowsProbe();
+
+    sealed class WindowsProbe : IProbe
     {
-        var tests = new List<TestEntry>();
-        string? dsreg = null;
+        public string RunTool(string tool, string arguments, int timeoutMs, CancellationToken ct) => RunProcess(tool, arguments, timeoutMs, ct);
+        public string RunPowerShell(string script, int timeoutMs, CancellationToken ct) => MainForm.RunPowerShell(script, timeoutMs, ct);
+        public IPAddress[] Resolve(string host, CancellationToken ct) => Runner.ResolveHost(host, ct);
+        public Task<bool> TcpConnect(IPAddress ip, int port, CancellationToken ct) => Runner.TryTcpConnectAsync(ip, port, ct);
 
-        try
-        {
-            dsreg = RunProcess("dsregcmd", "/status");
-            var m = Regex.Match(dsreg, @"DomainJoined\s*:\s*(\S+)");
-            bool domJoined = m.Success && m.Groups[1].Value == "YES";
-            tests.Add(new("Domain Joined",
-                domJoined ? Status.Pass : Status.Fail,
-                m.Success ? $"DomainJoined: {m.Groups[1].Value}" : "Could not determine"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Domain Joined", Status.Fail, $"dsregcmd error: {ex.Message}"));
-        }
+        public List<string>? QuerySrv(string record, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => MainForm.QuerySrv(record), Runner.DnsTimeoutMs, $"{record} query", ct);
 
-        try
+        public int? ShareEntries(string path, CancellationToken ct) => Runner.RunWithTimeout<int?>(
+            () => Directory.Exists(path) ? Directory.GetFileSystemEntries(path).Length : null,
+            ShareTimeoutMs, $"Opening {path}", ct);
+
+        public string CurrentUser()
         {
-            var id = WindowsIdentity.GetCurrent();
-            tests.Add(new("Logged-on User", Status.Pass, id.Name));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Logged-on User", Status.Fail, $"Cannot get identity: {ex.Message}"));
+            using var id = WindowsIdentity.GetCurrent();
+            return id.Name;
         }
 
-        try
-        {
-            string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000);
-            var sc = Parsers.ParseScVerify(scVerify);
-            if (sc.AccessDenied)
-                tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
-            else
-                tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        try
-        {
-            string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000);
-            string? siteError = Parsers.NltestError(dsGetSite);
-            string site = Parsers.ParseSite(dsGetSite) ?? "";
-            string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
-                + " - subnet may not be registered in AD Sites and Services";
-            tests.Add(new("Site Assignment",
-                !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
-                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        try
-        {
-            var result = Parsers.ParsePasswordAgeQuery(RunPowerShell(PasswordAgeScript, timeoutMs: 15000));
-            string where = result.Domain == null ? ""
-                : result.Domain.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase) ? ""
-                : $" (account is in {result.Domain}, not the target domain)";
-            if (result.Error != null)
-            {
-                tests.Add(new("Computer Password Age", Status.Warn, $"Could not query AD: {result.Error}"));
-            }
-            else if (result.LastSetUtc is not { } lastSetUtc)
-            {
-                tests.Add(new("Computer Password Age", Status.Skip, $"Computer object not found in {result.Domain}"));
-            }
-            else if (lastSetUtc.Year < 1700)
-            {
-                // pwdLastSet = 0 converts to 1601-01-01
-                tests.Add(new("Computer Password Age", Status.Warn, $"pwdLastSet is 0 — the computer account password was reset or never set{where}"));
-            }
-            else
-            {
-                var lastChanged = lastSetUtc.ToLocalTime();
-                var age = DateTime.Now - lastChanged;
-                tests.Add(new("Computer Password Age",
-                    age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
-                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "") + where));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Computer Password Age", Status.Warn, $"AD query failed: {ex.Message}"));
-        }
-
-        return new("Domain Membership & Identity", tests);
-    }
-
-    static TestGroup TestDcConnectivity(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-        string? dcHost = null;
-
-        try
-        {
-            string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000);
-            dcHost = Parsers.ParseDcLocator(dsGetDc);
-            if (dcHost != null)
-            {
-                tests.Add(new("Locate DC", Status.Pass, $"Found {dcHost}"));
-            }
-            else
-            {
-                tests.Add(new("Locate DC", Status.Fail, "Could not locate a domain controller"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Locate DC", Status.Fail, $"nltest error: {ex.Message}"));
-        }
-
-        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : (dcHost ?? cfg.Domain);
-        IPAddress? kdcIp = null;
-        try
-        {
-            kdcIp = Dns.GetHostAddresses(kdc)
-                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
-                .OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1) // prefer IPv4, fall back to IPv6
-                .FirstOrDefault();
-        }
-        catch { }
-
-        var portTasks = new List<(string Name, int Port, Task<bool> Task)>
-        {
-            ("Port 389 (LDAP)", 389, Task.Run(() => TryTcpConnect(kdcIp, kdc, 389))),
-            ("Port 636 (LDAPS)", 636, Task.Run(() => TryTcpConnect(kdcIp, kdc, 636))),
-            ("Port 88 (Kerberos)", 88, Task.Run(() => TryTcpConnect(kdcIp, kdc, 88))),
-            ("Port 445 (SMB)", 445, Task.Run(() => TryTcpConnect(kdcIp, kdc, 445))),
-            ("Port 135 (RPC)", 135, Task.Run(() => TryTcpConnect(kdcIp, kdc, 135))),
-            ("Port 464 (Kpasswd)", 464, Task.Run(() => TryTcpConnect(kdcIp, kdc, 464))),
-            ("Port 53 (DNS)", 53, Task.Run(() => TryTcpConnect(kdcIp, kdc, 53))),
-            ("Port 3268 (Global Catalog)", 3268, Task.Run(() => TryTcpConnect(kdcIp, kdc, 3268))),
-        };
-
-        Task.WaitAll(portTasks.Select(p => p.Task).ToArray());
-
-        foreach (var (name, port, task) in portTasks)
-        {
-            bool open = task.Result;
-            bool required = port is 389 or 88 or 445;
-            if (kdcIp == null)
-                tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
-            else
-                tests.Add(new(name,
-                    open ? Status.Pass : (required ? Status.Fail : Status.Warn),
-                    open ? $"Reachable at {kdc} ({kdcIp})" : $"Unreachable at {kdc} ({kdcIp})"));
-        }
-
-        return new("DC Discovery & Connectivity", tests);
-    }
-
-    static TestGroup TestDnsForAd(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>
-        {
-            LookupSrv($"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true),
-            LookupSrv($"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true),
-            LookupSrv($"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false),
-        };
-
-        try
-        {
-            string host = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-            var addrs = Dns.GetHostAddresses(host)
-                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
-                .ToArray();
-            tests.Add(new("DC A Record",
-                addrs.Length > 0 ? Status.Pass : Status.Fail,
-                addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("DC A Record", Status.Fail, $"Resolution failed: {ex.Message}"));
-        }
-
-        try
+        public (string SearchList, string Domain) DnsSuffixConfig()
         {
             using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters");
-            var searchList = key?.GetValue("SearchList") as string ?? "";
-            var domain = key?.GetValue("Domain") as string ?? "";
-            var suffixes = new List<string>();
-            if (!string.IsNullOrWhiteSpace(searchList))
-                suffixes.AddRange(searchList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0));
-            else if (!string.IsNullOrWhiteSpace(domain))
-                suffixes.Add(domain);
-
-            if (suffixes.Count > 0)
-            {
-                bool hasDomain = suffixes.Any(s => s.Contains(cfg.Domain, StringComparison.OrdinalIgnoreCase));
-                tests.Add(new("DNS Suffix Search List",
-                    hasDomain ? Status.Pass : Status.Warn,
-                    string.Join(", ", suffixes) + (hasDomain ? "" : $" — target domain {cfg.Domain} not in suffix list")));
-            }
-            else
-            {
-                tests.Add(new("DNS Suffix Search List", Status.Warn, "No DNS suffix configured"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("DNS Suffix Search List", Status.Warn, $"Registry read failed: {ex.Message}"));
+            return (key?.GetValue("SearchList") as string ?? "", key?.GetValue("Domain") as string ?? "");
         }
 
-        return new("DNS for Active Directory", tests);
-    }
-
-    static TestEntry LookupSrv(string record, string testName, bool required)
-    {
-        string optional = required ? "" : " (optional)";
-        try
-        {
-            var targets = QuerySrv(record);
-            if (targets == null)
-                return new(testName, required ? Status.Fail : Status.Warn, $"No {record} record{optional}");
-
-            string hosts = string.Join(", ", targets.Take(3)) + (targets.Count > 3 ? $" (+{targets.Count - 3} more)" : "");
-            return new(testName, Status.Pass, $"{record} -> {hosts}{optional}");
-        }
-        catch (Exception ex)
-        {
-            return new(testName, Status.Warn, $"DNS query failed: {ex.Message}");
-        }
+        public string?[] OwnDomainNames() => GetOwnDomainNames();
     }
 
     const ushort DnsTypeSrv = 33;
@@ -1722,265 +1809,13 @@ class MainForm : Form
     [DllImport("dnsapi.dll")]
     static extern void DnsRecordListFree(IntPtr recordList, int freeType);
 
-    static TestGroup TestSysvolNetlogon(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        void TestShare(string shareName, string testName)
-        {
-            string path = $@"\\{cfg.Domain}\{shareName}";
-            try
-            {
-                bool exists = Directory.Exists(path);
-                if (exists)
-                {
-                    var entries = Directory.GetFileSystemEntries(path);
-                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries.Length} entries)"));
-                }
-                else
-                {
-                    tests.Add(new(testName, Status.Fail, $"{path} not accessible"));
-                }
-            }
-            catch (UnauthorizedAccessException)
-            {
-                tests.Add(new(testName, Status.Warn, $"{path} exists but access denied — check permissions"));
-            }
-            catch (Exception ex)
-            {
-                tests.Add(new(testName, Status.Fail, $"{path} — {ex.Message}"));
-            }
-        }
-
-        TestShare("SYSVOL", "SYSVOL Access");
-        TestShare("NETLOGON", "NETLOGON Access");
-
-        return new("SYSVOL & NETLOGON", tests);
-    }
-
-    static TestGroup TestGroupPolicy(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        try
-        {
-            var scopes = QueryRsop(out _);
-            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
-            var user = scopes.FirstOrDefault(s => s.Name == "User");
-            var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
-
-            if (primary == null)
-            {
-                string why = scopes.Count == 0 ? "Could not read Group Policy results"
-                    : string.Join("; ", scopes.Select(GpScopeUnavailable));
-                tests.Add(new("GP Last Refresh", Status.Warn, why));
-                tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
-                tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
-                return new("Group Policy", tests);
-            }
-
-            string scopeLabel = primary.Name;
-            string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
-
-            if (primary.LastAppliedUtc is { } lastUtc)
-            {
-                var lastTime = lastUtc.ToLocalTime();
-                var age = DateTime.Now - lastTime;
-                tests.Add(new("GP Last Refresh",
-                    age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
-                    $"{scopeLabel}: {lastTime:g} ({FormatTimeSpan(age)} ago){elevationNote}"));
-            }
-            else
-            {
-                tests.Add(new("GP Last Refresh", Status.Warn,
-                    $"Could not determine last refresh time{elevationNote}"));
-            }
-
-            int appliedCount = primary.Applied.Count;
-            tests.Add(new("Applied GPOs",
-                appliedCount > 0 ? Status.Pass : Status.Warn,
-                appliedCount > 0
-                    ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
-                    : $"{scopeLabel}: No applied GPOs found{elevationNote}"));
-
-            int deniedCount = primary.Denied.Count;
-            tests.Add(new("Denied GPOs", Status.Pass,
-                $"{scopeLabel}: {deniedCount} GPO(s) filtered out (informational){elevationNote}"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("GP Last Refresh", Status.Fail, $"Group Policy query error: {ex.Message}"));
-            tests.Add(new("Applied GPOs", Status.Skip, "Group Policy results unavailable"));
-            tests.Add(new("Denied GPOs", Status.Skip, "Group Policy results unavailable"));
-        }
-
-        return new("Group Policy", tests);
-    }
-
-    static TestGroup TestTrusts(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-
-        try
-        {
-            string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
-            string? trustError = Parsers.NltestError(trusts);
-            var lines = Parsers.ParseTrusts(trusts, GetOwnDomainNames());
-
-            if (trustError != null)
-                tests.Add(new("Domain Trusts", Status.Warn, $"nltest /domain_trusts failed: {trustError}"));
-            else if (lines.Count > 0)
-                tests.Add(new("Domain Trusts", Status.Pass, $"{lines.Count} trust(s): {string.Join(" | ", lines.Take(5))}"));
-            else
-                tests.Add(new("Domain Trusts", Status.Pass, "No additional trusts found (single-domain environment)"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
-        return new("Trust Relationships", tests);
-    }
-
-    static TestGroup TestKerberosAndTime(DiagConfig cfg)
-    {
-        var tests = new List<TestEntry>();
-        string realm = cfg.Domain.ToUpperInvariant();
-
-        try
-        {
-            // The cache alone is unreliable: other tests running in parallel may populate it, and an
-            // elevated session starts with its own empty cache. So if no TGT is cached, request one.
-            string klist = RunProcess("klist", "", timeoutMs: 5000);
-            if (Parsers.HasTgt(klist, realm))
-            {
-                tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} cached"));
-            }
-            else
-            {
-                string get = RunProcess("klist", $"get krbtgt/{realm}", timeoutMs: 10000);
-                if (Parsers.HasTgt(get, realm))
-                    tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)"));
-                else
-                    tests.Add(new("TGT Present", Status.Fail,
-                        $"Could not obtain a TGT for {realm}" + (Parsers.KlistError(get) is { } err ? $" ({err})" : "") + " - no KDC contact"));
-            }
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("TGT Present", Status.Fail, $"klist error: {ex.Message}"));
-        }
-
-        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-        try
-        {
-            string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000);
-            if (Parsers.ParseStripchartSkew(w32) is { } skew)
-            {
-                tests.Add(new("Clock Skew",
-                    skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
-                    $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
-            }
-            else
-                tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
-        }
-        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
-
-        try
-        {
-            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000);
-            if (Parsers.ParseTimeSource(w32source) is not { } source)
-                throw new InvalidOperationException(w32source.Trim());
-            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, Dns.GetHostAddresses);
-            tests.Add(new("Time Source",
-                fromDomain ? Status.Pass : Status.Warn,
-                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
-        }
-
-        return new("Kerberos & Time Sync", tests);
-    }
-
     // ── Helpers ─────────────────────────────────────────────
 
-    // The computer account lives in the computer's domain, which isn't necessarily the logged-on user's
-    // (the default [adsisearcher] root) or the target domain. Output: "OK|<domain>|<UTC ISO>", "NOTFOUND|<domain>"
-    // or "ERROR|<message>" — errors go to stdout because -EncodedCommand serializes stderr as CLIXML.
-    const string PasswordAgeScript = """
-        $ErrorActionPreference = 'Stop'
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain().Name
-            $filter = "(&(objectCategory=computer)(sAMAccountName=$($env:COMPUTERNAME)`$))"
-            $s = New-Object System.DirectoryServices.DirectorySearcher([adsi]"LDAP://$d", $filter, @('pwdLastSet'))
-            $r = $s.FindOne()
-            if ($r) { "OK|$d|" + [datetime]::FromFileTimeUtc([int64]$r.Properties['pwdlastset'][0]).ToString('o') }
-            else { "NOTFOUND|$d" }
-        } catch {
-            $e = $_.Exception
-            if ($e.InnerException) { $e = $e.InnerException }
-            "ERROR|" + ($e.Message -replace '\s+', ' ')
-        }
-        """;
-
-    // Group Policy results from the RSoP logging data in WMI (what gpresult itself reads), which, unlike gpresult's
-    // text, is the same in every display language. Output format: see Parsers.ParseRsop. The last-applied time
-    // comes from the GP engine's own State key, falling back to when the RSoP session was logged.
-    const string RsopScript = """
-        $ErrorActionPreference = 'Stop'
-        $ProgressPreference = 'SilentlyContinue'
-        function Clean($s) { "$s" -replace '\s+', ' ' }
-        function Flag($b) { if ($b) { '1' } else { '0' } }
-        function Get-LastApplied($stateKey) {
-            try {
-                $p = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\$stateKey\Extension-List\{00000000-0000-0000-0000-000000000000}"
-                $ft = ([int64]$p.EndTimeHi -shl 32) -bor ([int64]$p.EndTimeLo -band 0xFFFFFFFF)
-                if ($ft -gt 0) { [datetime]::FromFileTimeUtc($ft) }
-            } catch { }
-        }
-        function Write-Scope($scope, $ns, $stateKey) {
-            try {
-                $session = Get-CimInstance -Namespace $ns -ClassName RSOP_Session | Select-Object -First 1
-                $gpos = @{}
-                Get-CimInstance -Namespace $ns -ClassName RSOP_GPO | ForEach-Object { $gpos[$_.id] = $_ }
-                $links = @(Get-CimInstance -Namespace $ns -ClassName RSOP_GPLink)
-            } catch {
-                $e = $_.Exception
-                $code = if ($e -is [Microsoft.Management.Infrastructure.CimException]) { "$($e.NativeErrorCode)" } else { '' }
-                if ($code -eq 'AccessDenied') { "SCOPE|$scope|DENIED" }
-                elseif ($code -eq 'InvalidNamespace') { "SCOPE|$scope|NODATA" }
-                else { "SCOPE|$scope|ERROR|" + (Clean $e.Message) }
-                return
-            }
-            if (-not $session) { "SCOPE|$scope|NODATA"; return }
-            $last = Get-LastApplied $stateKey
-            if (-not $last -and $session.creationTime) { $last = $session.creationTime.ToUniversalTime() }
-            "SCOPE|$scope|OK|" + $(if ($last) { $last.ToString('o') } else { '' }) + '|' + (Clean $session.site)
-            foreach ($l in $links) {
-                $g = $gpos[$l.GPO.id]
-                if (-not $g) { continue }
-                "GPO|$scope|$($g.id)|$([int]$l.appliedOrder)|$(Flag $l.enabled)|$(Flag $g.enabled)|$(Flag $g.accessDenied)|$(Flag $g.filterAllowed)|" + (Clean $g.name)
-            }
-        }
-        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        Write-Scope 'Computer' 'root\rsop\computer' 'Machine'
-        Write-Scope 'User' "root\rsop\user\$($sid -replace '-', '_')" $sid
-        """;
-
-    static List<GpScope> QueryRsop(out string raw)
-    {
-        raw = RunPowerShell(RsopScript, timeoutMs: 25000);
-        return Parsers.ParseRsop(raw);
-    }
-
     /// <summary>Runs a PowerShell script passed via -EncodedCommand, avoiding command-line quoting entirely.</summary>
-    static string RunPowerShell(string script, int timeoutMs)
+    static string RunPowerShell(string script, int timeoutMs, CancellationToken ct = default)
     {
         string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-        return RunProcess("powershell", $"-NoProfile -NonInteractive -EncodedCommand {encoded}", timeoutMs);
+        return RunProcess("powershell", $"-NoProfile -NonInteractive -EncodedCommand {encoded}", timeoutMs, ct);
     }
 
     // Console tools write redirected output in the OEM code page (e.g. 437, 850), not UTF-8;
@@ -2028,16 +1863,75 @@ class MainForm : Form
         return [netbios, dns];
     }
 
-    // External tools still running; killed on exit so none outlive the app
-    static readonly ConcurrentDictionary<Process, byte> RunningProcesses = new();
+    // Every tool the app starts is put in this job, which Windows empties when the app's handle to it closes.
+    // So no tool outlives the app, whether it exits normally, crashes or is ended from Task Manager.
+    static readonly IntPtr ChildJob = CreateChildJob();
 
-    static void KillRunningProcesses()
+    const int JobObjectExtendedLimitInformationClass = 9;
+    const uint JobObjectLimitKillOnJobClose = 0x2000;
+
+    static IntPtr CreateChildJob()
     {
-        foreach (var proc in RunningProcesses.Keys)
+        try
         {
-            try { proc.Kill(true); } catch { }
+            IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) return IntPtr.Zero;
+            var info = new JobObjectExtendedLimitInformation();
+            info.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformationClass, ref info, Marshal.SizeOf<JobObjectExtendedLimitInformation>());
+            return job;
         }
+        catch { return IntPtr.Zero; }
     }
+
+    static void KillChildProcesses()
+    {
+        if (ChildJob != IntPtr.Zero) TerminateJobObject(ChildJob, 1);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount; // IO_COUNTERS
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string? name);
+
+    [DllImport("kernel32.dll")]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JobObjectExtendedLimitInformation info, int length);
+
+    [DllImport("kernel32.dll")]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll")]
+    static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     /// <summary>
     /// Full path of a Windows tool in System32. A bare name would make CreateProcess search the exe's own folder
@@ -2059,76 +1953,23 @@ class MainForm : Form
         catch { }
     }
 
-    /// <summary>Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on timeout.</summary>
-    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000)
+    const int ShareTimeoutMs = 20000;
+
+    /// <summary>Runs a System32 tool inside the kill-on-close job; see <see cref="Runner.RunProcess"/>.</summary>
+    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000, CancellationToken ct = default) =>
+        Runner.RunProcess(SystemTool(fileName), arguments, timeoutMs, ct, ConsoleEncoding,
+            proc => { if (ChildJob != IntPtr.Zero) AssignProcessToJobObject(ChildJob, proc.Handle); });
+
+    static bool FontInstalled(string family)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = SystemTool(fileName), Arguments = arguments,
-            UseShellExecute = false, RedirectStandardOutput = true,
-            RedirectStandardError = true, CreateNoWindow = true,
-            // Closed immediately, so a tool that prompts (e.g. gpupdate's "OK to log off? (Y/N)") reads EOF instead of waiting
-            RedirectStandardInput = true,
-            StandardOutputEncoding = ConsoleEncoding,
-            StandardErrorEncoding = ConsoleEncoding,
-        };
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        RunningProcesses.TryAdd(proc, 0);
-        try
-        {
-            proc.StandardInput.Close();
-            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-            var stderrTask = proc.StandardError.ReadToEndAsync();
-            if (!proc.WaitForExit(timeoutMs))
-            {
-                try { proc.Kill(true); } catch { }
-                throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
-            }
-            string stdout = stdoutTask.GetAwaiter().GetResult();
-            string stderr = stderrTask.GetAwaiter().GetResult();
-            if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
-                return stderr;
-            return stdout;
-        }
-        finally
-        {
-            RunningProcesses.TryRemove(proc, out _);
-        }
+        using var probe = new Font(family, 9f);
+        return probe.Name.Equals(family, StringComparison.OrdinalIgnoreCase);
     }
 
-    static bool TryTcpConnect(IPAddress? ip, string host, int port, int timeoutMs = 3000)
-    {
-        try
-        {
-            using var client = ip != null ? new TcpClient(ip.AddressFamily) : new TcpClient();
-            var task = ip != null ? client.ConnectAsync(ip, port) : client.ConnectAsync(host, port);
-            if (!task.Wait(timeoutMs))
-            {
-                // Connect is still in flight past the timeout; observe its eventual fault so it
-                // never surfaces as an unobserved task exception once the client above is disposed.
-                _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
-                return false;
-            }
-            return client.Connected;
-        }
-        catch { return false; }
-    }
-
-    static string FormatTimeSpan(TimeSpan ts)
-    {
-        if (ts.TotalDays >= 1) return $"{(int)ts.TotalDays}d {ts.Hours}h";
-        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
-        return $"{(int)ts.TotalMinutes}m";
-    }
 }
 
 // ── Data types ──────────────────────────────────────────
 
-record DiagConfig(string Domain, string Dc);
-enum Status { Pass, Fail, Warn, Skip }
-record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
-record TestGroup(string Name, List<TestEntry> Tests);
 record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Results)
 {
     public bool IsPending => Timestamp == DateTime.MinValue;

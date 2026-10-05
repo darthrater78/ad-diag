@@ -1,15 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <RootNamespace>AdDiag.Tests</RootNamespace>
   </PropertyGroup>
 
-  <!-- Compile the app's parsers directly: the app itself is WinForms and can't load off Windows. -->
+  <!-- Compile the app's parsers and runner directly: the app itself is WinForms and can't load off Windows. -->
   <ItemGroup>
     <Compile Include="../../Parsers.cs" Link="Parsers.cs" />
+    <Compile Include="../../Runner.cs" Link="Runner.cs" />
+    <Compile Include="../../Diagnostics.cs" Link="Diagnostics.cs" />
   </ItemGroup>
 
   <ItemGroup>

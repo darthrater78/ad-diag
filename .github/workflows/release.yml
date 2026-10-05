@@ -46,7 +46,7 @@ jobs:
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "10.0.x"
 
       # The build takes its version from the tag, so also require the tagged source to declare it: a tag pushed
       # before the bump would otherwise ship an exe whose version no commit claims

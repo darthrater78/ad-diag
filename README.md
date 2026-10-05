@@ -2,9 +2,13 @@
 
 Standalone Windows diagnostic tool that checks the health of a domain-joined machine's relationship with Active Directory. Single-exe, no install required.
 
-[GitHub](https://github.com/darthrater78/ad-diag) · [v1.1.0 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v1.1.0)
+[GitHub](https://github.com/darthrater78/ad-diag) · [v1.2.0 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v1.2.0)
 
 ![Results tab showing a completed diagnostic run](docs/screenshots/results.png)
+
+The header button switches to **Dark mode**, and back to the light theme, **Flashbang**:
+
+![The same Results tab in Dark mode](docs/screenshots/results-dark.png)
 
 ## Download
 
@@ -39,7 +43,8 @@ Up to 5 diagnostic runs are stored with timestamps — click any run to review i
 
 - **Clear** — clears results and run history, keeps input fields
 - **Reset** — clears everything including input fields
-- **Export Results** — saves a timestamped text report via Save dialog
+- **Export results** — saves a timestamped text report via Save dialog
+- **Copy results** — puts the same report on the clipboard, for pasting into a ticket
 
 ## Security
 
@@ -54,7 +59,8 @@ This tool is **read-only and diagnostic**. It does not store, transmit, or log a
 ### Process isolation
 
 - **Single instance enforced.** A per-session mutex prevents multiple instances from running simultaneously in the same logon session (other users on a shared host can run their own).
-- **Nothing outlives the app.** On close, the in-flight diagnostic run is cancelled, any external tool still running (and its child processes) is killed, and `Environment.Exit(0)` ensures the process cannot linger.
+- **Nothing outlives the app.** Every external tool is started inside a Windows job object set to kill-on-close, so the tools end with the app however it exits (normal close, crash or End Task). On close, the in-flight diagnostic run is cancelled, the job is emptied and the process terminates itself outright rather than waiting on worker threads.
+- **Every network call has a deadline.** DNS lookups (8s), SRV queries (8s), TCP port checks (3s) and share access (20s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
 - **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
@@ -157,11 +163,11 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 ## Architecture
 
-**Runtime:** .NET 8 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
+**Runtime:** .NET 10 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
+**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs` holds the seven test groups, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
-**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Dark theme. Test groups stream results in real-time as each completes.
+**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Starts in the Windows light or dark app setting; the header button switches between **Dark mode** and the light theme, **Flashbang**, at any time (the choice is not saved, since the app writes nothing to disk). Scales with the display DPI; every status has its own shape as well as its own colour, and each result row is exposed to screen readers as a list item. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
 **Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and SRV lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too.
 
@@ -188,11 +194,11 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 | `powershell` (DirectorySearcher) | Computer password age from AD | 15s |
 | `powershell` (Get-CimInstance, `root\rsop`) | Group Policy results (diagnostics + tab) | 25s |
 
-All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout.
+All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout; the same deadline covers a tool that exits but leaves its output pipe open.
 
 ## Build from Source
 
-Requires [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
+Requires [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 
 ```
 git clone https://github.com/darthrater78/ad-diag.git
@@ -200,7 +206,7 @@ cd ad-diag
 dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
-Output: `bin/Release/net8.0-windows/win-x64/publish/ad-diag.exe`
+Output: `bin/Release/net10.0-windows/win-x64/publish/ad-diag.exe`
 
 Run the parser tests (works on Windows, Linux or macOS):
 
@@ -214,12 +220,13 @@ The README screenshots are generated from mock data by `tools/screenshots/run.sh
 
 ## Releasing
 
-Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to `main` and every pull request, and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
+Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the seven diagnostic groups against a faked machine, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
 
 ## Version History
 
 | Version | Date | Changes |
 |---|---|---|
+| v1.2.0 | 2026-10-05 | No more hangs when the domain is unreachable: DNS, SRV, port and share checks all have deadlines, and SYSVOL/NETLOGON are opened only after port 445 answers. Closing the app or clearing results cancels the run, tools can no longer outlive the app (kill-on-close job object), and `ad-diag.exe` no longer lingers after its window closes. New look: native Windows styling with a Dark mode / Flashbang (light) switch that starts from the Windows setting, a results grid whose status marks differ by shape as well as colour, plain-text details, per-group counts, and DPI scaling. New **Copy results** button; Enter starts a run; each result row is exposed to screen readers. Fixed `&` missing from group headers and overlapping text in the header and summary. Moved to .NET 10. CI builds every branch, skips docs-only changes, and tests the process and network runner |
 | v1.1.0 | 2026-09-27 | Works on non-English Windows: Group Policy is read from RSoP (WMI) instead of `gpresult` text, SRV records via `DnsQuery`, and `nltest`/`klist`/`w32tm` output parsed by structure and status codes, not English labels; a broken secure channel no longer passes on localized Windows. TGT Present requests a ticket when none is cached (elevated sessions); Computer Password Age queries the computer's own domain; DNS and port checks support IPv6-only DCs. Tool timeouts are reported as failures, prompting tools no longer hang, and running tools are killed on exit. Trust enumeration excludes the machine's own domain and warns when `nltest` fails. Windows tools are launched by full System32 path and native DLLs load only from System32, so copies planted next to the exe are never run; header links open unelevated, and Release Notes links to this version's notes. Release pipeline: CI with parser tests, SHA-pinned actions, checksum and provenance attestation, CodeQL and dependency review |
 | v1.0.2 | 2026-07-16 | Release asset is now a single self-contained exe (no zip); native libraries are bundled into the single file; fixed the in-app version badge, which was hardcoded and had gone stale |
 | v1.0.1 | 2026-07-16 | Fixed 10 correctness bugs: wrong rows shown as running, crash or corrupted history when deleting a run mid-flight, Clear Results not stopping the run, `klist` Client and Ticket Flags fields dropped, Group Policy and Results tabs disagreeing on GPO counts, gpupdate garbling the Group Policy tab, a stuck Group Policy guard, a faulted test group crashing the app, and unobserved exceptions from abandoned TCP connects |
