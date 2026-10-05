@@ -1341,7 +1341,10 @@ class MainForm : Form
         }
     }
 
-    /// <summary>The painted results list, with the rows as last painted.</summary>
+    /// <summary>
+    /// The painted results list. It has no child controls, so it describes its rows to assistive technology
+    /// itself: a list whose items are the rows as last painted (name and status, the detail as the value).
+    /// </summary>
     sealed class ResultsCanvas : Panel
     {
         public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds);
@@ -1350,6 +1353,26 @@ class MainForm : Form
 
         public ResultsCanvas() { DoubleBuffered = true; }
 
+        protected override AccessibleObject CreateAccessibilityInstance() => new ListAccessible(this);
+
+        sealed class ListAccessible(ResultsCanvas owner) : ControlAccessibleObject(owner)
+        {
+            public override AccessibleRole Role => AccessibleRole.List;
+            public override int GetChildCount() => owner.Rows.Count;
+            public override AccessibleObject? GetChild(int index) =>
+                index >= 0 && index < owner.Rows.Count ? new RowAccessible(owner, this, owner.Rows[index]) : null;
+        }
+
+        sealed class RowAccessible(ResultsCanvas owner, AccessibleObject list, Row row) : AccessibleObject
+        {
+            public override string? Name => $"{row.Name}, {row.Status}";
+            public override string? Value => row.Detail;
+            public override string? Description => row.Group;
+            public override AccessibleRole Role => AccessibleRole.ListItem;
+            public override AccessibleStates State => AccessibleStates.ReadOnly;
+            public override AccessibleObject? Parent => list;
+            public override Rectangle Bounds => owner.RectangleToScreen(row.Bounds);
+        }
     }
 
     void RenderResults(List<TestGroup> groups)
