@@ -1,8 +1,10 @@
 name: CI
 
+# Every branch push builds, so a branch can be tested (and its exe downloaded) before any pull request exists.
+# pull_request is kept for forks only, whose pushes don't run here; same-repo PRs are covered by the push run.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
 
 permissions:
@@ -15,6 +17,7 @@ concurrency:
 jobs:
   # A docs-only change (Markdown, docs/, screenshots) has nothing to build or test
   changes:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -32,7 +35,7 @@ jobs:
   build:
     needs: changes
     # Runs unless the change is known to be docs-only; if the changes job itself fails, build anyway
-    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.changes.result != 'skipped' && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -49,6 +52,10 @@ jobs:
 
       - name: Test
         run: dotnet test tests/AdDiag.Tests -c Release -warnaserror
+
+      # The screenshot harness compiles the app's own MainForm; it only runs on Linux, but it must keep building
+      - name: Build screenshot harness
+        run: dotnet build tools/screenshots/Shots.csproj -c Release -warnaserror
 
       - name: Publish (single-file smoke test)
         run: dotnet publish AdDiag.csproj -c Release -r win-x64 -o publish
