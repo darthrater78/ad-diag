@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -332,8 +331,11 @@ class MainForm : Form
         };
         FormClosed += (s, e) =>
         {
-            KillRunningProcesses();
-            Environment.Exit(0);
+            KillChildProcesses();
+            // Not Environment.Exit: that runs the runtime's orderly shutdown, which can wait on worker threads
+            // still inside a Windows call and leave ad-diag.exe running with no window. There is nothing to
+            // flush (the app writes no files), so end the process outright.
+            TerminateProcess(GetCurrentProcess(), 0);
         };
         _ = DetectDomainAsync();
     }
@@ -1165,7 +1167,7 @@ class MainForm : Form
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
-        var config = new DiagConfig(domain, dc);
+        var config = new DiagConfig(domain, dc, cts.Token);
         int completed = 0;
         int totalGroups = results.Count;
 
@@ -1179,13 +1181,18 @@ class MainForm : Form
             if (ReferenceEquals(SelectedRun, pendingRun)) ShowResults(results);
         }
 
-        var identityTask = Task.Run(() => TestDomainMembership(config));
-        var dcTask = Task.Run(() => TestDcConnectivity(config));
-        var dnsTask = Task.Run(() => TestDnsForAd(config));
-        var sysvolTask = Task.Run(() => TestSysvolNetlogon(config));
-        var gpTask = Task.Run(() => TestGroupPolicy(config));
-        var trustTask = Task.Run(() => TestTrusts(config));
-        var kerbTask = Task.Run(() => TestKerberosAndTime(config));
+        // Each group blocks on external tools and the network for seconds at a time, so it gets its own
+        // thread: on the shared pool they starve the continuations that read the tools' output
+        Task<TestGroup> StartGroup(Func<DiagConfig, TestGroup> test) =>
+            Task.Factory.StartNew(() => test(config), cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        var identityTask = StartGroup(TestDomainMembership);
+        var dcTask = StartGroup(TestDcConnectivity);
+        var dnsTask = StartGroup(TestDnsForAd);
+        var sysvolTask = StartGroup(TestSysvolNetlogon);
+        var gpTask = StartGroup(TestGroupPolicy);
+        var trustTask = StartGroup(TestTrusts);
+        var kerbTask = StartGroup(TestKerberosAndTime);
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
@@ -1438,7 +1445,7 @@ class MainForm : Form
 
         try
         {
-            dsreg = RunProcess("dsregcmd", "/status");
+            dsreg = RunProcess("dsregcmd", "/status", ct: cfg.Cancel);
             var m = Regex.Match(dsreg, @"DomainJoined\s*:\s*(\S+)");
             bool domJoined = m.Success && m.Groups[1].Value == "YES";
             tests.Add(new("Domain Joined",
@@ -1462,7 +1469,7 @@ class MainForm : Form
 
         try
         {
-            string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000);
+            string scVerify = RunProcess("nltest", $"/sc_verify:{cfg.Domain}", timeoutMs: 10000, ct: cfg.Cancel);
             var sc = Parsers.ParseScVerify(scVerify);
             if (sc.AccessDenied)
                 tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
@@ -1476,7 +1483,7 @@ class MainForm : Form
 
         try
         {
-            string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000);
+            string dsGetSite = RunProcess("nltest", "/dsgetsite", timeoutMs: 5000, ct: cfg.Cancel);
             string? siteError = Parsers.NltestError(dsGetSite);
             string site = Parsers.ParseSite(dsGetSite) ?? "";
             string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
@@ -1492,7 +1499,7 @@ class MainForm : Form
 
         try
         {
-            var result = Parsers.ParsePasswordAgeQuery(RunPowerShell(PasswordAgeScript, timeoutMs: 15000));
+            var result = Parsers.ParsePasswordAgeQuery(RunPowerShell(PasswordAgeScript, timeoutMs: 15000, cfg.Cancel));
             string where = result.Domain == null ? ""
                 : result.Domain.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase) ? ""
                 : $" (account is in {result.Domain}, not the target domain)";
@@ -1533,7 +1540,7 @@ class MainForm : Form
 
         try
         {
-            string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000);
+            string dsGetDc = RunProcess("nltest", $"/dsgetdc:{cfg.Domain}", timeoutMs: 8000, ct: cfg.Cancel);
             dcHost = Parsers.ParseDcLocator(dsGetDc);
             if (dcHost != null)
             {
@@ -1553,30 +1560,22 @@ class MainForm : Form
         IPAddress? kdcIp = null;
         try
         {
-            kdcIp = Dns.GetHostAddresses(kdc)
-                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
+            kdcIp = ResolveHost(kdc, cfg.Cancel)
                 .OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1) // prefer IPv4, fall back to IPv6
                 .FirstOrDefault();
         }
         catch { }
 
-        var portTasks = new List<(string Name, int Port, Task<bool> Task)>
+        var ports = new (string Name, int Port)[]
         {
-            ("Port 389 (LDAP)", 389, Task.Run(() => TryTcpConnect(kdcIp, kdc, 389))),
-            ("Port 636 (LDAPS)", 636, Task.Run(() => TryTcpConnect(kdcIp, kdc, 636))),
-            ("Port 88 (Kerberos)", 88, Task.Run(() => TryTcpConnect(kdcIp, kdc, 88))),
-            ("Port 445 (SMB)", 445, Task.Run(() => TryTcpConnect(kdcIp, kdc, 445))),
-            ("Port 135 (RPC)", 135, Task.Run(() => TryTcpConnect(kdcIp, kdc, 135))),
-            ("Port 464 (Kpasswd)", 464, Task.Run(() => TryTcpConnect(kdcIp, kdc, 464))),
-            ("Port 53 (DNS)", 53, Task.Run(() => TryTcpConnect(kdcIp, kdc, 53))),
-            ("Port 3268 (Global Catalog)", 3268, Task.Run(() => TryTcpConnect(kdcIp, kdc, 3268))),
+            ("Port 389 (LDAP)", 389), ("Port 636 (LDAPS)", 636), ("Port 88 (Kerberos)", 88), ("Port 445 (SMB)", 445),
+            ("Port 135 (RPC)", 135), ("Port 464 (Kpasswd)", 464), ("Port 53 (DNS)", 53), ("Port 3268 (Global Catalog)", 3268),
         };
+        bool[] reachable = kdcIp == null ? new bool[ports.Length]
+            : Task.WhenAll(ports.Select(p => TryTcpConnectAsync(kdcIp, p.Port, cfg.Cancel))).GetAwaiter().GetResult();
 
-        Task.WaitAll(portTasks.Select(p => p.Task).ToArray());
-
-        foreach (var (name, port, task) in portTasks)
+        foreach (var ((name, port), open) in ports.Zip(reachable))
         {
-            bool open = task.Result;
             bool required = port is 389 or 88 or 445;
             if (kdcIp == null)
                 tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
@@ -1593,17 +1592,15 @@ class MainForm : Form
     {
         var tests = new List<TestEntry>
         {
-            LookupSrv($"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true),
-            LookupSrv($"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true),
-            LookupSrv($"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false),
+            LookupSrv($"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true, cfg.Cancel),
+            LookupSrv($"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true, cfg.Cancel),
+            LookupSrv($"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false, cfg.Cancel),
         };
 
         try
         {
             string host = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
-            var addrs = Dns.GetHostAddresses(host)
-                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
-                .ToArray();
+            var addrs = ResolveHost(host, cfg.Cancel);
             tests.Add(new("DC A Record",
                 addrs.Length > 0 ? Status.Pass : Status.Fail,
                 addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}"));
@@ -1644,12 +1641,12 @@ class MainForm : Form
         return new("DNS for Active Directory", tests);
     }
 
-    static TestEntry LookupSrv(string record, string testName, bool required)
+    static TestEntry LookupSrv(string record, string testName, bool required, CancellationToken ct)
     {
         string optional = required ? "" : " (optional)";
         try
         {
-            var targets = QuerySrv(record);
+            var targets = RunWithTimeout(() => QuerySrv(record), DnsTimeoutMs, $"{record} query", ct);
             if (targets == null)
                 return new(testName, required ? Status.Fail : Status.Warn, $"No {record} record{optional}");
 
@@ -1726,21 +1723,39 @@ class MainForm : Form
     {
         var tests = new List<TestEntry>();
 
+        // Opening a share on a domain that doesn't answer blocks for 30s or more inside Windows, where nothing
+        // can cancel it, and the app can't exit while a thread is stuck there. So prove SMB answers first.
+        string? unreachable = null;
+        try
+        {
+            var addrs = ResolveHost(cfg.Domain, cfg.Cancel);
+            if (addrs.Length == 0)
+                unreachable = $"cannot resolve {cfg.Domain}";
+            else if (!Task.WhenAll(addrs.Take(8).Select(a => TryTcpConnectAsync(a, 445, cfg.Cancel))).GetAwaiter().GetResult().Any(open => open))
+                unreachable = $"no domain controller for {cfg.Domain} answers on port 445 (SMB)";
+        }
+        catch (Exception ex)
+        {
+            unreachable = ex.Message;
+        }
+
         void TestShare(string shareName, string testName)
         {
             string path = $@"\\{cfg.Domain}\{shareName}";
+            if (unreachable != null)
+            {
+                tests.Add(new(testName, Status.Fail, $"{path} not accessible — {unreachable}"));
+                return;
+            }
             try
             {
-                bool exists = Directory.Exists(path);
-                if (exists)
-                {
-                    var entries = Directory.GetFileSystemEntries(path);
-                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries.Length} entries)"));
-                }
+                int? entries = RunWithTimeout<int?>(
+                    () => Directory.Exists(path) ? Directory.GetFileSystemEntries(path).Length : null,
+                    ShareTimeoutMs, $"Opening {path}", cfg.Cancel);
+                if (entries != null)
+                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries} entries)"));
                 else
-                {
                     tests.Add(new(testName, Status.Fail, $"{path} not accessible"));
-                }
             }
             catch (UnauthorizedAccessException)
             {
@@ -1764,7 +1779,7 @@ class MainForm : Form
 
         try
         {
-            var scopes = QueryRsop(out _);
+            var scopes = QueryRsop(out _, cfg.Cancel);
             var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
             var user = scopes.FirstOrDefault(s => s.Name == "User");
             var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
@@ -1823,7 +1838,7 @@ class MainForm : Form
 
         try
         {
-            string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000);
+            string trusts = RunProcess("nltest", "/domain_trusts", timeoutMs: 8000, ct: cfg.Cancel);
             string? trustError = Parsers.NltestError(trusts);
             var lines = Parsers.ParseTrusts(trusts, GetOwnDomainNames());
 
@@ -1851,14 +1866,14 @@ class MainForm : Form
         {
             // The cache alone is unreliable: other tests running in parallel may populate it, and an
             // elevated session starts with its own empty cache. So if no TGT is cached, request one.
-            string klist = RunProcess("klist", "", timeoutMs: 5000);
+            string klist = RunProcess("klist", "", timeoutMs: 5000, ct: cfg.Cancel);
             if (Parsers.HasTgt(klist, realm))
             {
                 tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} cached"));
             }
             else
             {
-                string get = RunProcess("klist", $"get krbtgt/{realm}", timeoutMs: 10000);
+                string get = RunProcess("klist", $"get krbtgt/{realm}", timeoutMs: 10000, ct: cfg.Cancel);
                 if (Parsers.HasTgt(get, realm))
                     tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)"));
                 else
@@ -1874,7 +1889,7 @@ class MainForm : Form
         string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
         try
         {
-            string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000);
+            string w32 = RunProcess("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", timeoutMs: 5000, ct: cfg.Cancel);
             if (Parsers.ParseStripchartSkew(w32) is { } skew)
             {
                 tests.Add(new("Clock Skew",
@@ -1888,10 +1903,10 @@ class MainForm : Form
 
         try
         {
-            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000);
+            string w32source = RunProcess("w32tm", "/query /source", timeoutMs: 5000, ct: cfg.Cancel);
             if (Parsers.ParseTimeSource(w32source) is not { } source)
                 throw new InvalidOperationException(w32source.Trim());
-            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, Dns.GetHostAddresses);
+            bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, host => ResolveHost(host, cfg.Cancel));
             tests.Add(new("Time Source",
                 fromDomain ? Status.Pass : Status.Warn,
                 source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
@@ -1970,17 +1985,17 @@ class MainForm : Form
         Write-Scope 'User' "root\rsop\user\$($sid -replace '-', '_')" $sid
         """;
 
-    static List<GpScope> QueryRsop(out string raw)
+    static List<GpScope> QueryRsop(out string raw, CancellationToken ct = default)
     {
-        raw = RunPowerShell(RsopScript, timeoutMs: 25000);
+        raw = RunPowerShell(RsopScript, timeoutMs: 25000, ct);
         return Parsers.ParseRsop(raw);
     }
 
     /// <summary>Runs a PowerShell script passed via -EncodedCommand, avoiding command-line quoting entirely.</summary>
-    static string RunPowerShell(string script, int timeoutMs)
+    static string RunPowerShell(string script, int timeoutMs, CancellationToken ct = default)
     {
         string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-        return RunProcess("powershell", $"-NoProfile -NonInteractive -EncodedCommand {encoded}", timeoutMs);
+        return RunProcess("powershell", $"-NoProfile -NonInteractive -EncodedCommand {encoded}", timeoutMs, ct);
     }
 
     // Console tools write redirected output in the OEM code page (e.g. 437, 850), not UTF-8;
@@ -2028,16 +2043,75 @@ class MainForm : Form
         return [netbios, dns];
     }
 
-    // External tools still running; killed on exit so none outlive the app
-    static readonly ConcurrentDictionary<Process, byte> RunningProcesses = new();
+    // Every tool the app starts is put in this job, which Windows empties when the app's handle to it closes.
+    // So no tool outlives the app, whether it exits normally, crashes or is ended from Task Manager.
+    static readonly IntPtr ChildJob = CreateChildJob();
 
-    static void KillRunningProcesses()
+    const int JobObjectExtendedLimitInformationClass = 9;
+    const uint JobObjectLimitKillOnJobClose = 0x2000;
+
+    static IntPtr CreateChildJob()
     {
-        foreach (var proc in RunningProcesses.Keys)
+        try
         {
-            try { proc.Kill(true); } catch { }
+            IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) return IntPtr.Zero;
+            var info = new JobObjectExtendedLimitInformation();
+            info.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformationClass, ref info, Marshal.SizeOf<JobObjectExtendedLimitInformation>());
+            return job;
         }
+        catch { return IntPtr.Zero; }
     }
+
+    static void KillChildProcesses()
+    {
+        if (ChildJob != IntPtr.Zero) TerminateJobObject(ChildJob, 1);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount; // IO_COUNTERS
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string? name);
+
+    [DllImport("kernel32.dll")]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JobObjectExtendedLimitInformation info, int length);
+
+    [DllImport("kernel32.dll")]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll")]
+    static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     /// <summary>
     /// Full path of a Windows tool in System32. A bare name would make CreateProcess search the exe's own folder
@@ -2059,9 +2133,18 @@ class MainForm : Form
         catch { }
     }
 
-    /// <summary>Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on timeout.</summary>
-    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000)
+    const int DnsTimeoutMs = 8000;
+    const int ShareTimeoutMs = 20000;
+    const int ConnectTimeoutMs = 3000;
+    const int PipeDrainMs = 3000;
+
+    /// <summary>
+    /// Runs a tool and returns its stdout (or stderr if stdout is empty). Throws <see cref="TimeoutException"/> on
+    /// timeout; cancelling <paramref name="ct"/> kills the tool and throws <see cref="OperationCanceledException"/>.
+    /// </summary>
+    static string RunProcess(string fileName, string arguments, int timeoutMs = 15000, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var psi = new ProcessStartInfo
         {
             FileName = SystemTool(fileName), Arguments = arguments,
@@ -2074,42 +2157,85 @@ class MainForm : Form
         };
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {fileName}");
-        RunningProcesses.TryAdd(proc, 0);
+        if (ChildJob != IntPtr.Zero) AssignProcessToJobObject(ChildJob, proc.Handle);
+        // Runs on the cancelling (UI) thread, so not Kill(true): walking the process tree takes too long there
+        using var killOnCancel = ct.Register(() => { try { proc.Kill(); } catch { } });
+
+        proc.StandardInput.Close();
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        // The pipes reach EOF only when every process holding them has exited, so a child the tool left
+        // behind would block the reads forever; they get a deadline of their own.
+        bool finished = proc.WaitForExit(timeoutMs);
+        try { finished = finished && Task.WhenAll(stdoutTask, stderrTask).Wait(PipeDrainMs); }
+        catch (AggregateException) { } // a failed read is rethrown below
+        if (!finished)
+        {
+            try { proc.Kill(true); } catch { }
+            ct.ThrowIfCancellationRequested();
+            throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
+        }
+        ct.ThrowIfCancellationRequested();
+
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
+            return stderr;
+        return stdout;
+    }
+
+    /// <summary>
+    /// Runs a blocking Windows call that has no timeout of its own, giving up after <paramref name="timeoutMs"/>
+    /// (<see cref="TimeoutException"/>) or when <paramref name="ct"/> is cancelled. The call can't be interrupted,
+    /// so on giving up it is left to finish on its own background thread.
+    /// </summary>
+    static T RunWithTimeout<T>(Func<T> call, int timeoutMs, string what, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try { done.SetResult(call()); }
+            catch (Exception ex) { done.SetException(ex); }
+        }) { IsBackground = true };
+        thread.Start();
         try
         {
-            proc.StandardInput.Close();
-            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-            var stderrTask = proc.StandardError.ReadToEndAsync();
-            if (!proc.WaitForExit(timeoutMs))
-            {
-                try { proc.Kill(true); } catch { }
-                throw new TimeoutException($"{fileName} timed out after {timeoutMs / 1000}s");
-            }
-            string stdout = stdoutTask.GetAwaiter().GetResult();
-            string stderr = stderrTask.GetAwaiter().GetResult();
-            if (string.IsNullOrWhiteSpace(stdout) && !string.IsNullOrWhiteSpace(stderr))
-                return stderr;
-            return stdout;
+            if (!done.Task.Wait(timeoutMs, ct))
+                throw new TimeoutException($"{what} timed out after {timeoutMs / 1000}s");
         }
-        finally
+        catch (AggregateException) { } // the call's own exception is rethrown below, unwrapped
+        return done.Task.GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// IPv4 and IPv6 addresses of <paramref name="host"/>. The resolver has no timeout of its own and can take
+    /// over a minute when no DNS server answers.
+    /// </summary>
+    static IPAddress[] ResolveHost(string host, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(DnsTimeoutMs);
+        try
         {
-            RunningProcesses.TryRemove(proc, out _);
+            return Dns.GetHostAddressesAsync(host, deadline.Token).WaitAsync(deadline.Token).GetAwaiter().GetResult()
+                .Where(a => a.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
+                .ToArray();
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Resolving {host} timed out after {DnsTimeoutMs / 1000}s");
         }
     }
 
-    static bool TryTcpConnect(IPAddress? ip, string host, int port, int timeoutMs = 3000)
+    static async Task<bool> TryTcpConnectAsync(IPAddress ip, int port, CancellationToken ct)
     {
         try
         {
-            using var client = ip != null ? new TcpClient(ip.AddressFamily) : new TcpClient();
-            var task = ip != null ? client.ConnectAsync(ip, port) : client.ConnectAsync(host, port);
-            if (!task.Wait(timeoutMs))
-            {
-                // Connect is still in flight past the timeout; observe its eventual fault so it
-                // never surfaces as an unobserved task exception once the client above is disposed.
-                _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
-                return false;
-            }
+            using var client = new TcpClient(ip.AddressFamily);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(ConnectTimeoutMs);
+            await client.ConnectAsync(ip, port, deadline.Token).ConfigureAwait(false);
             return client.Connected;
         }
         catch { return false; }
@@ -2125,7 +2251,7 @@ class MainForm : Form
 
 // ── Data types ──────────────────────────────────────────
 
-record DiagConfig(string Domain, string Dc);
+record DiagConfig(string Domain, string Dc, CancellationToken Cancel);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
