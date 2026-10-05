@@ -19,5 +19,6 @@
   <ItemGroup>
     <Compile Include="../../MainForm.cs" />
     <Compile Include="../../Parsers.cs" />
+    <Compile Include="../../Runner.cs" />
   </ItemGroup>
 </Project>

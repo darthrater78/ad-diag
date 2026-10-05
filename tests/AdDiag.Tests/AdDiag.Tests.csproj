@@ -7,9 +7,10 @@
     <RootNamespace>AdDiag.Tests</RootNamespace>
   </PropertyGroup>
 
-  <!-- Compile the app's parsers directly: the app itself is WinForms and can't load off Windows. -->
+  <!-- Compile the app's parsers and runner directly: the app itself is WinForms and can't load off Windows. -->
   <ItemGroup>
     <Compile Include="../../Parsers.cs" Link="Parsers.cs" />
+    <Compile Include="../../Runner.cs" Link="Runner.cs" />
   </ItemGroup>
 
   <ItemGroup>
