@@ -36,6 +36,7 @@ static class Program
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new MainForm());
@@ -44,40 +45,61 @@ static class Program
 
 class MainForm : Form
 {
-    static readonly Color BgColor = Color.FromArgb(0x0f, 0x11, 0x17);
-    static readonly Color SurfaceColor = Color.FromArgb(0x1a, 0x1d, 0x27);
-    static readonly Color BorderColor = Color.FromArgb(0x2a, 0x2d, 0x3a);
-    static readonly Color TextColor = Color.FromArgb(0xe2, 0xe4, 0xea);
-    static readonly Color DimColor = Color.FromArgb(0x8b, 0x8f, 0xa3);
-    static readonly Color PassColor = Color.FromArgb(0x34, 0xd3, 0x99);
-    static readonly Color FailColor = Color.FromArgb(0xf8, 0x71, 0x71);
-    static readonly Color WarnColor = Color.FromArgb(0xfb, 0xbf, 0x24);
-    static readonly Color SkipColor = Color.FromArgb(0x6b, 0x72, 0x80);
-    static readonly Color AccentColor = Color.FromArgb(0x60, 0xa5, 0xfa);
-    static readonly Color AccentDimColor = Color.FromArgb(0x25, 0x63, 0xeb);
+    // Tokens: see DESIGN.md. The app follows the Windows light/dark app setting, read once at startup.
+    static readonly bool Dark = DetectDarkMode();
+    static Color Themed(int light, int dark) => Color.FromArgb(unchecked((int)0xFF000000) | (Dark ? dark : light));
+    static readonly Color BgColor = Themed(0xf3f3f3, 0x202020);       // window
+    static readonly Color PanelColor = Themed(0xffffff, 0x1c1c1c);    // results and text panes
+    static readonly Color SurfaceColor = Themed(0xffffff, 0x2d2d2d);  // buttons and inputs
+    static readonly Color BorderColor = Themed(0xd1d1d1, 0x3d3d3d);
+    static readonly Color RowLineColor = Themed(0xededed, 0x2a2a2a);
+    static readonly Color TextColor = Themed(0x1b1b1b, 0xf2f2f2);
+    static readonly Color DimColor = Themed(0x5f5f5f, 0xa3a3a3);
+    static readonly Color PassColor = Themed(0x0f7b0f, 0x6ccb5f);
+    static readonly Color FailColor = Themed(0xc42b1c, 0xff99a4);
+    static readonly Color WarnColor = Themed(0x9d5d00, 0xfce100);
+    static readonly Color SkipColor = Themed(0x767676, 0x8a8a8a);
+    static readonly Color AccentColor = Themed(0x005fb8, 0x4cc2ff);
+    static readonly Color OnAccentColor = Themed(0xffffff, 0x000000); // text on Accent, Pass and Warn fills
+    // Cascadia Code ships with Windows 11 but not Windows 10 or Server; without a fallback GDI substitutes a
+    // proportional font and the ticket boxes stop lining up
+    static readonly string MonoFamily = FontInstalled("Cascadia Code") ? "Cascadia Code" : "Consolas";
     static readonly Regex HostnamePattern = new(@"^[a-zA-Z0-9.\-]+$");
     static readonly Pen BorderPen = new(BorderColor);
+    static readonly Pen RowLinePen = new(RowLineColor);
 
-    static readonly Font GroupHeaderFont = new("Segoe UI", 8f, FontStyle.Bold);
-    static readonly Font TestNameFont = new("Segoe UI", 9f, FontStyle.Bold);
-    static readonly Font TestDetailFont = new("Cascadia Code", 8f);
+    static bool DetectDarkMode()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("AppsUseLightTheme") is int light && light == 0;
+        }
+        catch { return false; }
+    }
+
+    static readonly Font GroupHeaderFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font GroupCountFont = new("Segoe UI", 8.5f);
+    static readonly Font StatusFont = new("Segoe UI", 8.5f);
+    static readonly Font TestNameFont = new("Segoe UI", 9f);
+    static readonly Font TestDetailFont = new(MonoFamily, 8.5f);
     static readonly Font PlaceholderFont = new("Segoe UI", 10f);
     static readonly SolidBrush PassBrush = new(PassColor);
     static readonly SolidBrush FailBrush = new(FailColor);
     static readonly SolidBrush WarnBrush = new(WarnColor);
     static readonly SolidBrush SkipBrush = new(SkipColor);
-    static readonly SolidBrush AccentBrush = new(AccentColor);
-    static readonly Font TabFontActive = new("Segoe UI", 8.5f, FontStyle.Bold);
-    static readonly Font TabFontInactive = new("Segoe UI", 8.5f);
+    static readonly Font TabFontInactive = new("Segoe UI", 9f);
+    static readonly Font TabFontActive = new("Segoe UI", 9f, FontStyle.Bold);
     static readonly Font GpBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
-    static readonly Font TicketsBoldFont = new("Cascadia Code", 9f, FontStyle.Bold);
+    static readonly Font TicketsBoldFont = new(MonoFamily, 9f, FontStyle.Bold);
     static readonly Font HistoryLabelFont = new("Segoe UI", 8f);
     static readonly Font HistoryFont = new("Segoe UI", 7.5f);
     static readonly Font HistoryFontBold = new("Segoe UI", 7.5f, FontStyle.Bold);
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnExport, _btnClear, _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
+    readonly Button _btnRun, _btnExport, _btnClear;
+    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
     readonly CheckBox _chkGpForce;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
@@ -129,7 +151,7 @@ class MainForm : Form
         header.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, header.Height - 1, header.Width, header.Height - 1);
         var lblTitle = new Label { Text = "AD Diagnostics", ForeColor = TextColor, Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(10, 6) };
         var appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
-        var lblTag = new Label { Text = $" v{appVersion} ", ForeColor = AccentColor, BackColor = AccentDimColor, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), AutoSize = true, Location = new Point(148, 10) };
+        var lblTag = new Label { Text = appVersion, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(148, 9) };
         var lnkGithub = new LinkLabel { Text = "GitHub", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
         var lnkRelease = new LinkLabel { Text = "Release Notes", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
@@ -137,22 +159,24 @@ class MainForm : Form
         header.Controls.AddRange([lblTitle, lblTag, lnkGithub, lnkRelease]);
         header.Resize += (s, e) =>
         {
-            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - 10, 10);
-            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - 12, 10);
+            lblTag.Left = lblTitle.Right + S(8);
+            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(10));
+            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
         };
         layout.Controls.Add(header, 0, 0);
 
         // Config
-        var configPanel = new Panel { Height = 60, Dock = DockStyle.Fill };
+        var configPanel = new Panel { Height = 50, Dock = DockStyle.Fill };
         configPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, configPanel.Height - 1, configPanel.Width, configPanel.Height - 1);
-        _txtDomain = MakeInput(configPanel, "DOMAIN", 0, 0);
-        _txtDc = MakeInput(configPanel, "DC HOSTNAME (optional)", 1, 0);
+        _txtDomain = MakeInput(configPanel, "Domain", 0, 0);
+        _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0);
 
-        _chkDcSuffix = new CheckBox { Text = "+ domain suffix", ForeColor = Color.White, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 2) };
+        _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
         configPanel.Resize += (s, e) =>
         {
-            _chkDcSuffix.Location = new Point(configPanel.ClientSize.Width / 2 + 4 + 130, 2);
+            // Right-aligned over the DC field, clear of its label whatever the font or DPI
+            _chkDcSuffix.Location = new Point(_txtDc.Right - _chkDcSuffix.Width, _txtDc.Top - _chkDcSuffix.Height - S(1));
         };
 
         layout.Controls.Add(configPanel, 0, 1);
@@ -160,17 +184,13 @@ class MainForm : Form
         // Actions
         var actionsPanel = new Panel { Height = 36, Dock = DockStyle.Fill };
         actionsPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, actionsPanel.Height - 1, actionsPanel.Width, actionsPanel.Height - 1);
-        _btnRun = new Button { Text = "Run Diagnostics", BackColor = AccentColor, ForeColor = Color.Black, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4), Cursor = Cursors.Hand };
-        _btnRun.FlatAppearance.BorderSize = 0;
+        _btnRun = new ThemedButton { Text = "Run diagnostics", BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4) };
         _btnRun.Click += BtnRun_Click;
-        _btnExport = new Button { Text = "Export Results", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false, Cursor = Cursors.Hand };
-        _btnExport.FlatAppearance.BorderColor = BorderColor;
+        _btnExport = new ThemedButton { Text = "Export results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false };
         _btnExport.Click += BtnExport_Click;
-        _btnClear = new Button { Text = "Clear Results", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4), Cursor = Cursors.Hand };
-        _btnClear.FlatAppearance.BorderColor = BorderColor;
+        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4) };
         _btnClear.Click += BtnClear_Click;
-        var btnReset = new Button { Text = "Reset All", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(374, 4), Cursor = Cursors.Hand };
-        btnReset.FlatAppearance.BorderColor = BorderColor;
+        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(374, 4) };
         btnReset.Click += BtnReset_Click;
         _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(460, 4), Size = new Size(340, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
         actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnClear, btnReset, _lblStatus]);
@@ -179,14 +199,15 @@ class MainForm : Form
         // Summary bar
         _summaryPanel = new Panel { Height = 26, Dock = DockStyle.Fill, Visible = false };
         _summaryPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _summaryPanel.Height - 1, _summaryPanel.Width, _summaryPanel.Height - 1);
-        var monoFont = new Font("Cascadia Code", 9f, FontStyle.Bold);
-        _lblPassCount = new Label { Text = "0", ForeColor = PassColor, Font = monoFont, AutoSize = true, Location = new Point(10, 4) };
-        var lblPassText = new Label { Text = "passed", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(24, 5) };
-        _lblFailCount = new Label { Text = "0", ForeColor = FailColor, Font = monoFont, AutoSize = true, Location = new Point(80, 4) };
-        var lblFailText = new Label { Text = "failed", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(94, 5) };
-        _lblWarnCount = new Label { Text = "0", ForeColor = WarnColor, Font = monoFont, AutoSize = true, Location = new Point(140, 4) };
-        var lblWarnText = new Label { Text = "warnings", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(154, 5) };
-        _summaryPanel.Controls.AddRange([_lblPassCount, lblPassText, _lblFailCount, lblFailText, _lblWarnCount, lblWarnText]);
+        var countFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+        var summaryFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(8, 4, 0, 0), Margin = Padding.Empty };
+        Label Count(Color color) => new() { Text = "0", ForeColor = color, Font = countFont, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
+        Label Caption(string text) => new() { Text = text, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Margin = new Padding(0, 0, 14, 0) };
+        _lblPassCount = Count(PassColor);
+        _lblFailCount = Count(FailColor);
+        _lblWarnCount = Count(WarnColor);
+        summaryFlow.Controls.AddRange([_lblPassCount, Caption("passed"), _lblFailCount, Caption("failed"), _lblWarnCount, Caption("warnings")]);
+        _summaryPanel.Controls.Add(summaryFlow);
         layout.Controls.Add(_summaryPanel, 0, 3);
 
         // Content area with tab bar
@@ -194,27 +215,19 @@ class MainForm : Form
 
         var tabBar = new Panel { Height = 30, Dock = DockStyle.Top, BackColor = BgColor };
         tabBar.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, tabBar.Height - 1, tabBar.Width, tabBar.Height - 1);
-        _btnTabResults = new Button { Text = "Results", FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = AccentColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Size = new Size(80, 26), Location = new Point(10, 2), Cursor = Cursors.Hand };
-        _btnTabResults.FlatAppearance.BorderColor = BorderColor;
-        _btnTabResults.FlatAppearance.BorderSize = 1;
+        _btnTabResults = new ThemedButton { Text = "Results", IsTab = true, Selected = true, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(10, 2) };
         _btnTabResults.Click += (s, e) => SwitchTab("results");
-        _btnTabGuide = new Button { Text = "Guide", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(80, 26), Location = new Point(94, 2), Cursor = Cursors.Hand };
-        _btnTabGuide.FlatAppearance.BorderColor = BorderColor;
-        _btnTabGuide.FlatAppearance.BorderSize = 1;
+        _btnTabGuide = new ThemedButton { Text = "Guide", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(94, 2) };
         _btnTabGuide.Click += (s, e) => SwitchTab("guide");
-        _btnTabGp = new Button { Text = "Group Policy", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(110, 26), Location = new Point(178, 2), Cursor = Cursors.Hand };
-        _btnTabGp.FlatAppearance.BorderColor = BorderColor;
-        _btnTabGp.FlatAppearance.BorderSize = 1;
+        _btnTabGp = new ThemedButton { Text = "Group Policy", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(110, 26), Location = new Point(178, 2) };
         _btnTabGp.Click += (s, e) => { SwitchTab("gp"); RefreshGpTab(); };
-        _btnTabTickets = new Button { Text = "Kerberos Tickets", FlatStyle = FlatStyle.Flat, BackColor = BgColor, ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Size = new Size(130, 26), Location = new Point(292, 2), Cursor = Cursors.Hand };
-        _btnTabTickets.FlatAppearance.BorderColor = BorderColor;
-        _btnTabTickets.FlatAppearance.BorderSize = 1;
+        _btnTabTickets = new ThemedButton { Text = "Kerberos tickets", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(292, 2) };
         _btnTabTickets.Click += (s, e) => { SwitchTab("tickets"); RefreshTickets(); };
         tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets]);
 
         // Results canvas (owner-drawn)
-        _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = BgColor };
-        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = BgColor, Height = 100 };
+        _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
+        _resultsCanvas = new Panel { Location = Point.Empty, BackColor = PanelColor, Height = 100 };
         _resultsCanvas.GetType().GetProperty("DoubleBuffered",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?.SetValue(_resultsCanvas, true);
@@ -236,7 +249,7 @@ class MainForm : Form
         _guideBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
@@ -249,20 +262,18 @@ class MainForm : Form
         _gpBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
         };
-        _btnGpRefresh = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
-        _btnGpRefresh.FlatAppearance.BorderColor = BorderColor;
+        _btnGpRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28) };
         _btnGpRefresh.Click += (s, e) => RefreshGpTab();
-        _btnGpUpdate = new Button { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Cursor = Cursors.Hand };
-        _btnGpUpdate.FlatAppearance.BorderColor = BorderColor;
+        _btnGpUpdate = new ThemedButton { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28) };
         _btnGpUpdate.Click += BtnGpUpdate_Click;
-        _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
+        _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat };
         var gpBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
         _btnGpRefresh.Location = new Point(10, 3);
         _btnGpUpdate.Location = new Point(100, 3);
@@ -277,21 +288,18 @@ class MainForm : Form
         _ticketsBox = new RichTextBox
         {
             ReadOnly = true,
-            BackColor = BgColor,
+            BackColor = PanelColor,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
-            Font = new Font("Cascadia Code", 9f),
+            Font = new Font(MonoFamily, 9f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
         };
-        _btnPurgeTickets = new Button { Text = "Purge All Tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28), Cursor = Cursors.Hand };
-        _btnPurgeTickets.FlatAppearance.BorderColor = BorderColor;
+        _btnPurgeTickets = new ThemedButton { Text = "Purge all tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28) };
         _btnPurgeTickets.Click += BtnPurgeTickets_Click;
-        var ticketsRefreshBtn = new Button { Text = "Refresh", BackColor = SurfaceColor, ForeColor = DimColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Cursor = Cursors.Hand };
-        ticketsRefreshBtn.FlatAppearance.BorderColor = BorderColor;
+        var ticketsRefreshBtn = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28) };
         ticketsRefreshBtn.Click += (s, e) => RefreshTickets();
-        var ticketsInfoBtn = new Button { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Cursor = Cursors.Hand };
-        ticketsInfoBtn.FlatAppearance.BorderColor = BorderColor;
+        var ticketsInfoBtn = new ThemedButton { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28) };
         ticketsInfoBtn.Click += (s, e) => { if (_showingExplainer) { _showingExplainer = false; RefreshTickets(); } else ShowTicketsExplainer(); };
         var ticketsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
         _btnPurgeTickets.Location = new Point(10, 3);
@@ -315,6 +323,12 @@ class MainForm : Form
 
         mainPanel.Controls.Add(layout);
         Controls.Add(mainPanel);
+        AcceptButton = _btnRun; // Enter in the domain or DC field starts a run
+
+        // Everything above is laid out for 96 DPI; this scales it once to the display's DPI. Code that
+        // positions or draws afterwards scales its own pixel values with S().
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
 
         _placeholderText = "Enter target domain and run diagnostics";
 
@@ -380,6 +394,106 @@ class MainForm : Form
         catch { }
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (!Dark) return;
+        int on = 1;
+        try { DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref on, sizeof(int)); } catch { }
+    }
+
+    const int DwmwaUseImmersiveDarkMode = 20; // dark title bar, Windows 10 2004 and later
+
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    static Color Blend(Color a, Color b, double amount) => Color.FromArgb(
+        (int)(a.R + (b.R - a.R) * amount), (int)(a.G + (b.G - a.G) * amount), (int)(a.B + (b.B - a.B) * amount));
+
+    /// <summary>
+    /// The app's button: a 4px-radius fill in its BackColor with a border when that is the plain surface, or, as
+    /// a tab (<see cref="IsTab"/>), bare text with an accent underline when selected. Drawn here because a
+    /// standard WinForms button can't follow the dark theme.
+    /// </summary>
+    sealed class ThemedButton : Button
+    {
+        bool _hover, _pressed, _selected;
+
+        public bool IsTab { get; init; }
+
+        public bool Selected
+        {
+            get => _selected;
+            set { _selected = value; Invalidate(); }
+        }
+
+        public ThemedButton()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _hover = _pressed = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { _pressed = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { _pressed = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        int Px(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Parent?.BackColor ?? BgColor);
+            var box = new Rectangle(0, 0, Width - 1, Height - 1);
+            const TextFormatFlags centered = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine;
+
+            if (IsTab)
+            {
+                TextRenderer.DrawText(g, Text, _selected ? TabFontActive : Font, box, _selected || _hover ? TextColor : DimColor, centered);
+                if (_selected)
+                {
+                    using var underline = new SolidBrush(AccentColor);
+                    g.FillRectangle(underline, Px(8), Height - Px(3), Width - Px(16), Px(3));
+                }
+                if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(box, -Px(3), -Px(3)));
+                return;
+            }
+
+            bool plain = BackColor.ToArgb() == SurfaceColor.ToArgb();
+            Color fill = !Enabled ? Blend(BackColor, BgColor, 0.6)
+                : _pressed ? Blend(BackColor, TextColor, 0.14)
+                : _hover ? Blend(BackColor, TextColor, 0.07)
+                : BackColor;
+            using (var path = RoundedRect(box, Px(4)))
+            {
+                using var brush = new SolidBrush(fill);
+                g.FillPath(brush, path);
+                if (plain || (Focused && ShowFocusCues))
+                {
+                    using var pen = new Pen(Focused && ShowFocusCues ? AccentColor : BorderColor);
+                    g.DrawPath(pen, path);
+                }
+            }
+            TextRenderer.DrawText(g, Text, Font, box, Enabled ? ForeColor : Blend(DimColor, fill, 0.45), centered);
+        }
+
+        static GraphicsPath RoundedRect(Rectangle r, int radius)
+        {
+            int d = radius * 2;
+            var path = new GraphicsPath();
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    /// <summary>A 96-DPI pixel value scaled to the display's DPI.</summary>
+    int S(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
+
     TextBox MakeInput(Panel parent, string label, int col, int row)
     {
         int x = col == 0 ? 14 : parent.Width / 2 + 4;
@@ -389,7 +503,7 @@ class MainForm : Form
         var lbl = new Label
         {
             Text = label, ForeColor = DimColor,
-            Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 8.5f),
             Location = new Point(x, y), AutoSize = true,
         };
 
@@ -398,16 +512,16 @@ class MainForm : Form
             Text = "",
             BackColor = SurfaceColor, ForeColor = TextColor,
             BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Cascadia Code", 9f),
-            Location = new Point(x, y + 13), Width = w,
+            Font = new Font(MonoFamily, 9f),
+            Location = new Point(x, y + 18), Width = w,
         };
 
         parent.Controls.AddRange([lbl, txt]);
 
         parent.Resize += (s, e) =>
         {
-            int newX = col == 0 ? 14 : parent.ClientSize.Width / 2 + 4;
-            int newW = parent.ClientSize.Width / 2 - 24;
+            int newX = col == 0 ? S(14) : parent.ClientSize.Width / 2 + S(4);
+            int newW = parent.ClientSize.Width / 2 - S(24);
             lbl.Location = new Point(newX, lbl.Location.Y);
             txt.Location = new Point(newX, txt.Location.Y);
             txt.Width = newW;
@@ -426,7 +540,7 @@ class MainForm : Form
         _selectedRunIndex = -1;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
-        _resultsCanvas.Height = 200;
+        _resultsCanvas.Height = S(200);
         _resultsCanvas.Invalidate();
         _summaryPanel.Visible = false;
         _btnExport.Enabled = false;
@@ -458,9 +572,7 @@ class MainForm : Form
 
         foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets") })
         {
-            btn.BackColor = tab == key ? SurfaceColor : BgColor;
-            btn.ForeColor = tab == key ? AccentColor : DimColor;
-            btn.Font = tab == key ? TabFontActive : TabFontInactive;
+            btn.Selected = tab == key;
         }
     }
 
@@ -470,17 +582,16 @@ class MainForm : Form
     static readonly Font GuideBodyFont = new("Segoe UI", 9f);
     static readonly Font GuideFixFont = new("Segoe UI", 8.5f);
     static readonly Font GuideFixLabelFont = new("Segoe UI", 8.5f, FontStyle.Bold);
-    static readonly Color FixLabelColor = Color.FromArgb(0xfb, 0xbf, 0x24);
+    static readonly Color FixLabelColor = WarnColor;
 
     void PopulateGuide()
     {
         _guideBox.Clear();
-        AppendGuide("AD Diagnostics — Test Guide\n\n", new Font("Segoe UI", 12f, FontStyle.Bold), AccentColor);
+        AppendGuide("Test guide\n", new Font("Segoe UI", 13f, FontStyle.Bold), TextColor);
 
         foreach (var (title, body) in GetGuideSections())
         {
-            AppendGuide($"\n{title}\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
-            AppendGuide("─────────────────────────────────────────\n\n", GuideBodyFont, BorderColor);
+            AppendGuide($"\n{title}\n\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
 
             var lines = body.Split('\n');
             foreach (var line in lines)
@@ -493,12 +604,12 @@ class MainForm : Form
                     int dash = line.IndexOf(" — ", StringComparison.Ordinal);
                     if (dash > 0)
                     {
-                        AppendGuide(line[..(dash + 3)], GuideTestNameFont, AccentColor);
+                        AppendGuide(line[..(dash + 3)], GuideTestNameFont, TextColor);
                         AppendGuide(line[(dash + 3)..] + "\n", GuideBodyFont, TextColor);
                     }
                     else
                     {
-                        AppendGuide(line + "\n", GuideTestNameFont, AccentColor);
+                        AppendGuide(line + "\n", GuideTestNameFont, TextColor);
                     }
                 }
                 else if (line.TrimStart().StartsWith("Fix:"))
@@ -684,9 +795,8 @@ class MainForm : Form
 
     void RenderGpScope(GpScope scope)
     {
-        AppendGpLine($"  ══════════════════════════════════════\n", BorderColor);
-        AppendGpLine($"   {scope.Name.ToUpperInvariant()} SCOPE\n", AccentColor, bold: true);
-        AppendGpLine($"  ══════════════════════════════════════\n\n", BorderColor);
+        AppendGpLine($"  {scope.Name} scope\n", TextColor, bold: true);
+        AppendGpLine("  ────────────────────────────────────────\n\n", BorderColor);
 
         if (scope.State != GpScopeState.Ok)
         {
@@ -869,7 +979,7 @@ class MainForm : Form
         Color badgeBg = svc == "KRBTGT" ? AccentColor : PassColor;
 
         AppendTicketsLine($"\n ┌─ ", BorderColor);
-        AppendTicketsLine($" {label} ", Color.Black, bold: true, backColor: badgeBg);
+        AppendTicketsLine($" {label} ", OnAccentColor, bold: true, backColor: badgeBg);
         AppendTicketsLine($"  {desc}\n", DimColor);
         AppendTicketsLine($" │\n", BorderColor);
 
@@ -950,7 +1060,7 @@ class MainForm : Form
 
         AppendTicketsLine("TICKET TYPES\n\n", AccentColor, bold: true);
 
-        AppendTicketsLine(" TGT  ", Color.Black, bold: true, backColor: AccentColor);
+        AppendTicketsLine(" TGT  ", OnAccentColor, bold: true, backColor: AccentColor);
         AppendTicketsLine("  Ticket Granting Ticket\n", TextColor, bold: true);
         AppendTicketsLine("       Your master Kerberos credential from the domain controller.\n", DimColor);
         AppendTicketsLine("       Server field shows: krbtgt/REALM @ REALM\n", DimColor);
@@ -962,23 +1072,23 @@ class MainForm : Form
         AppendTicketsLine(" — a forwarded TGT for Kerberos delegation. Issued when a\n", DimColor);
         AppendTicketsLine("         service is trusted for delegation and needs to act on your behalf.\n\n", DimColor);
 
-        AppendTicketsLine(" CIFS ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" CIFS ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  SMB/File Share\n", TextColor, bold: true);
         AppendTicketsLine("       Grants access to Windows file shares (\\\\server\\share).\n\n", DimColor);
 
-        AppendTicketsLine(" LDAP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" LDAP ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Directory Service\n", TextColor, bold: true);
         AppendTicketsLine("       Used for Active Directory lookups and queries.\n\n", DimColor);
 
-        AppendTicketsLine(" HOST ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" HOST ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Host/Remote Admin\n", TextColor, bold: true);
         AppendTicketsLine("       Used for WinRM, remote management, and scheduled tasks.\n\n", DimColor);
 
-        AppendTicketsLine(" HTTP ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" HTTP ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Web Service\n", TextColor, bold: true);
         AppendTicketsLine("       Used for Kerberos-authenticated web apps, ADFS, Exchange OWA.\n\n", DimColor);
 
-        AppendTicketsLine(" RDP  ", Color.Black, bold: true, backColor: PassColor);
+        AppendTicketsLine(" RDP  ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Remote Desktop\n", TextColor, bold: true);
         AppendTicketsLine("       Authenticates Remote Desktop (TERMSRV) connections.\n\n", DimColor);
 
@@ -1028,27 +1138,77 @@ class MainForm : Form
 
     // ── Owner-drawn results ─────────────────────────────────
 
+    // NoPrefix: without it "&" is read as a mnemonic marker, so "SYSVOL & NETLOGON" drew as "SYSVOL _NETLOGON"
+    const TextFormatFlags DetailTextFlags = TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix;
+
+    // Results grid columns at 96 DPI: status mark and word, test name, then the detail to the right edge
+    const int GridLeft = 14, NameX = 100, DetailX = 280;
+
+    int DetailWidth(int width) => Math.Max(width - S(DetailX) - S(GridLeft), S(80));
+
+    static bool IsPending(TestEntry test) => test.Status == Status.Skip && test.Detail.Length == 0;
+
     int MeasureResultsHeight(int width)
     {
         if (_renderedGroups == null)
-            return 200;
+            return S(200);
 
-        int y = 8;
-        int detailW = Math.Max(width - 204, 80);
-
+        int y = S(4);
+        int detailW = DetailWidth(width);
         foreach (var group in _renderedGroups)
         {
-            y += 28;
+            y += S(34);
             foreach (var test in group.Tests)
             {
-                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
-                string detail = isPending ? "running..." : test.Detail;
-                var sz = TextRenderer.MeasureText(detail, TestDetailFont,
-                    new Size(detailW, 0), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
-                y += Math.Max(20, sz.Height + 4) + 2;
+                var sz = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+                y += S(4) + Math.Max(S(20), sz.Height + S(4));
             }
         }
-        return y + 14;
+        return y + S(14);
+    }
+
+    /// <summary>"9 checks · 1 failed · 1 warning", so a group's state reads without scanning its rows.</summary>
+    static string GroupCounts(TestGroup group)
+    {
+        int fail = group.Tests.Count(t => t.Status == Status.Fail);
+        int warn = group.Tests.Count(t => t.Status == Status.Warn);
+        int running = group.Tests.Count(IsPending);
+        string text = $"{group.Tests.Count} check{(group.Tests.Count == 1 ? "" : "s")}";
+        if (fail > 0) text += $" · {fail} failed";
+        if (warn > 0) text += $" · {warn} warning{(warn == 1 ? "" : "s")}";
+        if (running > 0) text += $" · {running} running";
+        return text;
+    }
+
+    // Each state has its own shape as well as its own colour, so it reads without colour vision
+    void DrawStatusMark(Graphics g, TestEntry test, int x, int y)
+    {
+        int d = S(10);
+        if (IsPending(test))
+        {
+            using var ring = new Pen(AccentColor, S(2));
+            g.DrawEllipse(ring, x + 1, y + 1, d - 2, d - 2);
+            return;
+        }
+        switch (test.Status)
+        {
+            case Status.Pass:
+                g.FillEllipse(PassBrush, x, y, d, d);
+                break;
+            case Status.Warn:
+                g.FillPolygon(WarnBrush, new Point[] { new(x + d / 2, y), new(x + d, y + d), new(x, y + d) });
+                break;
+            case Status.Fail:
+                using (var cross = new Pen(FailColor, S(2)))
+                {
+                    g.DrawLine(cross, x + 1, y + 1, x + d - 1, y + d - 1);
+                    g.DrawLine(cross, x + d - 1, y + 1, x + 1, y + d - 1);
+                }
+                break;
+            default:
+                g.FillRectangle(SkipBrush, x, y + d / 2 - S(1), d, S(2));
+                break;
+        }
     }
 
     void PaintResults(object? sender, PaintEventArgs e)
@@ -1061,55 +1221,49 @@ class MainForm : Form
         if (_renderedGroups == null)
         {
             string msg = _placeholderText ?? "Enter target domain and run diagnostics";
-            TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(16, 40), DimColor);
+            TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(S(GridLeft), S(40)), DimColor, TextFormatFlags.NoPrefix);
             return;
         }
 
-        int y = 8;
-        int nameX = 16;
-        int detailX = 190;
-        int detailW = Math.Max(w - 204, 80);
+        int y = S(4);
+        int left = S(GridLeft), right = w - S(GridLeft);
+        int detailW = DetailWidth(w);
 
         foreach (var group in _renderedGroups)
         {
-            y += 10;
-            TextRenderer.DrawText(g, group.Name.ToUpperInvariant(), GroupHeaderFont,
-                new Point(nameX, y), DimColor);
-            y += 18;
+            y += S(12);
+            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left - S(3), y), TextColor, TextFormatFlags.NoPrefix);
+            string counts = GroupCounts(group);
+            int countsW = TextRenderer.MeasureText(g, counts, GroupCountFont, Size.Empty, TextFormatFlags.NoPrefix).Width;
+            TextRenderer.DrawText(g, counts, GroupCountFont, new Point(right - countsW, y + S(2)), DimColor, TextFormatFlags.NoPrefix);
+            y += S(22);
 
             foreach (var test in group.Tests)
             {
-                Color detailColor;
-                string detail;
-                SolidBrush dotBrush;
-                bool isPending = test.Status == Status.Skip && test.Detail.Length == 0;
-                if (isPending)
+                bool pending = IsPending(test);
+                var (word, color) = pending ? ("Running", DimColor) : test.Status switch
                 {
-                    dotBrush = AccentBrush;
-                    detailColor = DimColor;
-                    detail = "running...";
-                }
-                else
-                {
-                    dotBrush = test.Status switch { Status.Pass => PassBrush, Status.Fail => FailBrush, Status.Warn => WarnBrush, _ => SkipBrush };
-                    detailColor = test.Status switch { Status.Pass => PassColor, Status.Fail => FailColor, Status.Warn => WarnColor, _ => DimColor };
-                    detail = test.Detail;
-                }
+                    Status.Pass => ("Passed", PassColor),
+                    Status.Fail => ("Failed", FailColor),
+                    Status.Warn => ("Warning", WarnColor),
+                    _ => ("Skipped", DimColor),
+                };
 
-                g.FillEllipse(dotBrush, 2, y + 4, 8, 8);
-
+                g.DrawLine(RowLinePen, left, y, right, y);
+                y += S(4);
+                DrawStatusMark(g, test, left, y + S(4));
+                TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(1)), color, TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(g, test.Name, TestNameFont,
-                    new Rectangle(nameX, y, 170, 18), TextColor,
-                    TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                    new Rectangle(S(NameX), y, S(DetailX - NameX - 6), S(18)), TextColor,
+                    TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
-                var detailSize = TextRenderer.MeasureText(g, detail, TestDetailFont,
-                    new Size(detailW, 0), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
-                TextRenderer.DrawText(g, detail, TestDetailFont,
-                    new Rectangle(detailX, y + 1, detailW, detailSize.Height),
-                    detailColor, TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+                // The detail is plain text: the mark and word carry the status, so a long line stays readable
+                var detailSize = TextRenderer.MeasureText(g, test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+                TextRenderer.DrawText(g, test.Detail, TestDetailFont,
+                    new Rectangle(S(DetailX), y + S(1), detailW, detailSize.Height),
+                    test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
 
-                int rowH = Math.Max(20, detailSize.Height + 4);
-                y += rowH + 2;
+                y += Math.Max(S(20), detailSize.Height + S(4));
             }
         }
     }
@@ -1253,10 +1407,10 @@ class MainForm : Form
             return;
         }
 
-        int x = 10;
-        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, 6) };
+        int x = S(10);
+        var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, S(6)) };
         _historyPanel.Controls.Add(lblRuns);
-        x += lblRuns.PreferredWidth + 4;
+        x += lblRuns.PreferredWidth + S(4);
 
         for (int ri = _runHistory.Count - 1; ri >= 0; ri--)
         {
@@ -1266,30 +1420,28 @@ class MainForm : Form
             bool isPending = run.IsPending;
             string label = isPending ? "Pending..." : run.Timestamp.ToString("HH:mm:ss");
 
-            var btn = new Button
+            var btn = new ThemedButton
             {
                 Text = label, FlatStyle = FlatStyle.Flat,
                 Font = selected ? HistoryFontBold : HistoryFont,
                 BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
-                ForeColor = selected ? Color.Black : (isPending ? WarnColor : DimColor),
-                Size = new Size(isPending ? 72 : 62, 20), Location = new Point(x, 4), Cursor = Cursors.Hand,
+                ForeColor = selected ? OnAccentColor : (isPending ? WarnColor : DimColor),
+                Size = new Size(S(isPending ? 72 : 62), S(20)), Location = new Point(x, S(4)),
             };
-            btn.FlatAppearance.BorderSize = 0;
             if (!isPending) btn.Click += (s, e) => SelectRun(idx);
             _historyPanel.Controls.Add(btn);
-            x += (isPending ? 76 : 66);
+            x += S(isPending ? 76 : 66);
         }
 
-        var del = new Button
+        var del = new ThemedButton
         {
-            Text = "Delete Run", FlatStyle = FlatStyle.Flat,
+            Text = "Delete run", FlatStyle = FlatStyle.Flat,
             Font = HistoryFont,
             BackColor = SurfaceColor, ForeColor = FailColor,
-            Size = new Size(70, 20), Cursor = Cursors.Hand,
+            Size = new Size(S(70), S(20)),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
-        del.FlatAppearance.BorderSize = 0;
-        del.Location = new Point(_historyPanel.ClientSize.Width - del.Width - 10, 4);
+        del.Location = new Point(_historyPanel.ClientSize.Width - del.Width - S(10), S(4));
         del.Click += (s, e) => DeleteRun(_selectedRunIndex);
         _historyPanel.Controls.Add(del);
 
@@ -1314,7 +1466,7 @@ class MainForm : Form
             _selectedRunIndex = -1;
             _renderedGroups = null;
             _placeholderText = "Run diagnostics for this domain";
-            _resultsCanvas.Height = 200;
+            _resultsCanvas.Height = S(200);
             _resultsCanvas.Invalidate();
             _summaryPanel.Visible = false;
             _lblStatus.Text = "";
@@ -2239,6 +2391,12 @@ class MainForm : Form
             return client.Connected;
         }
         catch { return false; }
+    }
+
+    static bool FontInstalled(string family)
+    {
+        using var probe = new Font(family, 9f);
+        return probe.Name.Equals(family, StringComparison.OrdinalIgnoreCase);
     }
 
     static string FormatTimeSpan(TimeSpan ts)

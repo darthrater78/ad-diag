@@ -162,7 +162,7 @@ Each ticket card shows: server, client, encryption type (AES = green, RC4 = yell
 
 **Structure:** `MainForm.cs` holds the UI and diagnostics; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
-**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Dark theme. Test groups stream results in real-time as each completes.
+**UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Follows the Windows light or dark app setting (read at startup) and scales with the display DPI; every status has its own shape as well as its own colour. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
 **Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and SRV lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too.
 

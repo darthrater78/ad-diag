@@ -22,8 +22,12 @@ static class Shots
     static void Main(string[] args)
     {
         string outDir = args.Length > 0 ? args[0] : ".";
+        // The app follows the Windows light/dark app setting; a second argument of "dark" selects it for this run
+        using (var personalize = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+            personalize.SetValue("AppsUseLightTheme", args.Length > 1 && args[1] == "dark" ? 0 : 1, Microsoft.Win32.RegistryValueKind.DWord);
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.CurrentCulture = new CultureInfo("en-US");
         Environment.SetEnvironmentVariable("USERDNSDOMAIN", "CONTOSO.COM");
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
