@@ -143,18 +143,57 @@ static partial class Diagnostics
         public IPAddress? Address => Addresses.OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).FirstOrDefault();
     }
 
-    /// <summary>
-    /// The zone that holds <paramref name="fqdn"/> and its primary server, found the way Windows finds where to
-    /// send an update: ask for the SOA of the name, then of each parent. Null if no zone answers.
-    /// </summary>
-    static SoaRecord? FindZone(IProbe probe, string fqdn, CancellationToken ct)
+    /// <summary>What the search for the zone found: its SOA record (null if none), who was asked, and the error if nobody answered.</summary>
+    record ZoneLookup(SoaRecord? Soa, string Asked, string? Error = null);
+
+    // The DNS servers Windows asks where to send an update: those of each adapter that registers, not whichever
+    // the system resolver prefers. Behind a ZTNA or VPN client the two differ, and can name different zones.
+    // IPv4 only, as that is what a direct query can be sent to.
+    static (IPAddress Server, string Adapter)[] RegistrationResolvers(List<NetAdapter> adapters) =>
+        adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable))
+            .SelectMany(a => a.DnsServers.Where(d => d.AddressFamily == AddressFamily.InterNetwork).Select(d => (Server: d, Adapter: a.Name)))
+            .DistinctBy(r => r.Server).ToArray();
+
+    // The SOA of the name, then of each parent, asked of one server (null for the configured ones)
+    static SoaRecord? WalkUpToZone(IProbe probe, string fqdn, IPAddress? server, CancellationToken ct)
     {
         for (string name = fqdn.TrimEnd('.'); name.Contains('.'); name = name[(name.IndexOf('.') + 1)..])
         {
-            if (probe.QuerySoa(name, ct) is { } soa)
+            if (probe.QuerySoa(name, server, ct) is { } soa)
                 return new(soa.Zone.TrimEnd('.'), soa.PrimaryServer.TrimEnd('.'));
         }
         return null;
+    }
+
+    /// <summary>
+    /// The zone that holds <paramref name="fqdn"/> and its primary server, found the way Windows finds where to
+    /// send an update: ask the registering adapters' DNS servers for the SOA of the name, then of each parent.
+    /// The first server that knows a zone wins; one that fails is passed over for the next.
+    /// </summary>
+    static ZoneLookup FindZone(IProbe probe, string fqdn, List<NetAdapter> adapters, CancellationToken ct)
+    {
+        var resolvers = RegistrationResolvers(adapters);
+        if (resolvers.Length == 0)
+        {
+            const string configured = "the configured DNS servers";
+            try { return new(WalkUpToZone(probe, fqdn, null, ct), configured); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { return new(null, configured, ex.Message); }
+        }
+
+        string? error = null;
+        bool answered = false;
+        foreach (var (server, adapter) in resolvers)
+        {
+            try
+            {
+                if (WalkUpToZone(probe, fqdn, server, ct) is { } soa)
+                    return new(soa, $"{server} (DNS server of {adapter})");
+                answered = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { error = ex.Message; }
+        }
+        string asked = string.Join(", ", resolvers.Select(r => $"{r.Server} (DNS server of {r.Adapter})"));
+        return new(null, asked, answered ? null : error);
     }
 
     /// <summary>The host records for <paramref name="fqdn"/>, from the zone's primary server itself where it answers.</summary>
@@ -220,119 +259,142 @@ static partial class Diagnostics
     public static TestGroup TestDnsRegistration(DiagConfig cfg, IProbe probe)
     {
         var tests = new List<TestEntry>();
-        var ct = cfg.Cancel;
-
-        string? fqdn = null;
-        try
+        string? fqdn = CheckName(probe, tests.Add);
+        var (adapters, ztna) = CheckAdapters(cfg, probe, tests.Add);
+        if (fqdn != null)
         {
-            var (host, suffix) = probe.HostIdentity();
-            if (string.IsNullOrWhiteSpace(suffix))
-                tests.Add(new(RegName, Status.Warn, $"{host} has no primary DNS suffix, so Windows registers no name for it (not domain-joined?)"));
-            else
-                tests.Add(new(RegName, Status.Pass, fqdn = $"{host}.{suffix}"));
+            CheckServer(probe, fqdn, adapters, ztna, cfg.Cancel, tests.Add);
         }
-        catch (Exception ex)
-        {
-            tests.Add(new(RegName, Status.Warn, $"Could not read the host name: {ex.Message}"));
-        }
-
-        var adapters = new List<NetAdapter>();
-        string? ztna = null;
-        try
-        {
-            adapters = probe.Adapters();
-            ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
-            tests.Add(new(RegZtna, Status.Pass, ztna != null ? $"{ztna} (informational)"
-                : cfg.ZtnaAdapter == "" ? "None, as set by you" : "No ZTNA or VPN adapter detected"));
-
-            var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
-            var tunnelOnly = RegisteringAddresses(adapters).Where(IsCgnat).ToArray();
-            string list = string.Join(" · ", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"));
-            if (registering.Count == 0)
-                tests.Add(new(RegAdapters, Status.Warn, "No connected adapter has \"Register this connection's addresses in DNS\" turned on"));
-            else if (tunnelOnly.Length > 0)
-                tests.Add(new(RegAdapters, Status.Warn, $"{list} — {Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to"));
-            else if (ztna == null)
-                tests.Add(new(RegAdapters, Status.Pass, list));
-            else if (UnregisteredClientAddresses(adapters, cfg.ZtnaAdapter) is { Length: > 0 } unregistered)
-                tests.Add(new(RegAdapters, Status.Pass, $"{list} — the client's own address ({Join(unregistered)}) is not registered, because "
-                    + "registration is off on its adapter; if servers reach this machine through the client, that is the address DNS should hold"));
-            else
-                tests.Add(new(RegAdapters, Status.Pass, list
-                    + " — behind the ZTNA client this is the local network's address, which servers cannot use to reach this machine"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new(RegZtna, Status.Warn, $"Could not read the network adapters: {ex.Message}"));
-            tests.Add(new(RegAdapters, Status.Skip, "Network adapters unavailable"));
-        }
-
-        if (fqdn == null)
+        else
         {
             foreach (string name in new[] { RegZone, RegPath, RegRecord })
                 tests.Add(new(name, Status.Skip, "No registration name"));
         }
-        else
+        tests.Add(CheckErrors(probe, cfg.Cancel));
+        return new("Dynamic DNS Registration", tests);
+    }
+
+    // The name Windows registers; null if this machine has none
+    static string? CheckName(IProbe probe, Action<TestEntry> report)
+    {
+        try
         {
-            var target = FindUpdateTarget(probe, fqdn, ztna, ct, tests.Add);
-
-            if (target?.Address is not { } address)
-                tests.Add(new(RegPath, Status.Skip, "No primary server to test"));
-            else if (probe.TcpConnect(address, 53, ct).GetAwaiter().GetResult())
-                tests.Add(new(RegPath, Status.Pass, $"{target.Server} ({address}) reachable over TCP"));
-            else
-                tests.Add(new(RegPath, Status.Fail, $"{target.Server} ({address}) does not answer on TCP port 53, so updates cannot be delivered"
-                    + (ztna != null ? " — the ZTNA policy must allow TCP and UDP 53 to this server" : "")));
-
-            try
+            var (host, suffix) = probe.HostIdentity();
+            if (!string.IsNullOrWhiteSpace(suffix))
             {
-                var (records, source) = QueryRecord(probe, fqdn, target, ct);
-                var (status, detail) = CompareRecord(records, RegisteringAddresses(adapters), source);
-                tests.Add(new(RegRecord, status, detail));
+                report(new(RegName, Status.Pass, $"{host}.{suffix}"));
+                return $"{host}.{suffix}";
             }
-            catch (Exception ex)
-            {
-                tests.Add(new(RegRecord, Status.Warn, $"Could not query the record: {ex.Message}"));
-            }
+            report(new(RegName, Status.Warn, $"{host} has no primary DNS suffix, so Windows registers no name for it (not domain-joined?)"));
         }
+        catch (Exception ex)
+        {
+            report(new(RegName, Status.Warn, $"Could not read the host name: {ex.Message}"));
+        }
+        return null;
+    }
 
+    static (List<NetAdapter> Adapters, string? Ztna) CheckAdapters(DiagConfig cfg, IProbe probe, Action<TestEntry> report)
+    {
+        try
+        {
+            var adapters = probe.Adapters();
+            string? ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
+            report(new(RegZtna, Status.Pass, ztna != null ? $"{ztna} (informational)"
+                : cfg.ZtnaAdapter == "" ? "None, as set by you" : "No ZTNA or VPN adapter detected"));
+            report(RegisteringAdaptersEntry(adapters, ztna, cfg.ZtnaAdapter));
+            return (adapters, ztna);
+        }
+        catch (Exception ex)
+        {
+            report(new(RegZtna, Status.Warn, $"Could not read the network adapters: {ex.Message}"));
+            report(new(RegAdapters, Status.Skip, "Network adapters unavailable"));
+            return ([], null);
+        }
+    }
+
+    static TestEntry RegisteringAdaptersEntry(List<NetAdapter> adapters, string? ztna, string? tag)
+    {
+        var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
+        var tunnelOnly = RegisteringAddresses(adapters).Where(IsCgnat).ToArray();
+        string list = string.Join(" · ", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"));
+        if (registering.Count == 0)
+            return new(RegAdapters, Status.Warn, "No connected adapter has \"Register this connection's addresses in DNS\" turned on");
+        if (tunnelOnly.Length > 0)
+            return new(RegAdapters, Status.Warn, $"{list} — {Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to");
+        if (ztna == null)
+            return new(RegAdapters, Status.Pass, list);
+        if (UnregisteredClientAddresses(adapters, tag) is { Length: > 0 } unregistered)
+            return new(RegAdapters, Status.Pass, $"{list} — the client's own address ({Join(unregistered)}) is not registered, because "
+                + "registration is off on its adapter; if servers reach this machine through the client, that is the address DNS should hold");
+        return new(RegAdapters, Status.Pass, list
+            + " — behind the ZTNA client this is the local network's address, which servers cannot use to reach this machine");
+    }
+
+    // The three checks that need the zone's primary server: who it is, whether updates can reach it, what it holds
+    static void CheckServer(IProbe probe, string fqdn, List<NetAdapter> adapters, string? ztna, CancellationToken ct, Action<TestEntry> report)
+    {
+        var target = FindUpdateTarget(probe, fqdn, adapters, ztna, ct, report);
+
+        if (target?.Address is not { } address)
+            report(new(RegPath, Status.Skip, "No primary server to test"));
+        else if (probe.TcpConnect(address, 53, ct).GetAwaiter().GetResult())
+            report(new(RegPath, Status.Pass, $"{target.Server} ({address}) reachable over TCP"));
+        else
+            report(new(RegPath, Status.Fail, $"{target.Server} ({address}) does not answer on TCP port 53, so updates cannot be delivered"
+                + (ztna != null ? " — the ZTNA policy must allow TCP and UDP 53 to this server" : "")));
+
+        try
+        {
+            var (records, source) = QueryRecord(probe, fqdn, target, ct);
+            var (status, detail) = CompareRecord(records, RegisteringAddresses(adapters), source);
+            report(new(RegRecord, status, detail));
+        }
+        catch (Exception ex)
+        {
+            report(new(RegRecord, Status.Warn, $"Could not query the record: {ex.Message}"));
+        }
+    }
+
+    static TestEntry CheckErrors(IProbe probe, CancellationToken ct)
+    {
         try
         {
             var events = QueryDnsClientEvents(probe, DateTime.UtcNow.AddHours(-24), ct);
             if (events.Error != null)
-                tests.Add(new(RegErrors, Status.Warn, $"Could not read the System event log: {events.Error}"));
-            else if (events.Events.Count == 0)
-                tests.Add(new(RegErrors, Status.Pass, "No DNS Client registration errors in the last 24 hours"));
-            else
-                tests.Add(new(RegErrors, Status.Warn, $"{events.Events.Count} in the last 24 hours; latest: {DescribeEvent(events.Events[0])}"));
+                return new(RegErrors, Status.Warn, $"Could not read the System event log: {events.Error}");
+            if (events.Events.Count == 0)
+                return new(RegErrors, Status.Pass, "No DNS Client registration errors in the last 24 hours");
+            return new(RegErrors, Status.Warn, $"{events.Events.Count} in the last 24 hours; latest: {DescribeEvent(events.Events[0])}");
         }
         catch (Exception ex)
         {
-            tests.Add(new(RegErrors, Status.Warn, $"Event log query failed: {ex.Message}"));
+            return new(RegErrors, Status.Warn, $"Event log query failed: {ex.Message}");
         }
+    }
 
-        return new("Dynamic DNS Registration", tests);
+    // An address the internet routes: not private, carrier-grade NAT, loopback or link-local space
+    static bool IsPublic(IPAddress ip)
+    {
+        if (IPAddress.IsLoopback(ip) || IsCgnat(ip) || !IsRegistrable(ip)) return false;
+        if (ip.AddressFamily != AddressFamily.InterNetwork) return !ip.IsIPv6UniqueLocal;
+        byte[] b = ip.GetAddressBytes();
+        return !(b[0] == 10 || (b[0] == 172 && (b[1] & 0xF0) == 16) || (b[0] == 192 && b[1] == 168));
     }
 
     // Finds the zone's primary server and its addresses, reporting the verdict as the "Zone Primary Server" entry
-    static UpdateTarget? FindUpdateTarget(IProbe probe, string fqdn, string? ztna, CancellationToken ct, Action<TestEntry> report)
+    static UpdateTarget? FindUpdateTarget(IProbe probe, string fqdn, List<NetAdapter> adapters, string? ztna, CancellationToken ct,
+        Action<TestEntry> report)
     {
         string proxyHint = ztna != null
             ? " — a ZTNA DNS proxy often answers only A/AAAA/SRV; without the SOA record Windows cannot find where to send updates"
             : "";
-        SoaRecord? soa;
-        try
+        var zone = FindZone(probe, fqdn, adapters, ct);
+        if (zone.Soa is not { } soa)
         {
-            soa = FindZone(probe, fqdn, ct);
-        }
-        catch (Exception ex)
-        {
-            report(new(RegZone, Status.Fail, $"SOA lookup failed: {ex.Message}{proxyHint}"));
-            return null;
-        }
-        if (soa == null)
-        {
-            report(new(RegZone, Status.Fail, $"No SOA record for {fqdn} or its parent zones{proxyHint}"));
+            report(new(RegZone, Status.Fail, zone.Error != null
+                ? $"SOA lookup failed: {zone.Error} (asked {zone.Asked}){proxyHint}"
+                : $"No SOA record for {fqdn} or its parent zones from {zone.Asked}{proxyHint}"));
             return null;
         }
 
@@ -342,13 +404,29 @@ static partial class Diagnostics
         catch { }
         var target = new UpdateTarget(soa, addresses);
         if (target.Address is not { } address)
-            report(new(RegZone, Status.Fail, $"{soa.Zone} -> {soa.PrimaryServer}, which does not resolve"));
-        else if (IsCgnat(address))
-            report(new(RegZone, Status.Warn, $"{soa.Zone} -> {soa.PrimaryServer} ({address}) — a synthetic 100.64.0.0/10 address from the ZTNA client; "
+        {
+            report(new(RegZone, Status.Fail, $"{soa.Zone} -> {soa.PrimaryServer}, which does not resolve; answered by {zone.Asked}"));
+            return target;
+        }
+        string found = $"{soa.Zone} -> {soa.PrimaryServer} ({address}), answered by {zone.Asked}";
+        if (IsCgnat(address))
+            report(new(RegZone, Status.Warn, $"{found} — a synthetic 100.64.0.0/10 address from the ZTNA client; "
                 + "updates reach the real server only if the client forwards port 53 for it"));
+        else if (IsPublic(address))
+            report(new(RegZone, Status.Warn, $"{found} — a public address: this looks like the zone's internet-facing copy, "
+                + "which does not take updates from this machine"));
         else
-            report(new(RegZone, Status.Pass, $"{soa.Zone} -> {soa.PrimaryServer} ({address})"));
+            report(new(RegZone, Status.Pass, found));
         return target;
+    }
+
+    /// <summary>What a registration is about: the name, the adapters, the addresses they register, and the client in the way.</summary>
+    record Registration(string Fqdn, List<NetAdapter> Adapters, IPAddress[] Local, string? Ztna);
+
+    static Status Stop(Action<TestEntry> report, string step, string detail)
+    {
+        report(new(step, Status.Fail, detail));
+        return Status.Fail;
     }
 
     /// <summary>
@@ -361,66 +439,90 @@ static partial class Diagnostics
     public static Status RegisterDns(DiagConfig cfg, IProbe probe, Action<TestEntry> report, int attempts = 6, int pollMs = 5000)
     {
         var ct = cfg.Cancel;
-        Status Stop(string step, string detail)
-        {
-            report(new(step, Status.Fail, detail));
+        if (ReadRegistration(cfg, probe, report) is not { } reg)
             return Status.Fail;
-        }
+        if (!probe.IsElevated())
+            return Stop(report, "Elevation", "ipconfig /registerdns requires running as Administrator");
 
+        var target = FindUpdateTarget(probe, reg.Fqdn, reg.Adapters, reg.Ztna, ct, report);
+        var before = ReadRecord(probe, reg, target, ct);
+        report(new("Record Before", before.Status, before.Detail));
+
+        // Event times have whole-second precision in the query, so start a moment early
+        DateTime startedUtc = DateTime.UtcNow.AddSeconds(-2);
+        if (!SendRegistration(probe, report, ct))
+            return Status.Fail;
+
+        report(new(RegWait, Status.Skip, $"Watching the server and the DNS Client event log for up to {attempts * pollMs / 1000}s"));
+        var (after, events) = WatchRegistration(probe, startedUtc, () => ReadRecord(probe, reg, target, ct), before, attempts, pollMs, ct);
+        Status verdict = ReportOutcome(before, after, events, report);
+
+        if (verdict != Status.Pass && reg.Ztna != null)
+            report(new(RegZtna, Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and "
+                + $"TCP and UDP 53 to {target?.Server ?? "the zone's primary server"} to pass the tunnel as real traffic, not through the client's DNS proxy"));
+        return verdict;
+    }
+
+    // Reports the name being registered and any client in the way; null (after reporting why) if there is no name
+    static Registration? ReadRegistration(DiagConfig cfg, IProbe probe, Action<TestEntry> report)
+    {
         string fqdn;
         List<NetAdapter> adapters;
         try
         {
             var (host, suffix) = probe.HostIdentity();
             if (string.IsNullOrWhiteSpace(suffix))
-                return Stop(RegName, $"{host} has no primary DNS suffix, so Windows has no name to register");
+            {
+                Stop(report, RegName, $"{host} has no primary DNS suffix, so Windows has no name to register");
+                return null;
+            }
             fqdn = $"{host}.{suffix}";
             adapters = probe.Adapters();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Stop(RegName, $"Could not read this machine's name and adapters: {ex.Message}");
+            Stop(report, RegName, $"Could not read this machine's name and adapters: {ex.Message}");
+            return null;
         }
-        var local = RegisteringAddresses(adapters);
-        string? ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
-        report(new(RegName, Status.Pass, fqdn + (local.Length > 0 ? $" with {Join(local)}" : " — no adapter has DNS registration turned on")));
-        if (ztna != null)
-            report(new(RegZtna, Status.Pass, $"{ztna} (informational)"));
+        var reg = new Registration(fqdn, adapters, RegisteringAddresses(adapters), DescribeZtna(adapters, cfg.ZtnaAdapter));
+        report(new(RegName, Status.Pass, fqdn + (reg.Local.Length > 0 ? $" with {Join(reg.Local)}" : " — no adapter has DNS registration turned on")));
+        if (reg.Ztna != null)
+            report(new(RegZtna, Status.Pass, $"{reg.Ztna} (informational)"));
+        return reg;
+    }
 
-        if (!probe.IsElevated())
-            return Stop("Elevation", "ipconfig /registerdns requires running as Administrator");
-
-        var target = FindUpdateTarget(probe, fqdn, ztna, ct, report);
-
-        (Status Status, string Detail) ReadRecord()
+    static (Status Status, string Detail) ReadRecord(IProbe probe, Registration reg, UpdateTarget? target, CancellationToken ct)
+    {
+        try
         {
-            try
-            {
-                var (records, source) = QueryRecord(probe, fqdn, target, ct);
-                return CompareRecord(records, local, source);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return (Status.Warn, $"Could not query the record: {ex.Message}");
-            }
+            var (records, source) = QueryRecord(probe, reg.Fqdn, target, ct);
+            return CompareRecord(records, reg.Local, source);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (Status.Warn, $"Could not query the record: {ex.Message}");
+        }
+    }
 
-        var before = ReadRecord();
-        report(new("Record Before", before.Status, before.Detail));
-
-        // Event times have whole-second precision in the query, so start a moment early
-        DateTime startedUtc = DateTime.UtcNow.AddSeconds(-2);
+    static bool SendRegistration(IProbe probe, Action<TestEntry> report, CancellationToken ct)
+    {
         try
         {
             string output = Regex.Replace(probe.RunTool("ipconfig", "/registerdns", 20000, ct), @"\s+", " ").Trim();
             report(new("Send", Status.Pass, "ipconfig /registerdns ran" + (output.Length > 0 ? $": {Shorten(output, 200)}" : "")));
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Stop("Send", $"ipconfig /registerdns failed: {ex.Message}");
+            Stop(report, "Send", $"ipconfig /registerdns failed: {ex.Message}");
+            return false;
         }
+    }
 
-        report(new(RegWait, Status.Skip, $"Watching the server and the DNS Client event log for up to {attempts * pollMs / 1000}s"));
+    // Polls the record and the DNS Client's failure events until one of them settles the outcome
+    static ((Status Status, string Detail) After, DnsClientEvents Events) WatchRegistration(IProbe probe, DateTime startedUtc,
+        Func<(Status Status, string Detail)> readRecord, (Status Status, string Detail) before, int attempts, int pollMs, CancellationToken ct)
+    {
         var after = before;
         var events = new DnsClientEvents([], null);
         for (int attempt = 1; attempt <= attempts; attempt++)
@@ -428,40 +530,37 @@ static partial class Diagnostics
             if (ct.WaitHandle.WaitOne(pollMs)) ct.ThrowIfCancellationRequested();
             try { events = QueryDnsClientEvents(probe, startedUtc, ct); }
             catch (Exception ex) when (ex is not OperationCanceledException) { events = new([], ex.Message); }
-            after = ReadRecord();
+            after = readRecord();
             // A record that was already right proves nothing on its own, so give a failure time to be logged
             if (events.Events.Count > 0 || (after.Status == Status.Pass && attempt >= 2)) break;
         }
+        return (after, events);
+    }
 
+    // Reports the failure events and the record as it ended up; returns the verdict they add up to
+    static Status ReportOutcome((Status Status, string Detail) before, (Status Status, string Detail) after, DnsClientEvents events,
+        Action<TestEntry> report)
+    {
         foreach (var e in events.Events.AsEnumerable().Reverse())
             report(new("DNS Client Event", Status.Fail, DescribeEvent(e)));
         if (events.Error != null)
             report(new("DNS Client Event", Status.Warn, $"Could not read the System event log: {events.Error}"));
 
-        Status verdict;
         if (events.Events.Count > 0)
         {
-            verdict = Status.Fail;
             report(new("Record After", after.Status == Status.Pass ? Status.Warn : after.Status,
                 after.Detail + " — Windows logged a registration failure (above)"));
+            return Status.Fail;
         }
-        else if (after.Status == Status.Pass)
+        if (after.Status == Status.Pass)
         {
-            verdict = Status.Pass;
             report(new("Record After", Status.Pass, after.Detail + (before.Status == Status.Pass
                 ? " — unchanged; refreshing a correct record shows only as the absence of errors"
                 : " — registered")));
+            return Status.Pass;
         }
-        else
-        {
-            verdict = Status.Warn;
-            report(new("Record After", Status.Warn, after.Detail
-                + " — no failure logged yet; Windows can take longer, and reports failures in the System event log (source DNS Client Events)"));
-        }
-
-        if (verdict != Status.Pass && ztna != null)
-            report(new(RegZtna, Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and "
-                + $"TCP and UDP 53 to {target?.Server ?? "the zone's primary server"} to pass the tunnel as real traffic, not through the client's DNS proxy"));
-        return verdict;
+        report(new("Record After", Status.Warn, after.Detail
+            + " — no failure logged yet; Windows can take longer, and reports failures in the System event log (source DNS Client Events)"));
+        return Status.Warn;
     }
 }

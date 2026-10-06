@@ -27,6 +27,7 @@ sealed class DiagLog(Func<DateTime>? clock = null)
     readonly Queue<LogLine> _lines = new();
     readonly Func<DateTime> _clock = clock ?? (() => DateTime.Now);
     long _seq;
+    int _clears;
     volatile bool _debug;
 
     public bool DebugEnabled { get => _debug; set => _debug = value; }
@@ -62,9 +63,16 @@ sealed class DiagLog(Func<DateTime>? clock = null)
         lock (_lines) return _lines.Where(l => l.Seq > seq).ToList();
     }
 
+    /// <summary>How many times the log has been cleared: tells a caller whether a line it wrote earlier can still be there.</summary>
+    public int Clears => Volatile.Read(ref _clears);
+
     public void Clear()
     {
-        lock (_lines) _lines.Clear();
+        lock (_lines)
+        {
+            _lines.Clear();
+            _clears++;
+        }
     }
 
     /// <summary>"14:02:03.118  dns     " — the fixed-width start of a line; continuation lines are indented to match.</summary>
@@ -126,9 +134,23 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
     public string RunTool(string tool, string arguments, int timeoutMs, CancellationToken ct) =>
         Call("tool", $"{tool} {arguments}".Trim(), () => inner.RunTool(tool, arguments, timeoutMs, ct), output => output);
 
+    readonly object _scriptLock = new();
+    string? _loggedScript;
+    int _loggedClears;
+
     public string RunPowerShell(string script, int timeoutMs, CancellationToken ct)
     {
-        log.Debug("tool", () => "powershell script:\n" + script);
+        if (log.DebugEnabled)
+        {
+            // A trace runs the same script on every poll; its text is logged once, not once per poll
+            bool repeat;
+            lock (_scriptLock)
+            {
+                repeat = script == _loggedScript && log.Clears == _loggedClears;
+                (_loggedScript, _loggedClears) = (script, log.Clears);
+            }
+            log.Debug("tool", repeat ? "powershell script: the same as the last one logged" : "powershell script:\n" + script);
+        }
         return Call("tool", "powershell", () => inner.RunPowerShell(script, timeoutMs, ct), output => output);
     }
 
@@ -160,15 +182,27 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
     public (string Host, string Suffix) HostIdentity() =>
         Call("machine", "Host name and primary DNS suffix", inner.HostIdentity, id => $"{id.Host}, suffix \"{id.Suffix}\"");
 
-    public List<NetAdapter> Adapters() =>
-        Call("machine", "Network adapters", inner.Adapters, adapters => adapters.Count == 0 ? "(none connected)" : string.Join("\n", adapters.Select(a =>
-            $"{a.Name} [{a.Description}]{(a.Tunnel ? " tunnel" : "")}{(a.Virtual ? " virtual" : "")}{(a.PointToPoint ? " /32 no gateway" : "")}: addresses {Addresses(a.Addresses)}; DNS servers {Addresses(a.DnsServers)}; registers in DNS: {(a.RegistersInDns ? "yes" : "no")}")));
+    public List<NetAdapter> Adapters() => Call("machine", "Network adapters", inner.Adapters, DescribeAdapters);
 
-    public SoaRecord? QuerySoa(string name, CancellationToken ct) =>
-        Call("dns", $"SOA {name}", () => inner.QuerySoa(name, ct), soa => soa == null ? "no record" : $"zone {soa.Zone}, primary server {soa.PrimaryServer}");
+    // Windows reports many connected adapters that hold no address (WAN Miniports, filter bindings); they get one line between them
+    static string DescribeAdapters(List<NetAdapter> adapters)
+    {
+        if (adapters.Count == 0) return "(none connected)";
+        var lines = adapters.Where(a => a.Addresses.Length > 0).Select(a =>
+            $"{a.Name} [{a.Description}]{(a.Tunnel ? " tunnel" : "")}{(a.Virtual ? " virtual" : "")}{(a.PointToPoint ? " /32 no gateway" : "")}: addresses {Addresses(a.Addresses)}; DNS servers {Addresses(a.DnsServers)}; registers in DNS: {(a.RegistersInDns ? "yes" : "no")}").ToList();
+        var bare = adapters.Where(a => a.Addresses.Length == 0).Select(a => a.Name).ToList();
+        if (bare.Count > 0)
+            lines.Add($"{bare.Count} with no address, not detailed: {string.Join(", ", bare)}");
+        return string.Join("\n", lines);
+    }
+
+    static string From(IPAddress? server) => $"from {(server == null ? "the configured DNS servers" : server.ToString())}";
+
+    public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>
+        Call("dns", $"SOA {name} {From(server)}", () => inner.QuerySoa(name, server, ct), soa => soa == null ? "no record" : $"zone {soa.Zone}, primary server {soa.PrimaryServer}");
 
     public IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct) =>
-        Call("dns", $"A/AAAA {name} from {(server == null ? "the configured DNS servers" : server.ToString())}", () => inner.QueryAddresses(name, server, ct), Addresses);
+        Call("dns", $"A/AAAA {name} {From(server)}", () => inner.QueryAddresses(name, server, ct), Addresses);
 
     public bool IsElevated() => Call("machine", "Elevation", inner.IsElevated, elevated => elevated ? "running as Administrator" : "not elevated");
 }

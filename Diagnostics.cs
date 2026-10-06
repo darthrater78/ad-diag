@@ -35,8 +35,11 @@ interface IProbe
     (string Host, string Suffix) HostIdentity();
     /// <summary>The connected network adapters, loopback excluded.</summary>
     List<NetAdapter> Adapters();
-    /// <summary>The zone and primary server from the SOA record for <paramref name="name"/>; null if it has none.</summary>
-    SoaRecord? QuerySoa(string name, CancellationToken ct);
+    /// <summary>
+    /// The zone and primary server from the SOA record for <paramref name="name"/> (null if it has none), asked of
+    /// <paramref name="server"/> (IPv4) or, when null, the configured DNS servers.
+    /// </summary>
+    SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct);
     /// <summary>
     /// The A and AAAA records a DNS server holds for <paramref name="name"/> (empty if none), asked of
     /// <paramref name="server"/> (IPv4) or, when null, the configured DNS servers. Never answered locally.

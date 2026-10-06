@@ -29,6 +29,9 @@ public class DiagnosticsTests
         public List<NetAdapter> NetAdapters = [new("Ethernet", "Intel(R) Ethernet Connection", false, true, [ClientIp], [DcIp])];
         public Dictionary<string, SoaRecord> Soa = new(StringComparer.OrdinalIgnoreCase);
         public List<string> SoaCalls = [];
+        public List<IPAddress?> SoaServers = [];
+        // What one DNS server answers, where it differs from Soa; null for a server that never answers
+        public Dictionary<IPAddress, Dictionary<string, SoaRecord>?> SoaByServer = new();
         // What a DNS server holds for a name; the server is null when the configured servers are asked
         public Func<string, IPAddress?, IPAddress[]> Records = (_, _) => [ClientIp];
         public bool Elevated = true;
@@ -78,11 +81,14 @@ public class DiagnosticsTests
         public (string Host, string Suffix) HostIdentity() => Identity;
         public List<NetAdapter> Adapters() => NetAdapters;
 
-        public SoaRecord? QuerySoa(string name, CancellationToken ct)
+        public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
             SoaCalls.Add(name);
-            return Soa.GetValueOrDefault(name);
+            SoaServers.Add(server);
+            if (server == null || !SoaByServer.TryGetValue(server, out var zones))
+                return Soa.GetValueOrDefault(name);
+            return zones != null ? zones.GetValueOrDefault(name) : throw new TimeoutException($"SOA query for {name} timed out after 8s");
         }
 
         public IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct)

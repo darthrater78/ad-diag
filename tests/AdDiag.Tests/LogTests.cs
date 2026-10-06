@@ -80,14 +80,48 @@ public class LogTests
         log.DebugEnabled = true;
         probe.RunTool("klist", "", 5000, default);
         Assert.True(await probe.TcpConnect(DiagnosticsTests.DcIp, 53, default));
-        probe.QuerySoa("contoso.com", default);
+        probe.QuerySoa("contoso.com", DiagnosticsTests.DcIp, default);
         probe.QueryAddresses("pc042.contoso.com", DiagnosticsTests.DcIp, default);
         var lines = log.Since(0);
         Assert.Matches(@"^klist \(\d+ ms\)\n", lines[0].Message);
         Assert.Contains("krbtgt/CONTOSO.COM", lines[0].Message);
         Assert.Matches(@"^Connect 10\.20\.0\.11 port 53: open \(\d+ ms\)$", lines[1].Message);
-        Assert.EndsWith("zone contoso.com, primary server dc01.contoso.com", lines[2].Message);
+        Assert.Matches(@"^SOA contoso\.com from 10\.20\.0\.11 \(\d+ ms\)\nzone contoso\.com, primary server dc01\.contoso\.com$", lines[2].Message);
         Assert.Matches(@"^A/AAAA pc042\.contoso\.com from 10\.20\.0\.11 \(\d+ ms\)\n10\.20\.4\.18$", lines[3].Message);
+    }
+
+    [Fact]
+    public void LoggingProbe_LogsARepeatedScriptOnce_UntilTheLogIsCleared()
+    {
+        var log = NewLog();
+        log.DebugEnabled = true;
+        var probe = new LoggingProbe(DiagnosticsTests.Healthy(), log);
+        string[] Scripts() => log.Since(0).Where(l => l.Message.StartsWith("powershell script")).Select(l => l.Message).ToArray();
+
+        probe.RunPowerShell("Get-WinEvent -MaxEvents 1", 5000, default);
+        probe.RunPowerShell("Get-WinEvent -MaxEvents 1", 5000, default);
+        probe.RunPowerShell("Get-WinEvent -MaxEvents 2", 5000, default);
+        Assert.Equal(["powershell script:\nGet-WinEvent -MaxEvents 1", "powershell script: the same as the last one logged",
+            "powershell script:\nGet-WinEvent -MaxEvents 2"], Scripts());
+
+        log.Clear();
+        probe.RunPowerShell("Get-WinEvent -MaxEvents 2", 5000, default);
+        Assert.Equal(["powershell script:\nGet-WinEvent -MaxEvents 2"], Scripts());
+    }
+
+    [Fact]
+    public void LoggingProbe_AdaptersWithNoAddressShareOneLine()
+    {
+        var log = NewLog();
+        log.DebugEnabled = true;
+        var inner = DiagnosticsTests.Healthy();
+        inner.NetAdapters.Add(new("Local Area Connection* 6", "WAN Miniport (IP)", false, false, [], [], Virtual: true));
+        inner.NetAdapters.Add(new("Local Area Connection* 7", "WAN Miniport (IPv6)", false, false, [], [], Virtual: true));
+        new LoggingProbe(inner, log).Adapters();
+        string[] lines = log.Since(0)[0].Message.Split('\n');
+        Assert.Equal(3, lines.Length);
+        Assert.StartsWith("Ethernet [Intel(R) Ethernet Connection]: addresses 10.20.4.18", lines[1]);
+        Assert.Equal("2 with no address, not detailed: Local Area Connection* 6, Local Area Connection* 7", lines[2]);
     }
 
     [Fact]

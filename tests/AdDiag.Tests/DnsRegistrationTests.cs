@@ -39,7 +39,9 @@ public class DnsRegistrationTests
             "Update Path (Port 53)", "Registered Record", "Registration Errors"], group.Tests.Select(t => t.Name));
         Assert.Equal("PC042.contoso.com", DetailOf(group, "Registration Name"));
         Assert.Equal(["PC042.contoso.com", "contoso.com"], probe.SoaCalls);
-        Assert.Equal("contoso.com -> dc01.contoso.com (10.20.0.11)", DetailOf(group, "Zone Primary Server"));
+        // Asked of the registering adapter's own DNS server, and the detail says who answered
+        Assert.Equal([DcIp, DcIp], probe.SoaServers);
+        Assert.Equal("contoso.com -> dc01.contoso.com (10.20.0.11), answered by 10.20.0.11 (DNS server of Ethernet)", DetailOf(group, "Zone Primary Server"));
         Assert.Equal("dc01.contoso.com holds 10.20.4.18", DetailOf(group, "Registered Record"));
         Assert.Contains(53, probe.ConnectCalls);
     }
@@ -188,7 +190,7 @@ public class DnsRegistrationTests
         probe.Soa.Clear();
         var group = Run(probe);
         Assert.Equal(Status.Fail, StatusOf(group, "Zone Primary Server"));
-        Assert.Equal("No SOA record for PC042.contoso.com or its parent zones", DetailOf(group, "Zone Primary Server"));
+        Assert.Equal("No SOA record for PC042.contoso.com or its parent zones from 10.20.0.11 (DNS server of Ethernet)", DetailOf(group, "Zone Primary Server"));
         Assert.Equal(Status.Skip, StatusOf(group, "Update Path (Port 53)"));
         // The record is still looked up, through the configured servers
         Assert.Equal("the configured DNS servers holds 10.20.4.18", DetailOf(group, "Registered Record"));
@@ -206,6 +208,65 @@ public class DnsRegistrationTests
         var group = Run(probe);
         Assert.Equal(Status.Fail, StatusOf(group, "Zone Primary Server"));
         Assert.StartsWith("SOA lookup failed:", DetailOf(group, "Zone Primary Server"));
+        Assert.Contains("(asked 10.20.0.11 (DNS server of Ethernet))", DetailOf(group, "Zone Primary Server"));
+    }
+
+    [Fact]
+    public void Zone_AskedOfTheRegisteringAdaptersServers_NotTheClientsProxy()
+    {
+        // The client's adapter does not register, so its proxy, which knows only the public zone, is never asked
+        var proxy = IPAddress.Parse("127.73.83.76");
+        var probe = Healthy();
+        probe.NetAdapters.Add(new("Acme Access", "Acme Access Virtual Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [proxy], Virtual: true));
+        probe.SoaByServer[proxy] = new() { ["contoso.com"] = new("contoso.com", "amit.ns.cloudflare.com") };
+        var group = Run(probe);
+        Assert.DoesNotContain(proxy, probe.SoaServers);
+        Assert.StartsWith("contoso.com -> dc01.contoso.com (10.20.0.11), answered by 10.20.0.11", DetailOf(group, "Zone Primary Server"));
+    }
+
+    [Fact]
+    public void Zone_ServerThatDoesNotAnswerIsPassedOver_IPv6ServersAreNotAsked()
+    {
+        var dead = IPAddress.Parse("10.20.0.12");
+        var probe = Healthy();
+        probe.NetAdapters = [new("Ethernet", "Intel", false, true, [ClientIp], [IPAddress.Parse("fd00::53"), dead, DcIp, DcIp])];
+        probe.SoaByServer[dead] = null;
+        var group = Run(probe);
+        Assert.Equal([dead, DcIp, DcIp], probe.SoaServers);
+        Assert.Equal(Status.Pass, StatusOf(group, "Zone Primary Server"));
+
+        // Every server silent is a failed lookup; one that answers "no zone" is not
+        probe.NetAdapters = [new("Ethernet", "Intel", false, true, [ClientIp], [dead])];
+        Assert.StartsWith("SOA lookup failed: SOA query for PC042.contoso.com timed out", DetailOf(Run(probe), "Zone Primary Server"));
+        probe.NetAdapters = [new("Ethernet", "Intel", false, true, [ClientIp], [dead, DcIp])];
+        probe.Soa.Clear();
+        Assert.StartsWith("No SOA record for PC042.contoso.com or its parent zones from 10.20.0.12 (DNS server of Ethernet), 10.20.0.11 (DNS server of Ethernet)",
+            DetailOf(Run(probe), "Zone Primary Server"));
+    }
+
+    [Fact]
+    public void Zone_NoRegisteringAdapter_AsksTheConfiguredServers()
+    {
+        var probe = Healthy();
+        probe.NetAdapters = [new("Ethernet", "Intel", false, false, [ClientIp], [DcIp])];
+        var group = Run(probe);
+        Assert.Equal([null, null], probe.SoaServers);
+        Assert.EndsWith("answered by the configured DNS servers", DetailOf(group, "Zone Primary Server"));
+    }
+
+    [Theory]
+    [InlineData("172.64.32.10", true)]    // a public name server
+    [InlineData("2606:4700::10", true)]
+    [InlineData("172.31.254.252", false)] // the top of 172.16.0.0/12
+    [InlineData("192.168.1.2", false)]
+    [InlineData("fd12::2", false)]
+    public void Zone_PrimaryWithAPublicAddressWarns(string address, bool isPublic)
+    {
+        var probe = Healthy();
+        probe.Hosts["dc01.contoso.com"] = [IPAddress.Parse(address)];
+        var group = Run(probe);
+        Assert.Equal(isPublic ? Status.Warn : Status.Pass, StatusOf(group, "Zone Primary Server"));
+        Assert.Equal(isPublic, DetailOf(group, "Zone Primary Server").Contains("a public address"));
     }
 
     [Fact]

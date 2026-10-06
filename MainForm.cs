@@ -329,64 +329,11 @@ class MainForm : Form
         _ticketsPanel.Controls.Add(_ticketsBox);
         _ticketsPanel.Controls.Add(ticketsBtnPanel);
 
-        // DNS registration tab
-        _dnsBox = new RichTextBox
-        {
-            ReadOnly = true,
-            BackColor = PanelColor,
-            ForeColor = TextColor,
-            BorderStyle = BorderStyle.None,
-            Dock = DockStyle.Fill,
-            Font = new Font("Segoe UI", 9.5f),
-            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
-        };
-        _btnRegister = new ThemedButton { Text = "Register now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Location = new Point(10, 3) };
-        _btnRegister.Click += BtnRegister_Click;
-        _btnDnsCheck = new ThemedButton { Text = "Check again", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Location = new Point(128, 3) };
-        _btnDnsCheck.Click += BtnDnsCheck_Click;
-        var lblZtna = new Label { Text = "ZTNA adapter:", ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(244, 9) };
-        _cmbZtna = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(334, 5), Size = new Size(290, 24), AccessibleName = "ZTNA adapter" };
+        (_dnsPanel, _dnsBox, _btnRegister, _btnDnsCheck, _cmbZtna) = BuildDnsTab();
         FillZtnaChoices([]);
-        _cmbZtna.DropDown += (s, e) => RefreshZtnaChoices();
-        _cmbZtna.SelectedIndexChanged += CmbZtna_SelectedIndexChanged;
-        var dnsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
-        dnsBtnPanel.Controls.AddRange([_btnRegister, _btnDnsCheck, lblZtna, _cmbZtna]);
-        // The picker takes the room the window gives it, up to where a longer line stops being easier to read
-        dnsBtnPanel.Resize += (s, e) =>
-            _cmbZtna.Width = Math.Clamp(dnsBtnPanel.Width - _cmbZtna.Left - _btnRegister.Left, _btnRegister.Width, _cmbZtna.Left * 3 / 2);
-        _dnsPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
-        _dnsPanel.Controls.Add(_dnsBox);
-        _dnsPanel.Controls.Add(dnsBtnPanel);
         RenderDnsBox();
 
-        // Log tab
-        _logBox = new RichTextBox
-        {
-            ReadOnly = true,
-            BackColor = PanelColor,
-            ForeColor = TextColor,
-            BorderStyle = BorderStyle.None,
-            Dock = DockStyle.Fill,
-            Font = new Font(MonoFamily, 8.5f),
-            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
-        };
-        _chkDebug = new CheckBox { Text = "Debug", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(12, 8) };
-        _chkDebug.CheckedChanged += (s, e) =>
-        {
-            AppLog.DebugEnabled = _chkDebug.Checked;
-            AppLog.Info("log", _chkDebug.Checked ? "Debug logging on: commands, timings and raw tool output are recorded" : "Debug logging off");
-        };
-        var btnCopyLog = new ThemedButton { Text = "Copy log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(84, 3) };
-        btnCopyLog.Click += BtnCopyLog_Click;
-        var btnSaveLog = new ThemedButton { Text = "Save log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(172, 3) };
-        btnSaveLog.Click += BtnSaveLog_Click;
-        var btnClearLog = new ThemedButton { Text = "Clear log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(260, 3) };
-        btnClearLog.Click += (s, e) => { AppLog.Clear(); _logBox.Clear(); };
-        var logBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
-        logBtnPanel.Controls.AddRange([_chkDebug, btnCopyLog, btnSaveLog, btnClearLog]);
-        _logPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
-        _logPanel.Controls.Add(_logBox);
-        _logPanel.Controls.Add(logBtnPanel);
+        (_logPanel, _logBox, _chkDebug) = BuildLogTab();
         // The log is written from worker threads; the pane catches up on a timer, and only while it is on show
         _logTimer.Tick += (s, e) => { if (_logPanel.Visible) FlushLog(); };
         _logTimer.Start();
@@ -884,8 +831,8 @@ class MainForm : Form
                 "  Fix: Nothing to fix. It explains the results below: the client decides which DNS queries and which traffic reach the corporate network. If a client is missed or wrongly found, pick its adapter (or None) under 'ZTNA adapter' on the DNS registration tab; the choice lasts until the app closes\n\n" +
                 "• Registering Adapters — the connected adapters with 'Register this connection's addresses in DNS' turned on, and the addresses they would register\n" +
                 "  Fix: Turn registration off on a tunnel adapter that holds a 100.64.0.0/10 address, since no other host can route to it. Set it per adapter (IPv4 properties > Advanced > DNS) or with 'Set-DnsClient -RegisterThisConnectionsAddress'\n\n" +
-                "• Zone Primary Server — the zone holding this machine's name and its primary server, from the SOA record. Windows sends updates to this server\n" +
-                "  Fix: If no SOA is found behind a ZTNA client, its DNS proxy is answering address lookups only; updates then need DNS for the AD zone to reach a real DNS server. A primary server shown with a 100.64.0.0/10 address is a synthetic address from the client\n\n" +
+                "• Zone Primary Server — the zone holding this machine's name and its primary server, from the SOA record, asked of the DNS servers of the adapters that register, as Windows does; the detail names the server that answered. Windows sends updates to the primary server\n" +
+                "  Fix: If no SOA is found behind a ZTNA client, its DNS proxy is answering address lookups only; updates then need DNS for the AD zone to reach a real DNS server. A primary server shown with a 100.64.0.0/10 address is a synthetic address from the client. One with a public address is usually the zone's internet-facing copy, which takes no updates from this machine: the DNS server that answered does not know the internal zone\n\n" +
                 "• Update Path (Port 53) — TCP 53 to the primary server. Secure updates negotiate over TCP and also need Kerberos (port 88) to a domain controller\n" +
                 "  Fix: Allow TCP and UDP 53 to the primary server through the firewall or the ZTNA access policy\n\n" +
                 "• Registered Record — the A/AAAA records the primary server holds for this machine, compared with the addresses it has now\n" +
@@ -1313,10 +1260,45 @@ class MainForm : Form
 
     // ── DNS registration tab ──────────────────────────────────
 
+    // The tab's controls, for the constructor to keep
+    (Panel Panel, RichTextBox Box, Button Register, Button Check, ComboBox Ztna) BuildDnsTab()
+    {
+        var box = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = PanelColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        var register = new ThemedButton { Text = "Register now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Location = new Point(10, 3) };
+        register.Click += BtnRegister_Click;
+        var check = new ThemedButton { Text = "Check again", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Location = new Point(128, 3) };
+        check.Click += BtnDnsCheck_Click;
+        var lblZtna = new Label { Text = "ZTNA adapter:", ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(244, 9) };
+        var ztna = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(334, 5), Size = new Size(290, 24), AccessibleName = "ZTNA adapter" };
+        ztna.DropDown += (s, e) => RefreshZtnaChoices();
+        ztna.SelectedIndexChanged += CmbZtna_SelectedIndexChanged;
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        buttons.Controls.AddRange([register, check, lblZtna, ztna]);
+        // The picker takes the room the window gives it, up to where a longer line stops being easier to read
+        buttons.Resize += (s, e) =>
+            ztna.Width = Math.Clamp(buttons.Width - ztna.Left - register.Left, register.Width, ztna.Left * 3 / 2);
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        panel.Controls.Add(box);
+        panel.Controls.Add(buttons);
+        return (panel, box, register, check, ztna);
+    }
+
     static string StatusWord(Status status) => status switch
     {
         Status.Pass => "Passed", Status.Fail => "Failed", Status.Warn => "Warning", _ => "Skipped",
     };
+
+    // The wait is a step in progress, not a verdict, in the pane and in the log alike
+    static string StepWord(TestEntry step) => step.Name == Diagnostics.RegWait ? "Waiting" : StatusWord(step.Status);
 
     static void AppendRun(RichTextBox box, string text, Color color, Font? font = null)
     {
@@ -1344,9 +1326,8 @@ class MainForm : Form
         {
             Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), _ => ("–", DimColor),
         };
-        string word = step.Name == Diagnostics.RegWait ? "Waiting" : StatusWord(step.Status);
         DnsParagraph(row: true);
-        AppendRun(_dnsBox, $"  {mark} {word}", color);
+        AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
         AppendRun(_dnsBox, $"\t{step.Name}", TextColor, GpBoldFont);
         AppendRun(_dnsBox, $"\t{step.Detail}\n", step.Status == Status.Skip ? DimColor : TextColor);
         _dnsBox.ScrollToCaret();
@@ -1413,6 +1394,22 @@ class MainForm : Form
         });
     }
 
+    // Logs a step and shows it, unless its job has been cancelled since; called from the job's thread
+    void ReportDnsStep(TestEntry step, CancellationTokenSource cts)
+    {
+        AppLog.Info("ddns", $"{StepWord(step),-8} {step.Name}: {step.Detail}");
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (cts.IsCancellationRequested || IsDisposed) return;
+                _dnsSteps.Add(step);
+                AppendDnsStep(step);
+            });
+        }
+        catch (InvalidOperationException) { } // the window closed while the job was running
+    }
+
     /// <summary>Runs a DNS registration job off the UI thread, showing and logging each step as it reports it.</summary>
     async Task RunDnsTrace(string heading, Action<DiagConfig, Action<TestEntry>> work)
     {
@@ -1426,20 +1423,7 @@ class MainForm : Form
         RenderDnsBox();
         AppLog.Info("ddns", heading);
 
-        void Report(TestEntry step)
-        {
-            AppLog.Info("ddns", $"{StatusWord(step.Status),-8} {step.Name}: {step.Detail}");
-            try
-            {
-                BeginInvoke(() =>
-                {
-                    if (cts.IsCancellationRequested || IsDisposed) return;
-                    _dnsSteps.Add(step);
-                    AppendDnsStep(step);
-                });
-            }
-            catch (InvalidOperationException) { } // the window closed while the job was running
-        }
+        void Report(TestEntry step) => ReportDnsStep(step, cts);
 
         try
         {
@@ -1488,6 +1472,38 @@ class MainForm : Form
         });
 
     // ── Log tab ───────────────────────────────────────────────
+
+    (Panel Panel, RichTextBox Box, CheckBox Debug) BuildLogTab()
+    {
+        var box = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = PanelColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font(MonoFamily, 8.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        var debug = new CheckBox { Text = "Debug", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(12, 8) };
+        debug.CheckedChanged += (s, e) =>
+        {
+            AppLog.DebugEnabled = debug.Checked;
+            AppLog.Info("log", debug.Checked ? "Debug logging on: commands, timings and raw tool output are recorded" : "Debug logging off");
+        };
+        var btnCopyLog = new ThemedButton { Text = "Copy log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(84, 3) };
+        btnCopyLog.Click += BtnCopyLog_Click;
+        var btnSaveLog = new ThemedButton { Text = "Save log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(172, 3) };
+        btnSaveLog.Click += BtnSaveLog_Click;
+        var btnClearLog = new ThemedButton { Text = "Clear log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(260, 3) };
+        btnClearLog.Click += (s, e) => { AppLog.Clear(); box.Clear(); };
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog]);
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        panel.Controls.Add(box);
+        panel.Controls.Add(buttons);
+        return (panel, box, debug);
+    }
 
     void AppendLogLine(LogLine line)
     {
@@ -2152,8 +2168,8 @@ class MainForm : Form
             }
         }
 
-        public SoaRecord? QuerySoa(string name, CancellationToken ct) =>
-            Runner.RunWithTimeout(() => MainForm.QuerySoa(name), Runner.DnsTimeoutMs, $"SOA query for {name}", ct);
+        public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => MainForm.QuerySoa(name, server), Runner.DnsTimeoutMs, $"SOA query for {name}", ct);
 
         public IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct) =>
             Runner.RunWithTimeout(() => MainForm.QueryAddresses(name, server), Runner.DnsTimeoutMs, $"A/AAAA query for {name}", ct);
@@ -2243,13 +2259,14 @@ class MainForm : Form
 
     /// <summary>
     /// The zone and primary server from the SOA record for <paramref name="name"/>, whether it came as the answer
-    /// (the name is a zone) or as the authority for a name inside one; null if the reply carried none.
+    /// (the name is a zone) or as the authority for a name inside one; null if the reply carried none. Asked of
+    /// <paramref name="server"/> (IPv4), or of the configured DNS servers when null.
     /// </summary>
-    static SoaRecord? QuerySoa(string name)
+    static SoaRecord? QuerySoa(string name, IPAddress? server)
     {
         SoaRecord? soa = null;
         // DNS_SOA_DATAW starts with the primary server's name
-        int status = QueryDnsServer(name, DnsTypeSoa, null,
+        int status = QueryDnsServer(name, DnsTypeSoa, server,
             (zone, data) => soa ??= new(zone, Marshal.PtrToStringUni(Marshal.ReadIntPtr(data)) ?? ""));
         if (soa == null && status is not (0 or DnsErrorNameError or DnsInfoNoRecords))
             throw new System.ComponentModel.Win32Exception(status);
