@@ -49,7 +49,7 @@ static class Shots
     {
         Pump(800);
         Populate(form);
-        form.Height = 1275;
+        form.Height = 1420;
         Pump(800);
         Capture(form, outDir, "results.png");
         form.Height = 900;
@@ -85,6 +85,58 @@ static class Shots
         tb.SelectionStart = 0; tb.ScrollToCaret();
         Pump(500);
         Capture(form, outDir, "kerberos-tickets.png");
+
+        Call(form, "SwitchTab", "dns");
+        FrontFill(Get<Panel>(form, "_dnsPanel"));
+        Set(form, "_dnsHeading", "Registering this computer in DNS, " + DateTime.Now.AddSeconds(-40).ToString("HH:mm:ss"));
+        Get<List<TestEntry>>(form, "_dnsSteps").AddRange(MockDnsTrace());
+        Call(form, "RenderDnsBox");
+        Pump(500);
+        Capture(form, outDir, "dns-registration.png");
+
+        var log = (DiagLog)typeof(MainForm).GetField("AppLog", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        Call(form, "SwitchTab", "log");
+        FrontFill(Get<Panel>(form, "_logPanel"));
+        Get<CheckBox>(form, "_chkDebug").Checked = true;
+        log.Clear();
+        MockLog(log);
+        Call(form, "RenderLog");
+        Pump(500);
+        Capture(form, outDir, "log.png");
+    }
+
+    // A laptop at home behind a ZTNA client, whose record in DNS still holds its office address
+    static List<TestEntry> MockDnsTrace() =>
+    [
+        new("Registration Name", Status.Pass, "PC042.contoso.com with 192.168.1.50"),
+        new("ZTNA / VPN Client", Status.Pass, "Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)"),
+        new("Zone Primary Server", Status.Pass, "contoso.com -> dc01.contoso.com (10.20.0.11)"),
+        new("Record Before", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale"),
+        new("Send", Status.Pass, "ipconfig /registerdns ran: Windows IP Configuration Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer in 15 minutes."),
+        new("Wait", Status.Skip, "Watching the server and the DNS Client event log for up to 30s"),
+        new("DNS Client Event", Status.Fail, $"event 8015 at {DateTime.Now.AddSeconds(-31):g} — The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings: Adapter Name : {{3F2A9B10-55C1-4E0B-9D7A-0C1E5A1B7F42}} Host Name : PC042 Primary Domain Suffix : contoso.com DNS server list : 100.64.0.2 Sent update to server : 10.20.0.11 IP Address(es) : 192.168.1.50 The reason the system could not register these RRs was because the update request it sent to the DNS server timed out."),
+        new("Record After", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale — Windows logged a registration failure (above)"),
+        new("ZTNA / VPN Client", Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and TCP and UDP 53 to dc01.contoso.com to pass the tunnel as real traffic, not through the client's DNS proxy"),
+    ];
+
+    static void MockLog(DiagLog log)
+    {
+        log.Info("log", "Debug logging on: commands, timings and raw tool output are recorded");
+        log.Info("run", "Started: domain contoso.com, DC DC01.contoso.com");
+        log.Debug("machine", "Host name and primary DNS suffix (0 ms)\nPC042, suffix \"contoso.com\"");
+        log.Debug("machine", "Network adapters (3 ms)\nWi-Fi [Intel(R) Wi-Fi 6 AX201 160MHz]: addresses 192.168.1.50; DNS servers 100.64.0.2; registers in DNS: yes\n"
+            + "Ethernet 3 [Zscaler Network Adapter 1.0.2.0]: addresses 100.64.0.7; DNS servers 100.64.0.2; registers in DNS: no");
+        log.Debug("dns", "SOA PC042.contoso.com (41 ms)\nno record");
+        log.Debug("dns", "SOA contoso.com (62 ms)\nzone contoso.com, primary server dc01.contoso.com");
+        log.Debug("tool", "nltest /dsgetdc:contoso.com (1270 ms)\n           DC: \\\\DC01.contoso.com\n      Address: \\\\10.20.0.11\n     Dom Guid: 6f1c2a54-9b1e-4a37-8f0d-2c5e7a903b11\n     Dom Name: contoso.com\n  Forest Name: contoso.com\n Dc Site Name: HQ-Seattle\nThe command completed successfully");
+        log.Debug("tcp", "Connect 10.20.0.11 port 53: open (38 ms)");
+        log.Debug("tcp", "Connect 10.20.0.11 port 636: no answer (3001 ms)");
+        log.Debug("dns", "A/AAAA PC042.contoso.com from 10.20.0.11 (57 ms)\n10.20.4.18");
+        log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
+        log.Info("result", "Warning  DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11)");
+        log.Info("result", "Passed   Dynamic DNS Registration / Zone Primary Server: contoso.com -> dc01.contoso.com (10.20.0.11)");
+        log.Info("result", "Warning  Dynamic DNS Registration / Registered Record: dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale");
+        log.Info("run", "Complete: 32 passed, 0 failed, 3 warnings");
     }
 
     static void FrontFill(Control fill)
@@ -183,6 +235,16 @@ static class Shots
                     ? new("Clock Skew", Status.Warn, $"74.31s drift from {dc}")
                     : new("Clock Skew", Status.Pass, $"0.04s drift from {dc}"),
                 new("Time Source", Status.Pass, dc),
+            ]),
+            new("Dynamic DNS Registration",
+            [
+                new("Registration Name", Status.Pass, "PC042.contoso.com"),
+                new("ZTNA / VPN Client", Status.Pass, "No ZTNA or VPN tunnel adapter detected"),
+                new("Registering Adapters", Status.Pass, "Ethernet: 10.20.4.18"),
+                new("Zone Primary Server", Status.Pass, $"contoso.com -> dc01.contoso.com ({ip})"),
+                new("Update Path (Port 53)", Status.Pass, $"dc01.contoso.com ({ip}) reachable over TCP"),
+                new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
+                new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
             ]),
         ];
     }

@@ -253,4 +253,18 @@ static class Samples
         #0>	Client: bob @ FABRIKAM.COM
         	Server: krbtgt/CONTOSO.COM @ FABRIKAM.COM
         """;
+
+    public const string IpconfigRegisterDns = """
+
+        Windows IP Configuration
+
+        Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer in 15 minutes.
+        """;
+
+    // Output of the app's DNS Client event query: a refused update for the host record
+    public const string DnsClientEventsRefused = """
+        EVENTS|2
+        EVT|8015|2026-10-05T12:02:14.0000000Z|The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings: Adapter Name : {3F2A} Host Name : PC042 Primary Domain Suffix : contoso.com DNS server list : 10.20.0.11 Sent update to server : 10.20.0.11 IP Address(es) : 10.20.4.18 The reason the system could not register these RRs was because the DNS server contacted refused the update request.
+        EVT|8018|2026-10-05T12:02:13.0000000Z|The system failed to register pointer (PTR) resource records (RRs) for network adapter with settings: Adapter Name : {3F2A}
+        """;
 }
