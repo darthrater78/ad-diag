@@ -31,15 +31,34 @@ interface IProbe
     (string SearchList, string Domain) DnsSuffixConfig();
     /// <summary>This machine's own domain: its NetBIOS name and its primary DNS suffix.</summary>
     string?[] OwnDomainNames();
+    /// <summary>This machine's host name and primary DNS suffix; together, the name Windows registers in DNS.</summary>
+    (string Host, string Suffix) HostIdentity();
+    /// <summary>The connected network adapters, loopback excluded.</summary>
+    List<NetAdapter> Adapters();
+    /// <summary>
+    /// The zone and primary server from the SOA record for <paramref name="name"/> (null if it has none), asked of
+    /// <paramref name="server"/> (IPv4) or, when null, the configured DNS servers.
+    /// </summary>
+    SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct);
+    /// <summary>
+    /// The A and AAAA records a DNS server holds for <paramref name="name"/> (empty if none), asked of
+    /// <paramref name="server"/> (IPv4) or, when null, the configured DNS servers. Never answered locally.
+    /// </summary>
+    IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct);
+    bool IsElevated();
 }
 
-record DiagConfig(string Domain, string Dc, CancellationToken Cancel);
+/// <param name="ZtnaAdapter">
+/// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
+/// </param>
+record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
 
-// The seven test groups. Kept free of any WinForms dependency so they can be unit tested (see tests/AdDiag.Tests).
-static class Diagnostics
+// The test groups (the eighth, dynamic DNS registration, is in DnsRegistration.cs). Kept free of any WinForms
+// dependency so they can be unit tested (see tests/AdDiag.Tests).
+static partial class Diagnostics
 {
     public static TestGroup TestDomainMembership(DiagConfig cfg, IProbe probe)
     {

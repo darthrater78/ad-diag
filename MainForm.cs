@@ -7,6 +7,7 @@ using System.Drawing.Text;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -100,13 +101,14 @@ class MainForm : Form
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
     readonly Button _btnRun, _btnExport, _btnCopy, _btnClear, _btnTheme;
-    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets;
-    readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets;
-    readonly CheckBox _chkGpForce;
+    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog;
+    readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
+    readonly CheckBox _chkGpForce, _chkDebug;
+    readonly ComboBox _cmbZtna;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
     readonly ResultsCanvas _resultsCanvas;
-    readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel;
-    readonly RichTextBox _guideBox, _gpBox, _ticketsBox;
+    readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
+    readonly RichTextBox _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox;
     bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
     bool _ticketsRunning;
@@ -115,13 +117,21 @@ class MainForm : Form
     readonly List<DiagRun> _runHistory = [];
     int _selectedRunIndex = -1;
     CancellationTokenSource? _runCts;
+    // DNS registration tab: the trace on show, kept so a theme switch can write it again
+    bool _dnsRunning, _fillingZtna;
+    string? _ztnaAdapter; // the picker's choice (DiagConfig.ZtnaAdapter); never saved
+    string? _dnsHeading;
+    readonly List<TestEntry> _dnsSteps = [];
+    CancellationTokenSource? _dnsCts;
+    long _logSeq; // the last log line written to the Log tab
+    readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 300 };
 
 
     public MainForm()
     {
         Text = "AD Diagnostics";
         Size = new Size(820, 900);
-        MinimumSize = new Size(600, 500);
+        MinimumSize = new Size(660, 500);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = BgColor;
         ForeColor = TextColor;
@@ -231,7 +241,11 @@ class MainForm : Form
         _btnTabGp.Click += (s, e) => { SwitchTab("gp"); RefreshGpTab(); };
         _btnTabTickets = new ThemedButton { Text = "Kerberos tickets", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(292, 2) };
         _btnTabTickets.Click += (s, e) => { SwitchTab("tickets"); RefreshTickets(); };
-        tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets]);
+        _btnTabDns = new ThemedButton { Text = "DNS registration", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(426, 2) };
+        _btnTabDns.Click += (s, e) => SwitchTab("dns");
+        _btnTabLog = new ThemedButton { Text = "Log", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(60, 26), Location = new Point(560, 2) };
+        _btnTabLog.Click += (s, e) => SwitchTab("log");
+        tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog]);
 
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
@@ -315,6 +329,15 @@ class MainForm : Form
         _ticketsPanel.Controls.Add(_ticketsBox);
         _ticketsPanel.Controls.Add(ticketsBtnPanel);
 
+        (_dnsPanel, _dnsBox, _btnRegister, _btnDnsCheck, _cmbZtna) = BuildDnsTab();
+        FillZtnaChoices([]);
+        RenderDnsBox();
+
+        (_logPanel, _logBox, _chkDebug) = BuildLogTab();
+        // The log is written from worker threads; the pane catches up on a timer, and only while it is on show
+        _logTimer.Tick += (s, e) => { if (_logPanel.Visible) FlushLog(); };
+        _logTimer.Start();
+
         _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
         _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
 
@@ -322,11 +345,13 @@ class MainForm : Form
         contentWrapper.Controls.Add(_guideBox);
         contentWrapper.Controls.Add(_gpPanel);
         contentWrapper.Controls.Add(_ticketsPanel);
+        contentWrapper.Controls.Add(_dnsPanel);
+        contentWrapper.Controls.Add(_logPanel);
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
 
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox })
             ThemeScrollbars(scrolling);
 
         mainPanel.Controls.Add(layout);
@@ -350,6 +375,7 @@ class MainForm : Form
         FormClosing += (s, e) =>
         {
             _runCts?.Cancel();
+            _dnsCts?.Cancel();
         };
         FormClosed += (s, e) =>
         {
@@ -359,6 +385,9 @@ class MainForm : Form
             // flush (the app writes no files), so end the process outright.
             TerminateProcess(GetCurrentProcess(), 0);
         };
+        bool elevated = false;
+        try { elevated = Probe.IsElevated(); } catch { }
+        AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
         _ = DetectDomainAsync();
     }
 
@@ -376,7 +405,7 @@ class MainForm : Form
                 {
                     try
                     {
-                        string dsreg = RunProcess("dsregcmd", "/status", timeoutMs: 5000);
+                        string dsreg = Probe.RunTool("dsregcmd", "/status", 5000, default);
                         var m = Regex.Match(dsreg, @"Device Domain\s*:\s*(\S+)", RegexOptions.IgnoreCase);
                         return m.Success ? m.Groups[1].Value.Trim() : null;
                     }
@@ -453,7 +482,7 @@ class MainForm : Form
         Retheme(this);
         _btnTheme.Text = ThemeButtonText;
         ApplyTitleBarTheme();
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox })
             if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
 
         // The text panes hold coloured runs, so they are written again in the new colours
@@ -462,6 +491,8 @@ class MainForm : Form
         else { _gpBox.Clear(); AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor); }
         if (_showingExplainer) ShowTicketsExplainer();
         else if (_ticketsLoaded) RefreshTickets();
+        RenderDnsBox();
+        RenderLog();
         RebuildHistoryBar();
         Invalidate(true);
     }
@@ -611,6 +642,7 @@ class MainForm : Form
 
     void BtnClear_Click(object? sender, EventArgs e)
     {
+        AppLog.Info("run", "Results cleared" + (_runCts is { IsCancellationRequested: false } && !_btnRun.Enabled ? "; run cancelled" : ""));
         _runCts?.Cancel();
         _btnRun.Enabled = true; // a cancelled run returns early and never re-enables it
         _runHistory.Clear();
@@ -646,8 +678,11 @@ class MainForm : Form
         _guideBox.Visible = tab == "guide";
         _gpPanel.Visible = tab == "gp";
         _ticketsPanel.Visible = tab == "tickets";
+        _dnsPanel.Visible = tab == "dns";
+        _logPanel.Visible = tab == "log";
+        if (tab == "log") FlushLog();
 
-        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets") })
+        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets"), (_btnTabDns, "dns"), (_btnTabLog, "log") })
         {
             btn.Selected = tab == key;
         }
@@ -787,6 +822,23 @@ class MainForm : Form
                 "• Denied GPOs — policies that exist but were filtered out (security filtering, WMI filters, disabled links)\n" +
                 "  Fix: This is often expected behavior — review each denied GPO's link status and security filtering if unexpected\n\n" +
                 "The Group Policy tab shows Computer and User scope side by side: last applied time (with age and staleness warning), site name, and every applied and denied GPO with its filtering reason. Use 'Run gpupdate' to force a refresh without leaving the app — check 'Force' to reapply all policies rather than just changed ones."),
+
+            ("Dynamic DNS Registration",
+                "A domain member registers its own host record with the DNS server that owns its zone. These checks only read; the DNS registration tab can send a registration and trace it. A ZTNA or VPN client changes what each step means, so it is detected first.\n\n" +
+                "• Registration Name — the name Windows registers: the host name plus the primary DNS suffix\n" +
+                "  Fix: A machine with no primary DNS suffix registers nothing. The suffix is set by the domain join (System Properties > Computer Name > Change > More)\n\n" +
+                "• ZTNA / VPN Client — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Island and others), any other tunnel or virtual adapter that holds an address, an adapter with a /32 address and no gateway, 100.64.0.0/10 addresses, or DNS answered by the client's local proxy (informational)\n" +
+                "  Fix: Nothing to fix. It explains the results below: the client decides which DNS queries and which traffic reach the corporate network. If a client is missed or wrongly found, pick its adapter (or None) under 'ZTNA adapter' on the DNS registration tab; the choice lasts until the app closes\n\n" +
+                "• Registering Adapters — the connected adapters with 'Register this connection's addresses in DNS' turned on, and the addresses they would register\n" +
+                "  Fix: Turn registration off on a tunnel adapter that holds a 100.64.0.0/10 address, since no other host can route to it. Set it per adapter (IPv4 properties > Advanced > DNS) or with 'Set-DnsClient -RegisterThisConnectionsAddress'\n\n" +
+                "• Zone Primary Server — the zone holding this machine's name and its primary server, from the SOA record, asked of the DNS servers of the adapters that register, as Windows does; the detail names the server that answered. Windows sends updates to the primary server\n" +
+                "  Fix: If no SOA is found behind a ZTNA client, its DNS proxy is answering address lookups only; updates then need DNS for the AD zone to reach a real DNS server. A primary server shown with a 100.64.0.0/10 address is a synthetic address from the client. One with a public address is usually the zone's internet-facing copy, which takes no updates from this machine: the DNS server that answered does not know the internal zone\n\n" +
+                "• Update Path (Port 53) — TCP 53 to the primary server. Secure updates negotiate over TCP and also need Kerberos (port 88) to a domain controller\n" +
+                "  Fix: Allow TCP and UDP 53 to the primary server through the firewall or the ZTNA access policy\n\n" +
+                "• Registered Record — the A/AAAA records the primary server holds for this machine, compared with the addresses it has now\n" +
+                "  Fix: A stale or missing record means registration isn't arriving. Use Register now on the DNS registration tab (as Administrator) and read the trace. 'Refused' usually means the record is owned by another account or the zone doesn't allow updates\n\n" +
+                "• Registration Errors — DNS Client warnings (event IDs in the 8000s) in the System log in the last 24 hours; Windows logs one for each failed registration and nothing on success\n" +
+                "  Fix: The event text gives the server that was sent the update and the reason (refused, timed out, not authoritative)"),
 
             ("Trust Relationships",
                 "Uses nltest /domain_trusts to enumerate trust relationships visible to this domain.\n\n" +
@@ -947,7 +999,7 @@ class MainForm : Form
 
         try
         {
-            string output = await Task.Run(() => RunProcess("gpupdate", force ? "/force" : "", timeoutMs: 90000));
+            string output = await Task.Run(() => Probe.RunTool("gpupdate", force ? "/force" : "", 90000, default));
             AppendGpLine("\n" + output.Trim() + "\n\n", DimColor);
         }
         catch (Exception ex)
@@ -983,7 +1035,7 @@ class MainForm : Form
         _ticketsBox.Clear();
         AppendTicketsLine("Loading tickets...\n", DimColor);
         string raw;
-        try { raw = await Task.Run(() => RunProcess("klist", "", timeoutMs: 5000)); }
+        try { raw = await Task.Run(() => Probe.RunTool("klist", "", 5000, default)); }
         catch (Exception ex)
         {
             if (!_showingExplainer)
@@ -1191,7 +1243,7 @@ class MainForm : Form
         _btnPurgeTickets.Enabled = false;
         try
         {
-            await Task.Run(() => RunProcess("klist", "purge", timeoutMs: 5000));
+            await Task.Run(() => Probe.RunTool("klist", "purge", 5000, default));
             _lblStatus.Text = "Tickets purged — run diagnostics twice (first run reacquires tickets, second shows true results)";
             _lblStatus.ForeColor = WarnColor;
             RefreshTickets();
@@ -1203,6 +1255,324 @@ class MainForm : Form
         finally
         {
             _btnPurgeTickets.Enabled = true;
+        }
+    }
+
+    // ── DNS registration tab ──────────────────────────────────
+
+    // The tab's controls, for the constructor to keep
+    (Panel Panel, RichTextBox Box, Button Register, Button Check, ComboBox Ztna) BuildDnsTab()
+    {
+        var box = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = PanelColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        var register = new ThemedButton { Text = "Register now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Location = new Point(10, 3) };
+        register.Click += BtnRegister_Click;
+        var check = new ThemedButton { Text = "Check again", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Location = new Point(128, 3) };
+        check.Click += BtnDnsCheck_Click;
+        var lblZtna = new Label { Text = "ZTNA adapter:", ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(244, 9) };
+        var ztna = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(334, 5), Size = new Size(290, 24), AccessibleName = "ZTNA adapter" };
+        ztna.DropDown += (s, e) => RefreshZtnaChoices();
+        ztna.SelectedIndexChanged += CmbZtna_SelectedIndexChanged;
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        buttons.Controls.AddRange([register, check, lblZtna, ztna]);
+        // The picker takes the room the window gives it, up to where a longer line stops being easier to read
+        buttons.Resize += (s, e) =>
+            ztna.Width = Math.Clamp(buttons.Width - ztna.Left - register.Left, register.Width, ztna.Left * 3 / 2);
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        panel.Controls.Add(box);
+        panel.Controls.Add(buttons);
+        return (panel, box, register, check, ztna);
+    }
+
+    static string StatusWord(Status status) => status switch
+    {
+        Status.Pass => "Passed", Status.Fail => "Failed", Status.Warn => "Warning", _ => "Skipped",
+    };
+
+    // The wait is a step in progress, not a verdict, in the pane and in the log alike
+    static string StepWord(TestEntry step) => step.Name == Diagnostics.RegWait ? "Waiting" : StatusWord(step.Status);
+
+    static void AppendRun(RichTextBox box, string text, Color color, Font? font = null)
+    {
+        box.SelectionStart = box.TextLength;
+        box.SelectionLength = 0;
+        box.SelectionColor = color;
+        box.SelectionFont = font ?? box.Font;
+        box.AppendText(text);
+    }
+
+    // Starts a paragraph in the DNS pane: a result row has the grid's three columns (status, name, detail) and
+    // wraps its detail under the detail column; anything else is plain text
+    void DnsParagraph(bool row)
+    {
+        _dnsBox.SelectionStart = _dnsBox.TextLength;
+        _dnsBox.SelectionLength = 0;
+        _dnsBox.SelectionTabs = row ? [S(96), S(270)] : [];
+        _dnsBox.SelectionHangingIndent = row ? S(270) : 0;
+    }
+
+    void AppendDnsStep(TestEntry step)
+    {
+        // Shapes as in the results grid, so the status reads without colour
+        var (mark, color) = step.Status switch
+        {
+            Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), _ => ("–", DimColor),
+        };
+        DnsParagraph(row: true);
+        AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
+        AppendRun(_dnsBox, $"\t{step.Name}", TextColor, GpBoldFont);
+        AppendRun(_dnsBox, $"\t{step.Detail}\n", step.Status == Status.Skip ? DimColor : TextColor);
+        _dnsBox.ScrollToCaret();
+    }
+
+    void RenderDnsBox()
+    {
+        _dnsBox.Clear();
+        DnsParagraph(row: false);
+        if (_dnsHeading == null)
+        {
+            AppendRun(_dnsBox, "\n  Register now asks Windows to register this computer's host (A/AAAA) and pointer (PTR) records in DNS\n"
+                + "  ('ipconfig /registerdns'), then traces what happens: the record on the zone's primary server before and\n"
+                + "  after, and any failure the DNS Client logs. It changes records in DNS and requires Run as Administrator.\n\n"
+                + "  Check again repeats the read-only Dynamic DNS registration checks from the Results tab. It sends nothing.\n", DimColor);
+            return;
+        }
+        AppendRun(_dnsBox, $"\n  {_dnsHeading}\n\n", TextColor, GpBoldFont);
+        foreach (var step in _dnsSteps)
+            AppendDnsStep(step);
+    }
+
+    /// <summary>An entry in the ZTNA adapter picker; <see cref="Tag"/> is what <see cref="DiagConfig.ZtnaAdapter"/> takes.</summary>
+    sealed record ZtnaChoice(string? Tag, string Text)
+    {
+        public override string ToString() => Text;
+    }
+
+    /// <summary>Writes the picker's entries again, keeping the user's choice selected even if its adapter has gone.</summary>
+    void FillZtnaChoices(List<(string Name, string Text)> adapters)
+    {
+        _fillingZtna = true;
+        _cmbZtna.BeginUpdate();
+        _cmbZtna.Items.Clear();
+        _cmbZtna.Items.Add(new ZtnaChoice(null, "Detect automatically"));
+        _cmbZtna.Items.Add(new ZtnaChoice("", "None — no ZTNA or VPN client on this machine"));
+        foreach (var (name, text) in adapters)
+            _cmbZtna.Items.Add(new ZtnaChoice(name, text));
+        if (!string.IsNullOrEmpty(_ztnaAdapter) && adapters.All(a => a.Name != _ztnaAdapter))
+            _cmbZtna.Items.Add(new ZtnaChoice(_ztnaAdapter, $"{_ztnaAdapter} — not connected"));
+        _cmbZtna.SelectedItem = _cmbZtna.Items.Cast<ZtnaChoice>().First(c => c.Tag == _ztnaAdapter);
+        _cmbZtna.DropDownWidth = Math.Max(_cmbZtna.Width,
+            _cmbZtna.Items.Cast<ZtnaChoice>().Max(c => TextRenderer.MeasureText(c.Text, _cmbZtna.Font).Width) + SystemInformation.VerticalScrollBarWidth);
+        _cmbZtna.EndUpdate();
+        _fillingZtna = false;
+    }
+
+    // Read each time the list opens, so an adapter that has connected since is there to pick
+    void RefreshZtnaChoices()
+    {
+        try { FillZtnaChoices(Diagnostics.AdapterChoices(Probe.Adapters())); }
+        catch (Exception ex) { AppLog.Info("ddns", $"Could not list the network adapters: {ex.Message}"); }
+    }
+
+    void CmbZtna_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (_fillingZtna || _cmbZtna.SelectedItem is not ZtnaChoice choice || choice.Tag == _ztnaAdapter) return;
+        _ztnaAdapter = choice.Tag;
+        AppLog.Info("ddns", _ztnaAdapter switch
+        {
+            null => "ZTNA adapter: detect automatically",
+            "" => "ZTNA adapter: set to none by the user",
+            _ => $"ZTNA adapter: \"{_ztnaAdapter}\" tagged by the user",
+        });
+    }
+
+    // Logs a step and shows it, unless its job has been cancelled since; called from the job's thread
+    void ReportDnsStep(TestEntry step, CancellationTokenSource cts)
+    {
+        AppLog.Info("ddns", $"{StepWord(step),-8} {step.Name}: {step.Detail}");
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (cts.IsCancellationRequested || IsDisposed) return;
+                _dnsSteps.Add(step);
+                AppendDnsStep(step);
+            });
+        }
+        catch (InvalidOperationException) { } // the window closed while the job was running
+    }
+
+    /// <summary>Runs a DNS registration job off the UI thread, showing and logging each step as it reports it.</summary>
+    async Task RunDnsTrace(string heading, Action<DiagConfig, Action<TestEntry>> work)
+    {
+        if (_dnsRunning) return;
+        _dnsRunning = true;
+        _btnRegister.Enabled = _btnDnsCheck.Enabled = false;
+        _dnsCts = new CancellationTokenSource();
+        var cts = _dnsCts;
+        _dnsSteps.Clear();
+        _dnsHeading = $"{heading}, {DateTime.Now:HH:mm:ss}";
+        RenderDnsBox();
+        AppLog.Info("ddns", heading);
+
+        void Report(TestEntry step) => ReportDnsStep(step, cts);
+
+        try
+        {
+            await Task.Factory.StartNew(() => work(new DiagConfig("", "", cts.Token, _ztnaAdapter), Report),
+                cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Report(new("Error", Status.Fail, ex.Message));
+        }
+        finally
+        {
+            _dnsRunning = false;
+            _btnRegister.Enabled = _btnDnsCheck.Enabled = true;
+        }
+    }
+
+    async void BtnRegister_Click(object? sender, EventArgs e)
+    {
+        if (_dnsRunning) return;
+        var confirm = MessageBox.Show(
+            "This will run 'ipconfig /registerdns', which asks Windows to register this computer's host (A/AAAA) and "
+            + "pointer (PTR) records with its DNS server, for every adapter that has DNS registration turned on.\n\n"
+            + "It changes records in DNS.\n\nContinue?",
+            "Register in DNS", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        Status verdict = Status.Skip;
+        await RunDnsTrace("Registering this computer in DNS", (cfg, report) => verdict = Diagnostics.RegisterDns(cfg, Probe, report));
+        _lblStatus.ForeColor = DimColor;
+        _lblStatus.Text = verdict switch
+        {
+            Status.Pass => "DNS registration confirmed",
+            Status.Fail => "DNS registration failed",
+            Status.Warn => "DNS registration not confirmed",
+            _ => _lblStatus.Text,
+        };
+    }
+
+    async void BtnDnsCheck_Click(object? sender, EventArgs e) =>
+        await RunDnsTrace("Dynamic DNS registration checks", (cfg, report) =>
+        {
+            foreach (var test in Diagnostics.TestDnsRegistration(cfg, Probe).Tests)
+                report(test);
+        });
+
+    // ── Log tab ───────────────────────────────────────────────
+
+    (Panel Panel, RichTextBox Box, CheckBox Debug) BuildLogTab()
+    {
+        var box = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = PanelColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font(MonoFamily, 8.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+        };
+        var debug = new CheckBox { Text = "Debug", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(12, 8) };
+        debug.CheckedChanged += (s, e) =>
+        {
+            AppLog.DebugEnabled = debug.Checked;
+            AppLog.Info("log", debug.Checked ? "Debug logging on: commands, timings and raw tool output are recorded" : "Debug logging off");
+        };
+        var btnCopyLog = new ThemedButton { Text = "Copy log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(84, 3) };
+        btnCopyLog.Click += BtnCopyLog_Click;
+        var btnSaveLog = new ThemedButton { Text = "Save log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(172, 3) };
+        btnSaveLog.Click += BtnSaveLog_Click;
+        var btnClearLog = new ThemedButton { Text = "Clear log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(260, 3) };
+        btnClearLog.Click += (s, e) => { AppLog.Clear(); box.Clear(); };
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog]);
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        panel.Controls.Add(box);
+        panel.Controls.Add(buttons);
+        return (panel, box, debug);
+    }
+
+    void AppendLogLine(LogLine line)
+    {
+        // A long line wraps under its message, not under the time
+        string prefix = DiagLog.Prefix(line);
+        _logBox.SelectionStart = _logBox.TextLength;
+        _logBox.SelectionLength = 0;
+        _logBox.SelectionHangingIndent = TextRenderer.MeasureText(prefix, _logBox.Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+        AppendRun(_logBox, prefix, DimColor);
+        AppendRun(_logBox, DiagLog.Body(line) + "\n", line.Debug ? DimColor : TextColor);
+    }
+
+    /// <summary>Writes the log lines added since the last call to the Log tab.</summary>
+    void FlushLog()
+    {
+        var lines = AppLog.Since(_logSeq);
+        if (lines.Count == 0) return;
+        // The log drops its oldest lines; so does the pane, rather than grow without limit
+        if (_logBox.TextLength > 2_000_000)
+        {
+            RenderLog();
+            return;
+        }
+        _logSeq = lines[^1].Seq;
+        foreach (var line in lines)
+            AppendLogLine(line);
+        _logBox.ScrollToCaret();
+    }
+
+    void RenderLog()
+    {
+        _logBox.Clear();
+        _logSeq = 0;
+        FlushLog();
+    }
+
+    void BtnCopyLog_Click(object? sender, EventArgs e)
+    {
+        string text = AppLog.Text();
+        if (text.Length == 0) return;
+        try
+        {
+            Clipboard.SetText(text);
+            _lblStatus.Text = "Log copied to the clipboard";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Copy failed: {ex.Message}";
+        }
+    }
+
+    void BtnSaveLog_Click(object? sender, EventArgs e)
+    {
+        using var dlg = new SaveFileDialog
+        {
+            FileName = $"ad-diag-log-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            Filter = "Text files (*.txt)|*.txt",
+            DefaultExt = ".txt"
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+
+        try
+        {
+            File.WriteAllText(dlg.FileName, AppLog.Text(), Encoding.UTF8);
+            _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = $"Save failed: {ex.Message}";
         }
     }
 
@@ -1412,6 +1782,7 @@ class MainForm : Form
         _runCts?.Cancel();
         _runCts = new CancellationTokenSource();
         var cts = _runCts;
+        AppLog.Info("run", $"Started: domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
 
         _btnRun.Enabled = false;
         _btnExport.Enabled = _btnCopy.Enabled = false;
@@ -1428,13 +1799,15 @@ class MainForm : Form
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
-        var config = new DiagConfig(domain, dc, cts.Token);
+        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
         int completed = 0;
         int totalGroups = results.Count;
 
         void ReplaceGroup(string name, TestGroup result)
         {
             if (cts.IsCancellationRequested || IsDisposed) return;
+            foreach (var test in result.Tests)
+                AppLog.Info("result", $"{StatusWord(test.Status),-8} {result.Name} / {test.Name}: {test.Detail}");
             int idx = results.FindIndex(g => g.Name == name);
             if (idx >= 0) results[idx] = result;
             completed++;
@@ -1454,6 +1827,7 @@ class MainForm : Form
         var gpTask = StartGroup(cfg => Diagnostics.TestGroupPolicy(cfg, Probe));
         var trustTask = StartGroup(cfg => Diagnostics.TestTrusts(cfg, Probe));
         var kerbTask = StartGroup(cfg => Diagnostics.TestKerberosAndTime(cfg, Probe));
+        var dnsRegTask = StartGroup(cfg => Diagnostics.TestDnsRegistration(cfg, Probe));
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
@@ -1464,6 +1838,7 @@ class MainForm : Form
             (gpTask, "Group Policy", () => gpTask.GetAwaiter().GetResult()),
             (trustTask, "Trust Relationships", () => trustTask.GetAwaiter().GetResult()),
             (kerbTask, "Kerberos & Time Sync", () => kerbTask.GetAwaiter().GetResult()),
+            (dnsRegTask, "Dynamic DNS Registration", () => dnsRegTask.GetAwaiter().GetResult()),
         };
 
         while (pending.Count > 0)
@@ -1496,6 +1871,8 @@ class MainForm : Form
             ShowResults(selected.Results);
         RebuildHistoryBar();
 
+        var all = results.SelectMany(g => g.Tests).ToList();
+        AppLog.Info("run", $"Complete: {all.Count(t => t.Status == Status.Pass)} passed, {all.Count(t => t.Status == Status.Fail)} failed, {all.Count(t => t.Status == Status.Warn)} warnings");
         _lblStatus.Text = "Complete";
         _btnRun.Enabled = true;
         _btnExport.Enabled = _btnCopy.Enabled = SelectedRun is { IsPending: false };
@@ -1712,13 +2089,20 @@ class MainForm : Form
             new("Kerberos & Time Sync", [
                 new("TGT Present"), new("Clock Skew"), new("Time Source"),
             ]),
+            new("Dynamic DNS Registration", [
+                new("Registration Name"), new("ZTNA / VPN Client"), new("Registering Adapters"),
+                new("Zone Primary Server"), new("Update Path (Port 53)"), new("Registered Record"),
+                new("Registration Errors"),
+            ]),
         };
         return groups;
     }
 
     // ── What the diagnostics (Diagnostics.cs) ask of this machine ──
 
-    static readonly IProbe Probe = new WindowsProbe();
+    // In memory only: nothing is written unless the user saves the log from the Log tab
+    static readonly DiagLog AppLog = new();
+    static readonly IProbe Probe = new LoggingProbe(new WindowsProbe(), AppLog);
 
     sealed class WindowsProbe : IProbe
     {
@@ -1747,6 +2131,54 @@ class MainForm : Form
         }
 
         public string?[] OwnDomainNames() => GetOwnDomainNames();
+
+        public (string Host, string Suffix) HostIdentity()
+        {
+            var global = IPGlobalProperties.GetIPGlobalProperties();
+            return (global.HostName, global.DomainName);
+        }
+
+        public List<NetAdapter> Adapters() => NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            .Select(n =>
+            {
+                var ip = n.GetIPProperties();
+                return new NetAdapter(n.Name, n.Description,
+                    n.NetworkInterfaceType is NetworkInterfaceType.Tunnel or NetworkInterfaceType.Ppp,
+                    ip.IsDynamicDnsEnabled, ip.UnicastAddresses.Select(u => u.Address).ToArray(), ip.DnsAddresses.ToArray(),
+                    IsSoftwareAdapter(n.Id),
+                    ip.UnicastAddresses.Any(u => u.Address.AddressFamily == AddressFamily.InterNetwork && u.PrefixLength == 32)
+                        && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)));
+            }).ToList();
+
+        // Windows enumerates a software adapter itself (ROOT\, SWD\); a real one is found on a bus (PCI\, USB\, VMBUS\)
+        static bool IsSoftwareAdapter(string id)
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\Network\{{4D36E972-E325-11CE-BFC1-08002BE10318}}\{id}\Connection");
+                string instance = key?.GetValue("PnPInstanceId") as string ?? "";
+                return instance.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase)
+                    || instance.StartsWith(@"SWD\", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                return false;
+            }
+        }
+
+        public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => MainForm.QuerySoa(name, server), Runner.DnsTimeoutMs, $"SOA query for {name}", ct);
+
+        public IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => MainForm.QueryAddresses(name, server), Runner.DnsTimeoutMs, $"A/AAAA query for {name}", ct);
+
+        public bool IsElevated()
+        {
+            using var id = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+        }
     }
 
     const ushort DnsTypeSrv = 33;
@@ -1785,6 +2217,101 @@ class MainForm : Form
         }
     }
 
+    const ushort DnsTypeA = 1, DnsTypeSoa = 6, DnsTypeAaaa = 28;
+    // Asked of a DNS server and nothing else: no resolver cache (0x8), no answering for this machine's own name
+    // locally (0x20), no hosts file (0x40), NetBIOS (0x80) or multicast (0x800), wire only (0x100)
+    const uint DnsQueryServerOnly = 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
+
+    /// <summary>
+    /// Sends one query to <paramref name="server"/> (IPv4), or to the configured DNS servers when null, and hands
+    /// each record of the asked type, from any section of the reply, to <paramref name="read"/> as its owner name
+    /// and a pointer to its data. Returns the DNS API status (0, or e.g. 9003 when the name doesn't exist).
+    /// </summary>
+    static int QueryDnsServer(string name, ushort type, IPAddress? server, Action<string, IntPtr> read)
+    {
+        int status;
+        IntPtr results;
+        if (server != null)
+        {
+            var servers = new Ip4Array { AddrCount = 1, Address = BitConverter.ToUInt32(server.GetAddressBytes(), 0) };
+            status = DnsQuery_W(name, type, DnsQueryServerOnly, ref servers, out results, IntPtr.Zero);
+        }
+        else
+        {
+            status = DnsQuery_W(name, type, DnsQueryServerOnly, IntPtr.Zero, out results, IntPtr.Zero);
+        }
+        try
+        {
+            for (IntPtr p = results; p != IntPtr.Zero;)
+            {
+                var header = Marshal.PtrToStructure<DnsRecordHeader>(p);
+                if (header.wType == type)
+                    read(Marshal.PtrToStringUni(header.pName) ?? "", p + Marshal.SizeOf<DnsRecordHeader>());
+                p = header.pNext;
+            }
+        }
+        finally
+        {
+            if (results != IntPtr.Zero) DnsRecordListFree(results, 1); // DnsFreeRecordList
+        }
+        return status;
+    }
+
+    /// <summary>
+    /// The zone and primary server from the SOA record for <paramref name="name"/>, whether it came as the answer
+    /// (the name is a zone) or as the authority for a name inside one; null if the reply carried none. Asked of
+    /// <paramref name="server"/> (IPv4), or of the configured DNS servers when null.
+    /// </summary>
+    static SoaRecord? QuerySoa(string name, IPAddress? server)
+    {
+        SoaRecord? soa = null;
+        // DNS_SOA_DATAW starts with the primary server's name
+        int status = QueryDnsServer(name, DnsTypeSoa, server,
+            (zone, data) => soa ??= new(zone, Marshal.PtrToStringUni(Marshal.ReadIntPtr(data)) ?? ""));
+        if (soa == null && status is not (0 or DnsErrorNameError or DnsInfoNoRecords))
+            throw new System.ComponentModel.Win32Exception(status);
+        return soa;
+    }
+
+    /// <summary>The A and AAAA records a DNS server holds for <paramref name="name"/>; empty if it holds none.</summary>
+    static IPAddress[] QueryAddresses(string name, IPAddress? server)
+    {
+        var found = new List<IPAddress>();
+        foreach (ushort type in new[] { DnsTypeA, DnsTypeAaaa })
+        {
+            int status = QueryDnsServer(name, type, server, (_, data) =>
+            {
+                var bytes = new byte[type == DnsTypeA ? 4 : 16];
+                Marshal.Copy(data, bytes, 0, bytes.Length);
+                found.Add(new IPAddress(bytes));
+            });
+            if (status is not (0 or DnsErrorNameError or DnsInfoNoRecords))
+                throw new System.ComponentModel.Win32Exception(status);
+        }
+        return found.Distinct().ToArray();
+    }
+
+    // The start of every DNS_RECORDW; the record's data follows it
+    [StructLayout(LayoutKind.Sequential)]
+    struct DnsRecordHeader
+    {
+        public IntPtr pNext;
+        public IntPtr pName;
+        public ushort wType;
+        public ushort wDataLength;
+        public uint Flags;
+        public uint dwTtl;
+        public uint dwReserved;
+    }
+
+    // IP4_ARRAY with one server; the address is in network byte order
+    [StructLayout(LayoutKind.Sequential)]
+    struct Ip4Array
+    {
+        public uint AddrCount;
+        public uint Address;
+    }
+
     // DNS_RECORDW's header followed by the DNS_SRV_DATAW member of its data union
     [StructLayout(LayoutKind.Sequential)]
     struct DnsSrvRecord
@@ -1805,6 +2332,9 @@ class MainForm : Form
 
     [DllImport("dnsapi.dll", CharSet = CharSet.Unicode)]
     static extern int DnsQuery_W(string name, ushort type, uint options, IntPtr extra, out IntPtr results, IntPtr reserved);
+
+    [DllImport("dnsapi.dll", CharSet = CharSet.Unicode)]
+    static extern int DnsQuery_W(string name, ushort type, uint options, ref Ip4Array servers, out IntPtr results, IntPtr reserved);
 
     [DllImport("dnsapi.dll")]
     static extern void DnsRecordListFree(IntPtr recordList, int freeType);

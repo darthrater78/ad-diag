@@ -12,6 +12,8 @@
     <Compile Include="../../Parsers.cs" Link="Parsers.cs" />
     <Compile Include="../../Runner.cs" Link="Runner.cs" />
     <Compile Include="../../Diagnostics.cs" Link="Diagnostics.cs" />
+    <Compile Include="../../DnsRegistration.cs" Link="DnsRegistration.cs" />
+    <Compile Include="../../Log.cs" Link="Log.cs" />
   </ItemGroup>
 
   <ItemGroup>

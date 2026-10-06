@@ -179,6 +179,9 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 - **Tab:** bare text, dim when idle; the selected tab is bold with a 3px primary underline.
 - **Result row:** mark and word in status colour; name and detail in text colour.
 - **Ticket badge:** filled label in the Kerberos tickets pane; text uses on-primary.
+- **Trace row** (DNS registration pane): the result row's three columns in a text pane, with the same mark shapes as characters (● ▲ ✕ –); a long detail wraps under the detail column.
+- **Picker** (ZTNA adapter): a flat drop-down list on surface with a text-dim label to its left, in the action bar after the buttons. Its list is as wide as its longest entry.
+- **Log line:** monospace, since every line is a system value. Time and source in text-dim, message in text, debug lines wholly in text-dim.
 
 ## Do's and Don'ts
 

@@ -8,9 +8,10 @@ namespace AdDiag.Tests;
 public class DiagnosticsTests
 {
     const string Domain = "contoso.com";
-    static readonly IPAddress DcIp = IPAddress.Parse("10.20.0.11");
+    internal static readonly IPAddress DcIp = IPAddress.Parse("10.20.0.11");
+    internal static readonly IPAddress ClientIp = IPAddress.Parse("10.20.4.18");
 
-    sealed class FakeProbe : IProbe
+    internal sealed class FakeProbe : IProbe
     {
         // Keyed by the start of "tool arguments"; a tool with no entry behaves as one that never answers
         public Dictionary<string, string> Tools = new();
@@ -24,6 +25,18 @@ public class DiagnosticsTests
         public Func<string, int?> Share = _ => 3;
         public List<string> ShareCalls = [];
         public (string, string) Suffixes = ("contoso.com,corp.contoso.com", "contoso.com");
+        public (string, string) Identity = ("PC042", "contoso.com");
+        public List<NetAdapter> NetAdapters = [new("Ethernet", "Intel(R) Ethernet Connection", false, true, [ClientIp], [DcIp])];
+        public Dictionary<string, SoaRecord> Soa = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> SoaCalls = [];
+        public List<IPAddress?> SoaServers = [];
+        // What one DNS server answers, where it differs from Soa; null for a server that never answers
+        public Dictionary<IPAddress, Dictionary<string, SoaRecord>?> SoaByServer = new();
+        // What a DNS server holds for a name; the server is null when the configured servers are asked
+        public Func<string, IPAddress?, IPAddress[]> Records = (_, _) => [ClientIp];
+        public bool Elevated = true;
+        public Func<string> DnsEvents = () => "EVENTS|0";
+        public int DnsEventQueries;
 
         public string RunTool(string tool, string arguments, int timeoutMs, CancellationToken ct)
         {
@@ -37,6 +50,11 @@ public class DiagnosticsTests
         public string RunPowerShell(string script, int timeoutMs, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (script.Contains("Get-WinEvent"))
+            {
+                DnsEventQueries++;
+                return DnsEvents();
+            }
             return script.Contains("pwdLastSet") ? PasswordAge : Rsop;
         }
 
@@ -60,10 +78,30 @@ public class DiagnosticsTests
         public string CurrentUser() => @"CONTOSO\jdoe";
         public (string SearchList, string Domain) DnsSuffixConfig() => Suffixes;
         public string?[] OwnDomainNames() => ["CONTOSO", "contoso.com"];
+        public (string Host, string Suffix) HostIdentity() => Identity;
+        public List<NetAdapter> Adapters() => NetAdapters;
+
+        public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            SoaCalls.Add(name);
+            SoaServers.Add(server);
+            if (server == null || !SoaByServer.TryGetValue(server, out var zones))
+                return Soa.GetValueOrDefault(name);
+            return zones != null ? zones.GetValueOrDefault(name) : throw new TimeoutException($"SOA query for {name} timed out after 8s");
+        }
+
+        public IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Records(name, server);
+        }
+
+        public bool IsElevated() => Elevated;
     }
 
     // A machine where everything works
-    static FakeProbe Healthy() => new()
+    internal static FakeProbe Healthy() => new()
     {
         Tools =
         {
@@ -75,6 +113,7 @@ public class DiagnosticsTests
             ["klist"] = Samples.Klist,
             ["w32tm /stripchart"] = Samples.W32tmStripchart,
             ["w32tm /query /source"] = Samples.W32tmSource,
+            ["ipconfig /registerdns"] = Samples.IpconfigRegisterDns,
         },
         Hosts = { [Domain] = [DcIp], ["DC01.contoso.com"] = [DcIp] },
         OpenPorts = [389, 636, 88, 445, 135, 464, 53, 3268],
@@ -84,6 +123,7 @@ public class DiagnosticsTests
             ["_kerberos._tcp.contoso.com"] = ["dc01.contoso.com:88"],
             ["_gc._tcp.contoso.com"] = ["dc01.contoso.com:3268"],
         },
+        Soa = { [Domain] = new(Domain, "dc01.contoso.com") },
     };
 
     static DiagConfig Config(string dc = "", CancellationToken ct = default) => new(Domain, dc, ct);
@@ -100,9 +140,9 @@ public class DiagnosticsTests
             Diagnostics.TestDomainMembership(Config(), probe), Diagnostics.TestDcConnectivity(Config(), probe),
             Diagnostics.TestDnsForAd(Config(), probe), Diagnostics.TestSysvolNetlogon(Config(), probe),
             Diagnostics.TestGroupPolicy(Config(), probe), Diagnostics.TestTrusts(Config(), probe),
-            Diagnostics.TestKerberosAndTime(Config(), probe),
+            Diagnostics.TestKerberosAndTime(Config(), probe), Diagnostics.TestDnsRegistration(Config(), probe),
         };
-        Assert.Equal(28, groups.Sum(g => g.Tests.Count));
+        Assert.Equal(35, groups.Sum(g => g.Tests.Count));
         Assert.All(groups.SelectMany(g => g.Tests), t => Assert.True(t.Status == Status.Pass, $"{t.Name}: {t.Status} — {t.Detail}"));
     }
 

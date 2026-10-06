@@ -158,6 +158,31 @@ static class Parsers
     }
 
     /// <summary>
+    /// Parses the DNS Client event query's output: "EVENTS|&lt;count&gt;" followed by one
+    /// "EVT|&lt;id&gt;|&lt;ISO 8601 UTC&gt;|&lt;message&gt;" per event, or "ERROR|&lt;message&gt;". Output with neither
+    /// (e.g. PowerShell failing to start the script) is also an error.
+    /// </summary>
+    public static DnsClientEvents ParseDnsClientEvents(string output)
+    {
+        var events = new List<DnsClientEvent>();
+        bool counted = false;
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var parts = rawLine.Trim().Split('|');
+            if (parts.Length >= 2 && parts[0] == "ERROR")
+                return new([], string.Join("|", parts[1..]).Trim());
+            if (parts.Length == 2 && parts[0] == "EVENTS")
+                counted = true;
+            else if (parts.Length >= 4 && parts[0] == "EVT" && int.TryParse(parts[1], out int id)
+                && DateTime.TryParse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var time))
+                events.Add(new(id, time.ToUniversalTime(), string.Join("|", parts[3..]).Trim()));
+        }
+        if (counted) return new(events, null);
+        string first = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
+        return new([], first.Length > 0 ? first : "No output from PowerShell");
+    }
+
+    /// <summary>
     /// Parses the RSoP query's output, one line per scope and per GPO link:
     /// <code>
     /// SCOPE|Computer|OK|&lt;last applied, ISO 8601 UTC, or empty&gt;|&lt;site&gt;
@@ -323,3 +348,5 @@ record GpScope(string Name, GpScopeState State, string Detail, DateTime? LastApp
     List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);
 record KlistOutput(List<string> Headers, List<KlistTicket> Tickets);
+record DnsClientEvent(int Id, DateTime TimeUtc, string Message);
+record DnsClientEvents(List<DnsClientEvent> Events, string? Error);

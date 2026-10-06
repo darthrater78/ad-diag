@@ -4,7 +4,7 @@ fonts <src> <dst>: writes Wine-friendly copies of the fonts the app asks for.
   - Cascadia Code: Wine's GDI+ looks a family up by the Regular face's full name, so
     "Cascadia Code Regular" never matches and WinForms falls back to Tahoma. The full
     name is set to the family name.
-  - Selawik stands in for Segoe UI (not redistributable). It lacks the bullet and
+  - Selawik stands in for Segoe UI (not redistributable). It lacks the status-mark and
     box-drawing glyphs the app prints, and Wine's rich edit control doesn't fall back
     to another font, so they are merged in from DejaVu Sans.
 crop <png>...: trims trailing rows that are all background colour.
@@ -12,7 +12,7 @@ crop <png>...: trims trailing rows that are all background colour.
 import sys
 from pathlib import Path
 
-EXTRA = [0x25CF, 0x2550, 0x2500, 0x2502, 0x250C, 0x2514]  # ● ═ ─ │ ┌ └
+EXTRA = [0x25CF, 0x2550, 0x2500, 0x2502, 0x250C, 0x2514, 0x25B2, 0x2715]  # ● ═ ─ │ ┌ └ ▲ ✕
 DROP = ("GSUB", "GPOS", "GDEF", "DSIG", "kern", "hdmx", "VDMX", "LTSH", "MATH", "FFTM", "BASE", "JSTF", "meta")
 
 
