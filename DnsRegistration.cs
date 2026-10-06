@@ -11,7 +11,10 @@ using System.Threading;
 namespace AdDiag;
 
 /// <summary>A connected network adapter, as far as DNS registration is concerned.</summary>
-record NetAdapter(string Name, string Description, bool Tunnel, bool RegistersInDns, IPAddress[] Addresses, IPAddress[] DnsServers);
+/// <param name="Virtual">A software adapter with no hardware behind it, which is what a ZTNA or VPN client installs.</param>
+/// <param name="PointToPoint">Holds an IPv4 /32 address and has no default gateway, the usual shape of a client's adapter.</param>
+record NetAdapter(string Name, string Description, bool Tunnel, bool RegistersInDns, IPAddress[] Addresses, IPAddress[] DnsServers,
+    bool Virtual = false, bool PointToPoint = false);
 record SoaRecord(string Zone, string PrimaryServer);
 
 // Dynamic DNS registration: whether this machine's own host record can reach, and is right on, the DNS server
@@ -38,7 +41,11 @@ static partial class Diagnostics
         ("fortinet", "FortiClient"), ("citrix secure access", "Citrix Secure Access"), ("appgate", "Appgate"),
         ("cato networks", "Cato"), ("check point", "Check Point"), ("banyan", "Banyan"), ("ip-https", "DirectAccess"),
         ("wireguard", "WireGuard"), ("openvpn", "OpenVPN"), ("tap-windows", "OpenVPN"), ("wintun", "Wintun"),
+        ("island private access", "Island"),
     ];
+
+    // Software adapters that belong to this machine's own hypervisor or radios, not to a ZTNA or VPN client
+    static readonly string[] HostVirtual = ["hyper-v", "vmware", "virtualbox", "wsl", "loopback", "wi-fi direct", "bluetooth", "npcap"];
 
     // Windows' own IPv6 transition adapters report themselves as tunnels but carry no corporate traffic
     static readonly string[] PseudoTunnels = ["teredo", "isatap", "6to4"];
@@ -62,20 +69,44 @@ static partial class Diagnostics
 
     static string Join(IEnumerable<IPAddress> addresses) => string.Join(", ", addresses);
 
-    /// <summary>The ZTNA or VPN client the adapters give away, e.g. "Zscaler adapter (100.64.0.7)"; null if none.</summary>
-    public static string? DescribeZtna(List<NetAdapter> adapters)
+    /// <summary>
+    /// The adapters a ZTNA or VPN client owns, each with a label. A client is recognised by name, by a tunnel adapter
+    /// type, by a 100.64.0.0/10 address, by a /32 address with no gateway, or by being a software adapter that holds
+    /// an address: a client in "VPN mode" gives its adapter a real routable address, so the range alone says nothing.
+    /// </summary>
+    static List<(NetAdapter Adapter, string Label)> ClientAdapters(List<NetAdapter> adapters, string? tag)
     {
-        var found = new List<string>();
+        var found = new List<(NetAdapter, string)>();
+        if (tag == "") return found;
         foreach (var adapter in adapters)
         {
             string text = $"{adapter.Name} {adapter.Description}";
-            if (PseudoTunnels.Any(p => text.Contains(p, StringComparison.OrdinalIgnoreCase))) continue;
+            bool tagged = adapter.Name == tag;
+            if (!tagged && PseudoTunnels.Any(p => text.Contains(p, StringComparison.OrdinalIgnoreCase))) continue;
             string? client = ZtnaClients.FirstOrDefault(c => text.Contains(c.Match, StringComparison.OrdinalIgnoreCase)).Client;
             var addresses = adapter.Addresses.Where(IsRegistrable).ToArray();
-            if (client == null && !adapter.Tunnel && !addresses.Any(IsCgnat)) continue;
-            found.Add((client != null ? $"{client} adapter" : $"tunnel adapter \"{adapter.Name}\"")
-                + (addresses.Length > 0 ? $" ({Join(addresses)})" : ""));
+            bool tunnel = adapter.Tunnel || adapter.PointToPoint || addresses.Any(IsCgnat);
+            // WAN Miniports and filter bindings are software adapters too, but hold no address
+            bool software = adapter.Virtual && addresses.Length > 0
+                && !HostVirtual.Any(h => text.Contains(h, StringComparison.OrdinalIgnoreCase));
+            if (client == null && !tunnel && !software && !tagged) continue;
+            string kind = client != null ? $"{client} adapter"
+                : $"{(tunnel ? "tunnel " : software ? "virtual " : "")}adapter \"{adapter.Name}\"";
+            found.Add((adapter, kind + (addresses.Length > 0 ? $" ({Join(addresses)})" : "") + (tagged ? ", tagged by you" : "")));
         }
+        return found;
+    }
+
+    /// <summary>
+    /// The ZTNA or VPN client the adapters give away, e.g. "Zscaler adapter (100.64.0.7)"; null if none.
+    /// <paramref name="tag"/> is the user's own answer (<see cref="DiagConfig.ZtnaAdapter"/>), for a client this misses.
+    /// </summary>
+    public static string? DescribeZtna(List<NetAdapter> adapters, string? tag = null)
+    {
+        var found = ClientAdapters(adapters, tag).Select(c => c.Label).ToList();
+        if (!string.IsNullOrEmpty(tag) && adapters.All(a => a.Name != tag))
+            found.Add($"tagged adapter \"{tag}\" is not connected");
+        if (tag == "") return null;
 
         var dnsServers = adapters.SelectMany(a => a.DnsServers).Distinct().ToArray();
         // A loopback DNS server alone proves nothing (a domain controller points at itself); beside a tunnel it is the client's proxy
@@ -84,6 +115,22 @@ static partial class Diagnostics
             found.Add($"DNS answered by its local proxy ({Join(proxies)})");
         return found.Count == 0 ? null : string.Join("; ", found);
     }
+
+    /// <summary>
+    /// The adapters a user can tag as the client's: each connected one that holds an address, with the signals
+    /// detection saw on it, e.g. "Ethernet 4 — 172.16.50.3 · virtual · /32, no gateway".
+    /// </summary>
+    public static List<(string Name, string Text)> AdapterChoices(List<NetAdapter> adapters) =>
+        adapters.Where(a => a.Addresses.Any(IsRegistrable)
+                && !PseudoTunnels.Any(p => $"{a.Name} {a.Description}".Contains(p, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => (a.Name, $"{a.Name} — {Join(a.Addresses.Where(IsRegistrable))}"
+                + (a.Tunnel ? " · tunnel" : "") + (a.Virtual ? " · virtual" : "") + (a.PointToPoint ? " · /32, no gateway" : "")))
+            .ToList();
+
+    // Routable addresses on a client's adapter that Windows will not put in DNS, as that adapter has registration off
+    static IPAddress[] UnregisteredClientAddresses(List<NetAdapter> adapters, string? tag) =>
+        ClientAdapters(adapters, tag).Where(c => !c.Adapter.RegistersInDns)
+            .SelectMany(c => c.Adapter.Addresses).Where(a => IsRegistrable(a) && !IsCgnat(a)).Distinct().ToArray();
 
     // The addresses this machine would register: those of connected adapters with DNS registration on
     static IPAddress[] RegisteringAddresses(List<NetAdapter> adapters) =>
@@ -194,8 +241,9 @@ static partial class Diagnostics
         try
         {
             adapters = probe.Adapters();
-            ztna = DescribeZtna(adapters);
-            tests.Add(new(RegZtna, Status.Pass, ztna != null ? $"{ztna} (informational)" : "No ZTNA or VPN tunnel adapter detected"));
+            ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
+            tests.Add(new(RegZtna, Status.Pass, ztna != null ? $"{ztna} (informational)"
+                : cfg.ZtnaAdapter == "" ? "None, as set by you" : "No ZTNA or VPN adapter detected"));
 
             var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
             var tunnelOnly = RegisteringAddresses(adapters).Where(IsCgnat).ToArray();
@@ -204,9 +252,14 @@ static partial class Diagnostics
                 tests.Add(new(RegAdapters, Status.Warn, "No connected adapter has \"Register this connection's addresses in DNS\" turned on"));
             else if (tunnelOnly.Length > 0)
                 tests.Add(new(RegAdapters, Status.Warn, $"{list} — {Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to"));
+            else if (ztna == null)
+                tests.Add(new(RegAdapters, Status.Pass, list));
+            else if (UnregisteredClientAddresses(adapters, cfg.ZtnaAdapter) is { Length: > 0 } unregistered)
+                tests.Add(new(RegAdapters, Status.Pass, $"{list} — the client's own address ({Join(unregistered)}) is not registered, because "
+                    + "registration is off on its adapter; if servers reach this machine through the client, that is the address DNS should hold"));
             else
                 tests.Add(new(RegAdapters, Status.Pass, list
-                    + (ztna != null ? " — behind the ZTNA client this is the local network's address, which servers cannot use to reach this machine" : "")));
+                    + " — behind the ZTNA client this is the local network's address, which servers cannot use to reach this machine"));
         }
         catch (Exception ex)
         {
@@ -329,7 +382,7 @@ static partial class Diagnostics
             return Stop(RegName, $"Could not read this machine's name and adapters: {ex.Message}");
         }
         var local = RegisteringAddresses(adapters);
-        string? ztna = DescribeZtna(adapters);
+        string? ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
         report(new(RegName, Status.Pass, fqdn + (local.Length > 0 ? $" with {Join(local)}" : " — no adapter has DNS registration turned on")));
         if (ztna != null)
             report(new(RegZtna, Status.Pass, $"{ztna} (informational)"));

@@ -104,6 +104,7 @@ class MainForm : Form
     readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
     readonly CheckBox _chkGpForce, _chkDebug;
+    readonly ComboBox _cmbZtna;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
     readonly ResultsCanvas _resultsCanvas;
     readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
@@ -117,7 +118,8 @@ class MainForm : Form
     int _selectedRunIndex = -1;
     CancellationTokenSource? _runCts;
     // DNS registration tab: the trace on show, kept so a theme switch can write it again
-    bool _dnsRunning;
+    bool _dnsRunning, _fillingZtna;
+    string? _ztnaAdapter; // the picker's choice (DiagConfig.ZtnaAdapter); never saved
     string? _dnsHeading;
     readonly List<TestEntry> _dnsSteps = [];
     CancellationTokenSource? _dnsCts;
@@ -342,8 +344,16 @@ class MainForm : Form
         _btnRegister.Click += BtnRegister_Click;
         _btnDnsCheck = new ThemedButton { Text = "Check again", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Location = new Point(128, 3) };
         _btnDnsCheck.Click += BtnDnsCheck_Click;
+        var lblZtna = new Label { Text = "ZTNA adapter:", ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(244, 9) };
+        _cmbZtna = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(334, 5), Size = new Size(290, 24), AccessibleName = "ZTNA adapter" };
+        FillZtnaChoices([]);
+        _cmbZtna.DropDown += (s, e) => RefreshZtnaChoices();
+        _cmbZtna.SelectedIndexChanged += CmbZtna_SelectedIndexChanged;
         var dnsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
-        dnsBtnPanel.Controls.AddRange([_btnRegister, _btnDnsCheck]);
+        dnsBtnPanel.Controls.AddRange([_btnRegister, _btnDnsCheck, lblZtna, _cmbZtna]);
+        // The picker takes the room the window gives it, up to where a longer line stops being easier to read
+        dnsBtnPanel.Resize += (s, e) =>
+            _cmbZtna.Width = Math.Clamp(dnsBtnPanel.Width - _cmbZtna.Left - _btnRegister.Left, _btnRegister.Width, _cmbZtna.Left * 3 / 2);
         _dnsPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
         _dnsPanel.Controls.Add(_dnsBox);
         _dnsPanel.Controls.Add(dnsBtnPanel);
@@ -870,8 +880,8 @@ class MainForm : Form
                 "A domain member registers its own host record with the DNS server that owns its zone. These checks only read; the DNS registration tab can send a registration and trace it. A ZTNA or VPN client changes what each step means, so it is detected first.\n\n" +
                 "• Registration Name — the name Windows registers: the host name plus the primary DNS suffix\n" +
                 "  Fix: A machine with no primary DNS suffix registers nothing. The suffix is set by the domain join (System Properties > Computer Name > Change > More)\n\n" +
-                "• ZTNA / VPN Client — a tunnel adapter (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate and others), 100.64.0.0/10 addresses, or DNS answered by the client's local proxy (informational)\n" +
-                "  Fix: Nothing to fix. It explains the results below: the client decides which DNS queries and which traffic reach the corporate network\n\n" +
+                "• ZTNA / VPN Client — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Island and others), any other tunnel or virtual adapter that holds an address, an adapter with a /32 address and no gateway, 100.64.0.0/10 addresses, or DNS answered by the client's local proxy (informational)\n" +
+                "  Fix: Nothing to fix. It explains the results below: the client decides which DNS queries and which traffic reach the corporate network. If a client is missed or wrongly found, pick its adapter (or None) under 'ZTNA adapter' on the DNS registration tab; the choice lasts until the app closes\n\n" +
                 "• Registering Adapters — the connected adapters with 'Register this connection's addresses in DNS' turned on, and the addresses they would register\n" +
                 "  Fix: Turn registration off on a tunnel adapter that holds a 100.64.0.0/10 address, since no other host can route to it. Set it per adapter (IPv4 properties > Advanced > DNS) or with 'Set-DnsClient -RegisterThisConnectionsAddress'\n\n" +
                 "• Zone Primary Server — the zone holding this machine's name and its primary server, from the SOA record. Windows sends updates to this server\n" +
@@ -1359,6 +1369,50 @@ class MainForm : Form
             AppendDnsStep(step);
     }
 
+    /// <summary>An entry in the ZTNA adapter picker; <see cref="Tag"/> is what <see cref="DiagConfig.ZtnaAdapter"/> takes.</summary>
+    sealed record ZtnaChoice(string? Tag, string Text)
+    {
+        public override string ToString() => Text;
+    }
+
+    /// <summary>Writes the picker's entries again, keeping the user's choice selected even if its adapter has gone.</summary>
+    void FillZtnaChoices(List<(string Name, string Text)> adapters)
+    {
+        _fillingZtna = true;
+        _cmbZtna.BeginUpdate();
+        _cmbZtna.Items.Clear();
+        _cmbZtna.Items.Add(new ZtnaChoice(null, "Detect automatically"));
+        _cmbZtna.Items.Add(new ZtnaChoice("", "None — no ZTNA or VPN client on this machine"));
+        foreach (var (name, text) in adapters)
+            _cmbZtna.Items.Add(new ZtnaChoice(name, text));
+        if (!string.IsNullOrEmpty(_ztnaAdapter) && adapters.All(a => a.Name != _ztnaAdapter))
+            _cmbZtna.Items.Add(new ZtnaChoice(_ztnaAdapter, $"{_ztnaAdapter} — not connected"));
+        _cmbZtna.SelectedItem = _cmbZtna.Items.Cast<ZtnaChoice>().First(c => c.Tag == _ztnaAdapter);
+        _cmbZtna.DropDownWidth = Math.Max(_cmbZtna.Width,
+            _cmbZtna.Items.Cast<ZtnaChoice>().Max(c => TextRenderer.MeasureText(c.Text, _cmbZtna.Font).Width) + SystemInformation.VerticalScrollBarWidth);
+        _cmbZtna.EndUpdate();
+        _fillingZtna = false;
+    }
+
+    // Read each time the list opens, so an adapter that has connected since is there to pick
+    void RefreshZtnaChoices()
+    {
+        try { FillZtnaChoices(Diagnostics.AdapterChoices(Probe.Adapters())); }
+        catch (Exception ex) { AppLog.Info("ddns", $"Could not list the network adapters: {ex.Message}"); }
+    }
+
+    void CmbZtna_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (_fillingZtna || _cmbZtna.SelectedItem is not ZtnaChoice choice || choice.Tag == _ztnaAdapter) return;
+        _ztnaAdapter = choice.Tag;
+        AppLog.Info("ddns", _ztnaAdapter switch
+        {
+            null => "ZTNA adapter: detect automatically",
+            "" => "ZTNA adapter: set to none by the user",
+            _ => $"ZTNA adapter: \"{_ztnaAdapter}\" tagged by the user",
+        });
+    }
+
     /// <summary>Runs a DNS registration job off the UI thread, showing and logging each step as it reports it.</summary>
     async Task RunDnsTrace(string heading, Action<DiagConfig, Action<TestEntry>> work)
     {
@@ -1389,7 +1443,7 @@ class MainForm : Form
 
         try
         {
-            await Task.Factory.StartNew(() => work(new DiagConfig("", "", cts.Token), Report),
+            await Task.Factory.StartNew(() => work(new DiagConfig("", "", cts.Token, _ztnaAdapter), Report),
                 cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
         catch (OperationCanceledException) { }
@@ -1729,7 +1783,7 @@ class MainForm : Form
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
-        var config = new DiagConfig(domain, dc, cts.Token);
+        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
         int completed = 0;
         int totalGroups = results.Count;
 
@@ -2075,8 +2129,28 @@ class MainForm : Form
                 var ip = n.GetIPProperties();
                 return new NetAdapter(n.Name, n.Description,
                     n.NetworkInterfaceType is NetworkInterfaceType.Tunnel or NetworkInterfaceType.Ppp,
-                    ip.IsDynamicDnsEnabled, ip.UnicastAddresses.Select(u => u.Address).ToArray(), ip.DnsAddresses.ToArray());
+                    ip.IsDynamicDnsEnabled, ip.UnicastAddresses.Select(u => u.Address).ToArray(), ip.DnsAddresses.ToArray(),
+                    IsSoftwareAdapter(n.Id),
+                    ip.UnicastAddresses.Any(u => u.Address.AddressFamily == AddressFamily.InterNetwork && u.PrefixLength == 32)
+                        && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)));
             }).ToList();
+
+        // Windows enumerates a software adapter itself (ROOT\, SWD\); a real one is found on a bus (PCI\, USB\, VMBUS\)
+        static bool IsSoftwareAdapter(string id)
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\Network\{{4D36E972-E325-11CE-BFC1-08002BE10318}}\{id}\Connection");
+                string instance = key?.GetValue("PnPInstanceId") as string ?? "";
+                return instance.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase)
+                    || instance.StartsWith(@"SWD\", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                return false;
+            }
+        }
 
         public SoaRecord? QuerySoa(string name, CancellationToken ct) =>
             Runner.RunWithTimeout(() => MainForm.QuerySoa(name), Runner.DnsTimeoutMs, $"SOA query for {name}", ct);

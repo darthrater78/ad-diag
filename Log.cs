@@ -162,7 +162,7 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
 
     public List<NetAdapter> Adapters() =>
         Call("machine", "Network adapters", inner.Adapters, adapters => adapters.Count == 0 ? "(none connected)" : string.Join("\n", adapters.Select(a =>
-            $"{a.Name} [{a.Description}]{(a.Tunnel ? " tunnel" : "")}: addresses {Addresses(a.Addresses)}; DNS servers {Addresses(a.DnsServers)}; registers in DNS: {(a.RegistersInDns ? "yes" : "no")}")));
+            $"{a.Name} [{a.Description}]{(a.Tunnel ? " tunnel" : "")}{(a.Virtual ? " virtual" : "")}{(a.PointToPoint ? " /32 no gateway" : "")}: addresses {Addresses(a.Addresses)}; DNS servers {Addresses(a.DnsServers)}; registers in DNS: {(a.RegistersInDns ? "yes" : "no")}")));
 
     public SoaRecord? QuerySoa(string name, CancellationToken ct) =>
         Call("dns", $"SOA {name}", () => inner.QuerySoa(name, ct), soa => soa == null ? "no record" : $"zone {soa.Zone}, primary server {soa.PrimaryServer}");

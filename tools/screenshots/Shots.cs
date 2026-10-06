@@ -239,7 +239,7 @@ static class Shots
             new("Dynamic DNS Registration",
             [
                 new("Registration Name", Status.Pass, "PC042.contoso.com"),
-                new("ZTNA / VPN Client", Status.Pass, "No ZTNA or VPN tunnel adapter detected"),
+                new("ZTNA / VPN Client", Status.Pass, "No ZTNA or VPN adapter detected"),
                 new("Registering Adapters", Status.Pass, "Ethernet: 10.20.4.18"),
                 new("Zone Primary Server", Status.Pass, $"contoso.com -> dc01.contoso.com ({ip})"),
                 new("Update Path (Port 53)", Status.Pass, $"dc01.contoso.com ({ip}) reachable over TCP"),

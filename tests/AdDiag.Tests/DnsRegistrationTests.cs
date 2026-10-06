@@ -94,6 +94,71 @@ public class DnsRegistrationTests
     }
 
     [Fact]
+    public void Ztna_VirtualAdapterWithARealAddressDetected_HostAndAddresslessOnesAreNot()
+    {
+        var lan = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter #2", false, true, [ClientIp], [DcIp]);
+        // A client in "VPN mode": no tunnel type, no 100.64 address, only a software adapter and a loopback DNS proxy
+        var client = new NetAdapter("Acme Access", "Acme Access Virtual Adapter", false, false,
+            [IPAddress.Parse("fe80::1"), IPAddress.Parse("172.16.50.3")], [IPAddress.Parse("127.73.83.76")], Virtual: true);
+        Assert.Equal("virtual adapter \"Acme Access\" (172.16.50.3); DNS answered by its local proxy (127.73.83.76)",
+            Diagnostics.DescribeZtna([lan, client]));
+        var island = client with { Name = "Island Private Access", Description = "Island Private Access Virtual Adapter Tunnel" };
+        Assert.StartsWith("Island adapter (172.16.50.3)", Diagnostics.DescribeZtna([lan, island]));
+
+        var miniport = new NetAdapter("Local Area Connection* 6", "WAN Miniport (IP)", false, false, [], [], Virtual: true);
+        var vswitch = new NetAdapter("vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter", false, true, [IPAddress.Parse("172.22.0.1")], [], Virtual: true);
+        var vmnet = new NetAdapter("VMware Network Adapter VMnet8", "VMware Virtual Ethernet Adapter for VMnet8", false, true, [IPAddress.Parse("192.168.80.1")], [], Virtual: true);
+        Assert.Null(Diagnostics.DescribeZtna([lan, miniport, vswitch, vmnet]));
+    }
+
+    [Fact]
+    public void Ztna_SlashThirtyTwoWithNoGatewayDetected()
+    {
+        var lan = new NetAdapter("Ethernet", "Intel(R) Ethernet Connection", false, true, [ClientIp], [DcIp]);
+        var client = new NetAdapter("Ethernet 4", "Acme Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [], PointToPoint: true);
+        Assert.Equal("tunnel adapter \"Ethernet 4\" (172.16.50.3)", Diagnostics.DescribeZtna([lan, client]));
+    }
+
+    [Fact]
+    public void Ztna_TaggedAdapterCounts_NoneOverridesDetection_MissingTagIsSaid()
+    {
+        var lan = new NetAdapter("Ethernet", "Intel(R) Ethernet Connection", false, true, [ClientIp], [DcIp]);
+        var plain = new NetAdapter("Ethernet 4", "Acme Adapter", false, false, [IPAddress.Parse("10.99.0.5")], [IPAddress.Parse("127.0.0.53")]);
+        Assert.Null(Diagnostics.DescribeZtna([lan, plain]));
+        Assert.Equal("adapter \"Ethernet 4\" (10.99.0.5), tagged by you; DNS answered by its local proxy (127.0.0.53)",
+            Diagnostics.DescribeZtna([lan, plain], "Ethernet 4"));
+        Assert.Equal("tagged adapter \"Gone\" is not connected", Diagnostics.DescribeZtna([lan], "Gone"));
+
+        var probe = BehindZtna();
+        Assert.Null(Diagnostics.DescribeZtna(probe.NetAdapters, ""));
+        var group = Diagnostics.TestDnsRegistration(new("contoso.com", "", default, ""), probe);
+        Assert.Equal("None, as set by you", DetailOf(group, "ZTNA / VPN Client"));
+    }
+
+    [Fact]
+    public void AdapterChoices_ListAddressedAdaptersWithTheirSignals()
+    {
+        var choices = Diagnostics.AdapterChoices(
+        [
+            new("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [IPAddress.Parse("fe80::1"), ClientIp], [DcIp]),
+            new("Acme Access", "Acme Virtual Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [], Virtual: true, PointToPoint: true),
+            new("Local Area Connection* 6", "WAN Miniport (IP)", false, false, [], [], Virtual: true),
+            new("Teredo Tunneling Pseudo-Interface", "Microsoft Teredo Tunneling Adapter", true, false, [IPAddress.Parse("2001:0:1::1")], []),
+        ]);
+        Assert.Equal([("IOT", $"IOT — {ClientIp}"), ("Acme Access", "Acme Access — 172.16.50.3 · virtual · /32, no gateway")], choices);
+    }
+
+    [Fact]
+    public void Adapters_ClientAddressNotRegisteredIsNoted()
+    {
+        var probe = new FakeProbe();
+        probe.NetAdapters.Add(new("Acme Access", "Acme Access Virtual Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [], Virtual: true));
+        var group = Run(probe);
+        Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
+        Assert.Contains("the client's own address (172.16.50.3) is not registered", DetailOf(group, "Registering Adapters"));
+    }
+
+    [Fact]
     public void Adapters_RegisteringATunnelAddressWarns_NoneRegisteringWarns()
     {
         var probe = BehindZtna();

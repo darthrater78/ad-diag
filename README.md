@@ -133,8 +133,8 @@ Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same 
 Checks whether this machine's own host record can reach, and is right on, the DNS server that owns its zone. These checks only read. SOA and host records are queried with the Windows DNS API on the wire, never from the resolver cache or the machine's own knowledge of its name.
 
 - **Registration Name** — the name Windows registers: host name plus primary DNS suffix
-- **ZTNA / VPN Client** (informational) — a tunnel adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Tailscale, Microsoft Global Secure Access, Cisco, Fortinet and others), any other tunnel adapter, addresses in `100.64.0.0/10`, or DNS answered by the client's local proxy
-- **Registering Adapters** — connected adapters with "Register this connection's addresses in DNS" turned on and the addresses they would register; warns when one is a `100.64.0.0/10` tunnel address that no other host can route to
+- **ZTNA / VPN Client** (informational) — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Tailscale, Island, Microsoft Global Secure Access, Cisco, Fortinet and others), any other tunnel adapter, any other virtual (software) adapter that holds an address, an adapter with a `/32` address and no default gateway, addresses in `100.64.0.0/10`, or DNS answered by the client's local proxy. Hypervisor and loopback adapters are not counted. A client in "VPN mode" gives its adapter a real routable address, so detection does not depend on the address range
+- **Registering Adapters** — connected adapters with "Register this connection's addresses in DNS" turned on and the addresses they would register; warns when one is a `100.64.0.0/10` tunnel address that no other host can route to, and notes when a client's adapter holds a routable address but has registration turned off
 - **Zone Primary Server** — the zone and its primary server, found the way Windows finds where to send an update: the SOA record of the name, then of each parent. Warns when the server resolves to a synthetic `100.64.0.0/10` address
 - **Update Path (Port 53)** — TCP 53 to the primary server
 - **Registered Record** — the A/AAAA records the primary server holds for this machine (asked directly; the configured DNS servers if it doesn't answer), compared with the addresses the machine has now
@@ -184,6 +184,7 @@ Sends a dynamic DNS registration and traces what happens to it.
 
 - **Register now** — after a confirmation, runs `ipconfig /registerdns`, so the DNS Client service sends the update as the computer account, exactly as Windows does on its own. Requires running as Administrator; without it nothing is sent. The service works in the background and reports nothing on success, so the app then watches, for up to 30 seconds, the two places the outcome shows: the record on the zone's primary server (before and after) and the DNS Client's failure events. A failure event fails the trace even if the record looks right. If nothing has changed and nothing is logged, the result is "not confirmed", since Windows can take longer.
 - **Check again** — repeats the read-only checks from group 8 without sending anything.
+- **ZTNA adapter** — for a client the app does not detect. Lists every connected adapter that holds an address, with the signals seen on it (`tunnel`, `virtual`, `/32, no gateway`); pick the client's adapter and every ZTNA hint applies as if it had been detected, here and in Run Diagnostics. **None** overrides a false detection. The choice is not saved: it lasts until the app closes.
 
 Every step is also written to the log.
 

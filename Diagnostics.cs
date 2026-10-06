@@ -45,7 +45,10 @@ interface IProbe
     bool IsElevated();
 }
 
-record DiagConfig(string Domain, string Dc, CancellationToken Cancel);
+/// <param name="ZtnaAdapter">
+/// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
+/// </param>
+record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests);
