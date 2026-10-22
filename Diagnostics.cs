@@ -62,7 +62,7 @@ record UrlSecurity(int Zone, int Logon, int StatusBar);
 /// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
 /// </param>
 record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
-enum Status { Pass, Fail, Warn, Skip }
+enum Status { Pass, Fail, Warn, Skip, Info }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
 record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
 /// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>
@@ -105,13 +105,13 @@ static partial class Diagnostics
             string scVerify = probe.RunTool("nltest", $"/sc_verify:{cfg.Domain}", 10000, cfg.Cancel);
             var sc = Parsers.ParseScVerify(scVerify);
             if (sc.AccessDenied)
-                tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
+                tests.Add(new("Secure Channel", Status.Skip, "Not checked: needs Run as Administrator"));
             else
                 tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
+            tests.Add(new("Secure Channel", Status.Skip, $"Not checked: nltest failed: {ex.Message}"));
         }
 
         try
@@ -127,7 +127,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
+            tests.Add(new("Site Assignment", Status.Skip, $"Not checked: nltest failed: {ex.Message}"));
         }
 
         try
@@ -138,7 +138,7 @@ static partial class Diagnostics
                 : $" (account is in {result.Domain}, not the target domain)";
             if (result.Error != null)
             {
-                tests.Add(new("Computer Password Age", Status.Warn, $"Could not query AD: {result.Error}"));
+                tests.Add(new("Computer Password Age", Status.Skip, $"Not checked: could not query AD: {result.Error}"));
             }
             else if (result.LastSetUtc is not { } lastSetUtc)
             {
@@ -160,7 +160,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("Computer Password Age", Status.Warn, $"AD query failed: {ex.Message}"));
+            tests.Add(new("Computer Password Age", Status.Skip, $"Not checked: AD query failed: {ex.Message}"));
         }
 
         return new("Domain Membership & Identity", tests);
@@ -209,13 +209,17 @@ static partial class Diagnostics
 
         foreach (var ((name, port), open) in ports.Zip(reachable))
         {
+            // Sign-in needs LDAP, Kerberos and SMB; RPC and Kpasswd matter for Group Policy and password changes.
+            // LDAPS, the Global Catalog port and DNS on the DC are often closed on purpose, so a closed one is a note
             bool required = port is 389 or 88 or 445;
+            bool optional = port is 636 or 3268 or 53;
             if (kdcIp == null)
                 tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
             else
                 tests.Add(new(name,
-                    open ? Status.Pass : (required ? Status.Fail : Status.Warn),
-                    open ? $"Reachable at {kdc} ({kdcIp})" : $"Unreachable at {kdc} ({kdcIp})"));
+                    open ? Status.Pass : required ? Status.Fail : optional ? Status.Info : Status.Warn,
+                    open ? $"Reachable at {kdc} ({kdcIp})"
+                    : $"Unreachable at {kdc} ({kdcIp})" + (optional ? "; optional, often closed on purpose, and not needed to sign in" : "")));
         }
 
         return new("DC Discovery & Connectivity", tests);
@@ -266,7 +270,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("DNS Suffix Search List", Status.Warn, $"Registry read failed: {ex.Message}"));
+            tests.Add(new("DNS Suffix Search List", Status.Skip, $"Not checked: registry read failed: {ex.Message}"));
         }
 
         return new("DNS for Active Directory", tests);
@@ -357,7 +361,7 @@ static partial class Diagnostics
             {
                 string why = scopes.Count == 0 ? "Could not read Group Policy results"
                     : string.Join("; ", scopes.Select(GpScopeUnavailable));
-                tests.Add(new("GP Last Refresh", Status.Warn, why));
+                tests.Add(new("GP Last Refresh", Status.Skip, $"Not checked: {why}"));
                 tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
                 tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
                 return new("Group Policy", tests);
@@ -376,8 +380,8 @@ static partial class Diagnostics
             }
             else
             {
-                tests.Add(new("GP Last Refresh", Status.Warn,
-                    $"Could not determine last refresh time{elevationNote}"));
+                tests.Add(new("GP Last Refresh", Status.Skip,
+                    $"Not checked: could not determine the last refresh time{elevationNote}"));
             }
 
             int appliedCount = primary.Applied.Count;
@@ -420,7 +424,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
+            tests.Add(new("Domain Trusts", Status.Skip, $"Not checked: nltest failed: {ex.Message}"));
         }
 
         return new("Trust Relationships", tests);
@@ -466,9 +470,9 @@ static partial class Diagnostics
                     $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
             }
             else
-                tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
+                tests.Add(new("Clock Skew", Status.Skip, "Not checked: could not measure (DC unreachable?)"));
         }
-        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
+        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Skip, $"Not checked: w32tm failed: {ex.Message}")); }
 
         try
         {
@@ -482,7 +486,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
+            tests.Add(new("Time Source", Status.Skip, $"Not checked: w32tm failed: {ex.Message}"));
         }
 
         return new("Kerberos & Time Sync", tests);

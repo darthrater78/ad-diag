@@ -144,14 +144,15 @@ public class EntraSsoTests
     }
 
     [Fact]
-    public void Hybrid_NoPrt_StatusBarScriptsOff_WarnsAndPointsToGuide()
+    public void Hybrid_NoPrt_StatusBarScriptsOff_IsANote()
     {
         var probe = HybridWithoutPrt();
         probe.Url = new(1, 0x20000, 3);
 
         var group = Run(probe);
 
-        Assert.Equal(Status.Warn, Entry(group, "Status Bar Scripts").Status);
+        // The readiness warns for the missing PRT, not for the status bar setting
+        Assert.Equal(Status.Info, Entry(group, "Status Bar Scripts").Status);
         Assert.Equal(new Readiness(Status.Warn, "Ready for Seamless SSO, with warnings.", true), group.Readiness);
     }
 
@@ -166,13 +167,13 @@ public class EntraSsoTests
         var group = Run(probe);
 
         var zone = Entry(group, "Intranet Zone");
-        Assert.Equal(Status.Warn, zone.Status);
+        Assert.Equal(Status.Info, zone.Status);
         Assert.Contains("in the Internet zone", zone.Detail);
         Assert.Contains("it matters only where the token can't be used", zone.Detail);
-        Assert.Equal(Status.Warn, Entry(group, "Seamless SSO Ticket").Status);
-        Assert.DoesNotContain(group.Tests, t => t.Status == Status.Fail);
-        Assert.Equal(new Readiness(Status.Warn,
-            "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready.", true), group.Readiness);
+        Assert.Equal(Status.Info, Entry(group, "Seamless SSO Ticket").Status);
+        Assert.DoesNotContain(group.Tests, t => t.Status is Status.Fail or Status.Warn);
+        Assert.Equal(new Readiness(Status.Pass,
+            "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not set up.", true), group.Readiness);
     }
 
     [Fact]
@@ -200,14 +201,15 @@ public class EntraSsoTests
     }
 
     [Fact]
-    public void Hybrid_InternetSettingsUnreadable_WarnsAndSkipsTheZonePolicies()
+    public void Hybrid_InternetSettingsUnreadable_IsNotCheckedAndSkipsTheZonePolicies()
     {
         var probe = Hybrid();
         probe.UrlError = new TimeoutException("Internet settings timed out after 5s");
 
         var group = Run(probe);
 
-        Assert.Equal(Status.Warn, Entry(group, "Intranet Zone").Status);
+        Assert.Equal(Status.Skip, Entry(group, "Intranet Zone").Status);
+        Assert.StartsWith("Not checked:", Entry(group, "Intranet Zone").Detail);
         Assert.Contains("timed out", Entry(group, "Intranet Zone").Detail);
         Assert.Equal(Status.Skip, Entry(group, "Automatic Logon").Status);
         Assert.Equal(Status.Skip, Entry(group, "Status Bar Scripts").Status);
@@ -327,8 +329,9 @@ public class EntraSsoTests
 
         var group = Run(probe);
 
-        Assert.Equal(Status.Warn, Assert.Single(group.Tests).Status);
-        Assert.StartsWith("Readiness unknown", group.Readiness!.Text);
+        Assert.Equal(Status.Skip, Assert.Single(group.Tests).Status);
+        Assert.Equal(Status.Skip, group.Readiness!.Status);
+        Assert.StartsWith("Readiness unknown", group.Readiness.Text);
     }
 
     [Fact]

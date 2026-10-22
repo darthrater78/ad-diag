@@ -146,7 +146,7 @@ Windows 11's own system values, so the app matches the OS around it.
 
 - **Primary (#005fb8, dark #4cc2ff):** the Windows default accent. Used for the primary button, links, the selected tab's underline, the selected run and the running ring. Nothing else.
 - **Background (#f3f3f3, dark #202020):** the window. **Panel (#ffffff, dark #1c1c1c):** the results list and text panes. **Surface (#fbfbfb, dark #2d2d2d):** buttons and inputs. Background, panel and surface must stay three different values in each theme: `SetTheme` maps a control's colour to the same token in the other theme by value.
-- **Status:** pass #0f7b0f, warn #9d5d00, fail #c42b1c, skip #767676 (dark: #6ccb5f, #fce100, #ff99a4, #8a8a8a). Status colour goes on the mark and the status word only.
+- **Status:** pass #0f7b0f, warn #9d5d00, fail #c42b1c, skip #767676 (dark: #6ccb5f, #fce100, #ff99a4, #8a8a8a); info uses primary. Status colour goes on the mark and the status word only.
 - **Text (#1b1b1b, dark #f2f2f2)** and **text-dim (#5f5f5f, dark #a3a3a3)** for captions, counts and skipped details.
 
 ## Typography
@@ -171,7 +171,8 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 
 - Buttons: 4px corner radius, 1px border when on the plain surface, no border when filled.
 - Inputs and panels: square.
-- Status marks are 10px and differ by shape: circle = passed, triangle = warning, cross = failed, dash = skipped, ring = running.
+- Status marks are 10px and differ by shape: circle = passed, triangle = warning, cross = failed, disc with an "i" cut out = info ("i" in the DNS registration pane), dash = skipped, ring = running.
+- Warning means a problem to fix; Info means worth knowing with nothing broken, counted as notes and never lowering a verdict; Skipped means not checked, and its detail starts "Not checked:" with the reason.
 
 ## Components
 

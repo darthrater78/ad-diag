@@ -58,14 +58,14 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new(SsoJoin, Status.Warn, $"dsregcmd failed: {ex.Message}"));
-            return new(EntraSsoGroup, tests, new(Status.Warn, "Readiness unknown: dsregcmd did not answer.", true));
+            tests.Add(new(SsoJoin, Status.Skip, $"Not checked: dsregcmd failed: {ex.Message}"));
+            return new(EntraSsoGroup, tests, new(Status.Skip, "Readiness unknown: dsregcmd did not answer.", true));
         }
 
         var (kind, join) = JoinCheck(ds);
         tests.Add(join);
         if (kind == null)
-            return new(EntraSsoGroup, tests, new(Status.Warn, "Readiness unknown: dsregcmd reported no join state.", true));
+            return new(EntraSsoGroup, tests, new(Status.Skip, "Readiness unknown: dsregcmd reported no join state.", true));
         if (kind == JoinKind.None)
             return new(EntraSsoGroup, tests, new(Status.Fail, "Not ready: this PC is not joined to Microsoft Entra ID or a domain.", true));
 
@@ -90,9 +90,9 @@ static partial class Diagnostics
         return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless, fallbackOnly));
     }
 
-    // A Seamless SSO failure on a PC that signs in with its PRT breaks only the fallback, so it warns
-    static TestEntry AsFallback(TestEntry test) => test.Status == Status.Fail
-        ? test with { Status = Status.Warn, Detail = test.Detail + "; this PC signs in with its Primary Refresh Token, so it matters only where the token can't be used" }
+    // A Seamless SSO problem on a PC that signs in with its PRT touches only the fallback, so it is a note
+    static TestEntry AsFallback(TestEntry test) => test.Status is Status.Fail or Status.Warn
+        ? test with { Status = Status.Info, Detail = test.Detail + "; this PC signs in with its Primary Refresh Token, so it matters only where the token can't be used" }
         : test;
 
     // How the PC is joined, which decides what else is checked; null when dsregcmd reported no join state
@@ -100,7 +100,7 @@ static partial class Diagnostics
     {
         bool? entra = Parsers.DsregFlag(ds, "AzureAdJoined"), domain = Parsers.DsregFlag(ds, "DomainJoined");
         if (entra == null && domain == null)
-            return (null, new(SsoJoin, Status.Warn, "dsregcmd reported no join state"));
+            return (null, new(SsoJoin, Status.Skip, "Not checked: dsregcmd reported no join state"));
 
         string tenant = ds.TryGetValue("TenantName", out var t) && t.Length > 0 ? $", tenant {t}" : "";
         return (entra == true, domain == true) switch
@@ -176,7 +176,7 @@ static partial class Diagnostics
         catch (Exception ex)
         {
             return [
-                new(SsoZone, Status.Warn, $"Could not read the Internet settings: {ex.Message}"),
+                new(SsoZone, Status.Skip, $"Not checked: could not read the Internet settings: {ex.Message}"),
                 new(SsoLogon, Status.Skip, "Not checked: the Internet settings could not be read"),
                 new(SsoStatusBar, Status.Skip, "Not checked: the Internet settings could not be read"),
             ];
@@ -201,7 +201,7 @@ static partial class Diagnostics
             },
             sec.StatusBar == 0
                 ? new(SsoStatusBar, Status.Pass, "\"Allow updates to status bar via script\" is enabled for the Local intranet zone")
-                : new(SsoStatusBar, Status.Warn, "\"Allow updates to status bar via script\" is not enabled for the Local intranet zone"),
+                : new(SsoStatusBar, Status.Info, "\"Allow updates to status bar via script\" is not enabled for the Local intranet zone; only older clients need it"),
         ];
     }
 
@@ -253,19 +253,19 @@ static partial class Diagnostics
 
     static Readiness SsoReadiness(List<TestEntry> tests, bool seamless, bool fallbackOnly)
     {
-        var counted = tests.Where(t => t.Status != Status.Skip).ToList();
+        var counted = tests.Where(t => t.Status is not (Status.Skip or Status.Info)).ToList();
         var worst = counted.Any(t => t.Status == Status.Fail) ? Status.Fail
             : counted.Any(t => t.Status == Status.Warn) ? Status.Warn : Status.Pass;
 
         if (fallbackOnly)
         {
-            bool onlyFallback = counted.Where(t => t.Status != Status.Pass).All(t => SeamlessChecks.Contains(t.Name));
+            bool fallbackNotReady = tests.Any(t => t.Status == Status.Info && SeamlessChecks.Contains(t.Name));
             return worst switch
             {
                 Status.Fail => new(worst, "Not ready for single sign-on.", true),
-                Status.Warn when onlyFallback =>
-                    new(worst, "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready.", true),
                 Status.Warn => new(worst, "Ready for single sign-on, with warnings.", true),
+                _ when fallbackNotReady =>
+                    new(worst, "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not set up.", true),
                 _ => new(worst, "Ready for single sign-on.", false),
             };
         }

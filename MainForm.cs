@@ -91,6 +91,7 @@ class MainForm : Form
     static SolidBrush PassBrush = new(PassColor);
     static SolidBrush FailBrush = new(FailColor);
     static SolidBrush WarnBrush = new(WarnColor);
+    static SolidBrush InfoBrush = new(AccentColor);
     static SolidBrush SkipBrush = new(SkipColor);
     static readonly Font TabFontInactive = new("Segoe UI", 9f);
     static readonly Font TabFontActive = new("Segoe UI", 9f, FontStyle.Bold);
@@ -107,7 +108,7 @@ class MainForm : Form
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
     readonly CheckBox _chkGpForce, _chkDebug;
     readonly ComboBox _cmbZtna;
-    readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
+    readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount, _lblWarnCaption, _lblInfoCount, _lblInfoCaption;
     readonly ResultsCanvas _resultsCanvas;
     readonly CheckBox _chkExpandAll;
     bool _expandAll; // "Expand all groups after a run"; never saved
@@ -238,7 +239,10 @@ class MainForm : Form
         _lblPassCount = Count(PassColor);
         _lblFailCount = Count(FailColor);
         _lblWarnCount = Count(WarnColor);
-        summaryFlow.Controls.AddRange([_lblPassCount, Caption("passed"), _lblFailCount, Caption("failed"), _lblWarnCount, Caption("warnings")]);
+        _lblInfoCount = Count(AccentColor);
+        _lblWarnCaption = Caption("warnings");
+        _lblInfoCaption = Caption("notes");
+        summaryFlow.Controls.AddRange([_lblPassCount, Caption("passed"), _lblFailCount, Caption("failed"), _lblWarnCount, _lblWarnCaption, _lblInfoCount, _lblInfoCaption]);
         _summaryPanel.Controls.Add(summaryFlow);
         layout.Controls.Add(_summaryPanel, 0, 3);
 
@@ -383,12 +387,11 @@ class MainForm : Form
         _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
         _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
 
-        contentWrapper.Controls.Add(_resultsArea);
-        contentWrapper.Controls.Add(_guideBox);
-        contentWrapper.Controls.Add(_gpPanel);
-        contentWrapper.Controls.Add(_ticketsPanel);
-        contentWrapper.Controls.Add(_dnsPanel);
-        contentWrapper.Controls.Add(_logPanel);
+        // The tabs share one host under the Runs strip. Docked straight into the wrapper, a tab's place depended on
+        // the wrapper's child order, which WinForms can change once the strip appears, leaving tabs under it
+        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
+        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel]);
+        contentWrapper.Controls.Add(tabHost);
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
@@ -499,13 +502,14 @@ class MainForm : Form
         Dark = dark;
         Color[] newBack = BackTokens(), newFore = ForeTokens();
 
-        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, SkipBrush })
+        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, InfoBrush, SkipBrush })
             old.Dispose();
         BorderPen = new(BorderColor);
         RowLinePen = new(RowLineColor);
         PassBrush = new(PassColor);
         FailBrush = new(FailColor);
         WarnBrush = new(WarnColor);
+        InfoBrush = new(AccentColor);
         SkipBrush = new(SkipColor);
 
         static Color Map(Color c, Color[] from, Color[] to)
@@ -1433,7 +1437,7 @@ class MainForm : Form
 
     static string StatusWord(Status status) => status switch
     {
-        Status.Pass => "Passed", Status.Fail => "Failed", Status.Warn => "Warning", _ => "Skipped",
+        Status.Pass => "Passed", Status.Fail => "Failed", Status.Warn => "Warning", Status.Info => "Info", _ => "Skipped",
     };
 
     // The wait is a step in progress, not a verdict, in the pane and in the log alike
@@ -1463,7 +1467,7 @@ class MainForm : Form
         // Shapes as in the results grid, so the status reads without colour
         var (mark, color) = step.Status switch
         {
-            Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), _ => ("–", DimColor),
+            Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), Status.Info => ("i", AccentColor), _ => ("–", DimColor),
         };
         DnsParagraph(row: true);
         AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
@@ -1881,10 +1885,12 @@ class MainForm : Form
     {
         int fail = group.Tests.Count(t => t.Status == Status.Fail);
         int warn = group.Tests.Count(t => t.Status == Status.Warn);
+        int notes = group.Tests.Count(t => t.Status == Status.Info);
         int running = group.Tests.Count(IsPending);
         string text = $"{group.Tests.Count} check{(group.Tests.Count == 1 ? "" : "s")}";
         if (fail > 0) text += $" · {fail} failed";
         if (warn > 0) text += $" · {warn} warning{(warn == 1 ? "" : "s")}";
+        if (notes > 0) text += $" · {notes} note{(notes == 1 ? "" : "s")}";
         if (running > 0) text += $" · {running} running";
         return text;
     }
@@ -1894,6 +1900,7 @@ class MainForm : Form
         Status.Pass => ("Passed", PassColor),
         Status.Fail => ("Failed", FailColor),
         Status.Warn => ("Warning", WarnColor),
+        Status.Info => ("Info", AccentColor),
         _ => ("Skipped", DimColor),
     };
 
@@ -1914,6 +1921,15 @@ class MainForm : Form
                 break;
             case Status.Warn:
                 g.FillPolygon(WarnBrush, new Point[] { new(x + d / 2, y), new(x + d, y + d), new(x, y + d) });
+                break;
+            case Status.Info:
+                // A disc in primary with an "i" cut out of it
+                g.FillEllipse(InfoBrush, x, y, d, d);
+                using (var cut = new SolidBrush(PanelColor))
+                {
+                    g.FillRectangle(cut, x + d / 2 - S(1), y + S(2), S(2), S(2));
+                    g.FillRectangle(cut, x + d / 2 - S(1), y + S(5), S(2), d - S(7));
+                }
                 break;
             case Status.Fail:
                 using (var cross = new Pen(FailColor, S(2)))
@@ -2456,8 +2472,9 @@ class MainForm : Form
     static string Totals(IEnumerable<TestEntry> tests)
     {
         var list = tests.ToList();
-        int warn = list.Count(t => t.Status == Status.Warn);
-        return $"{list.Count(t => t.Status == Status.Pass)} passed · {list.Count(t => t.Status == Status.Fail)} failed · {warn} warning{(warn == 1 ? "" : "s")}";
+        int warn = list.Count(t => t.Status == Status.Warn), notes = list.Count(t => t.Status == Status.Info);
+        return $"{list.Count(t => t.Status == Status.Pass)} passed · {list.Count(t => t.Status == Status.Fail)} failed · {warn} warning{(warn == 1 ? "" : "s")}"
+            + (notes > 0 ? $" · {notes} note{(notes == 1 ? "" : "s")}" : "");
     }
 
     CancellationTokenSource StartRun(string what, string domain, string dc)
@@ -2507,7 +2524,7 @@ class MainForm : Form
         RebuildHistoryBar();
 
         var all = pendingRun.Results.SelectMany(g => g.Tests).ToList();
-        AppLog.Info("run", $"Complete: {all.Count(t => t.Status == Status.Pass)} passed, {all.Count(t => t.Status == Status.Fail)} failed, {all.Count(t => t.Status == Status.Warn)} warnings");
+        AppLog.Info("run", $"Complete: {Totals(all).Replace(" · ", ", ")}");
         block.Totals = Totals(all);
         _logStale = true;
         _lblStatus.Text = "Complete";
@@ -2546,7 +2563,7 @@ class MainForm : Form
         if (ReferenceEquals(SelectedRun, run)) ShowResults(run.Results);
 
         var tests = run.Results.Find(g => g.Name == name)?.Tests ?? [];
-        AppLog.Info("run", $"Complete {name}: {tests.Count(t => t.Status == Status.Pass)} passed, {tests.Count(t => t.Status == Status.Fail)} failed, {tests.Count(t => t.Status == Status.Warn)} warnings");
+        AppLog.Info("run", $"Complete {name}: {Totals(tests).Replace(" · ", ", ")}");
         block.Totals = Totals(tests);
         _logStale = true;
         _lblStatus.Text = $"{name}: run at {DateTime.Now:HH:mm:ss}";
@@ -2770,9 +2787,13 @@ class MainForm : Form
         int pass = results.SelectMany(g => g.Tests).Count(t => t.Status == Status.Pass);
         int fail = results.SelectMany(g => g.Tests).Count(t => t.Status == Status.Fail);
         int warn = results.SelectMany(g => g.Tests).Count(t => t.Status == Status.Warn);
+        int notes = results.SelectMany(g => g.Tests).Count(t => t.Status == Status.Info);
         _lblPassCount.Text = pass.ToString();
         _lblFailCount.Text = fail.ToString();
         _lblWarnCount.Text = warn.ToString();
+        _lblInfoCount.Text = notes.ToString();
+        _lblWarnCaption.Text = warn == 1 ? "warning" : "warnings";
+        _lblInfoCaption.Text = notes == 1 ? "note" : "notes";
         _summaryPanel.Visible = true;
     }
 
@@ -2806,7 +2827,7 @@ class MainForm : Form
             }
             foreach (var test in group.Tests)
             {
-                char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', _ => 'o' };
+                char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', Status.Info => 'i', _ => 'o' };
                 sb.AppendLine($"  {icon} {test.Name,-26} {test.Detail}");
             }
             if (group.Readiness is { } ready)

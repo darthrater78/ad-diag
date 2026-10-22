@@ -151,7 +151,7 @@ static class Shots
         new("Wait", Status.Skip, "Watching the server and the DNS Client event log for up to 30s"),
         new("DNS Client Event", Status.Fail, $"event 8015 at {DateTime.Now.AddSeconds(-31):g} — The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings: Adapter Name : {{3F2A9B10-55C1-4E0B-9D7A-0C1E5A1B7F42}} Host Name : PC042 Primary Domain Suffix : contoso.com DNS server list : 100.64.0.2 Sent update to server : 10.20.0.11 IP Address(es) : 192.168.1.50 The reason the system could not register these RRs was because the update request it sent to the DNS server timed out."),
         new("Record After", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale — Windows logged a registration failure (above)"),
-        new("ZTNA / VPN Client", Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and TCP and UDP 53 to dc01.contoso.com to pass the tunnel as real traffic, not through the client's DNS proxy"),
+        new("ZTNA / VPN Client", Status.Info, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and TCP and UDP 53 to dc01.contoso.com to pass the tunnel as real traffic, not through the client's DNS proxy"),
     ];
 
     static void MockLog(DiagLog log)
@@ -161,9 +161,9 @@ static class Shots
         log.Info("log", "Debug logging on: commands, timings and raw tool output are recorded");
 
         // A full run: its sections ran side by side, so their lines arrived interleaved
-        var run = new LogBlock($"Run {now.AddSeconds(-40):HH:mm:ss}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 3 warnings" };
-        run.SectionNotes[dcd] = "9 checks · 1 warning";
-        run.SectionNotes[krb] = "3 checks · 1 warning";
+        var run = new LogBlock($"Run {now.AddSeconds(-40):HH:mm:ss}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 1 warning · 1 note" };
+        run.SectionNotes[dcd] = "9 checks · 1 note";
+        run.SectionNotes[krb] = "3 checks";
         run.SectionNotes[reg] = "7 checks · 1 warning";
         DiagLog.Block = run;
         log.Info("run", "Started: domain contoso.com, DC DC01.contoso.com");
@@ -181,11 +181,11 @@ static class Shots
         log.Info("result", "Warning  Dynamic DNS Registration / Registered Record: dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale");
         DiagLog.Section = krb;
         log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
-        log.Info("result", "Warning  Kerberos & Time Sync / Clock Skew: could not be measured");
+        log.Info("result", "Skipped  Kerberos & Time Sync / Clock Skew: Not checked: could not measure (DC unreachable?)");
         DiagLog.Section = dcd;
-        log.Info("result", "Warning  DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11)");
+        log.Info("result", "Info     DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11); optional, often closed on purpose, and not needed to sign in");
         DiagLog.Section = null;
-        log.Info("run", "Complete: 32 passed, 0 failed, 3 warnings");
+        log.Info("run", "Complete: 32 passed, 0 failed, 1 warning, 1 note");
 
         // One section run again on its own
         var single = new LogBlock($"Group Policy {now.AddSeconds(-12):HH:mm:ss}", "contoso.com · DC01.contoso.com · run on its own") { Totals = "3 passed · 0 failed · 0 warnings" };
@@ -260,7 +260,7 @@ static class Shots
             [
                 new("Locate DC", Status.Pass, $"Found {dc}"),
                 new("Port 389 (LDAP)", Status.Pass, $"Reachable at {dc} ({ip})"),
-                new("Port 636 (LDAPS)", Status.Warn, $"Unreachable at {dc} ({ip})"),
+                new("Port 636 (LDAPS)", Status.Info, $"Unreachable at {dc} ({ip}); optional, often closed on purpose, and not needed to sign in"),
                 new("Port 88 (Kerberos)", Status.Pass, $"Reachable at {dc} ({ip})"),
                 new("Port 445 (SMB)", Status.Pass, $"Reachable at {dc} ({ip})"),
                 new("Port 135 (RPC)", Status.Pass, $"Reachable at {dc} ({ip})"),

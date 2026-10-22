@@ -289,7 +289,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            report(new(RegName, Status.Warn, $"Could not read the host name: {ex.Message}"));
+            report(new(RegName, Status.Skip, $"Not checked: could not read the host name: {ex.Message}"));
         }
         return null;
     }
@@ -307,7 +307,7 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            report(new(RegZtna, Status.Warn, $"Could not read the network adapters: {ex.Message}"));
+            report(new(RegZtna, Status.Skip, $"Not checked: could not read the network adapters: {ex.Message}"));
             report(new(RegAdapters, Status.Skip, "Network adapters unavailable"));
             return ([], null);
         }
@@ -362,14 +362,14 @@ static partial class Diagnostics
         {
             var events = QueryDnsClientEvents(probe, DateTime.UtcNow.AddHours(-24), ct);
             if (events.Error != null)
-                return new(RegErrors, Status.Warn, $"Could not read the System event log: {events.Error}");
+                return new(RegErrors, Status.Skip, $"Not checked: could not read the System event log: {events.Error}");
             if (events.Events.Count == 0)
                 return new(RegErrors, Status.Pass, "No DNS Client registration errors in the last 24 hours");
             return new(RegErrors, Status.Warn, $"{events.Events.Count} in the last 24 hours; latest: {DescribeEvent(events.Events[0])}");
         }
         catch (Exception ex)
         {
-            return new(RegErrors, Status.Warn, $"Event log query failed: {ex.Message}");
+            return new(RegErrors, Status.Skip, $"Not checked: event log query failed: {ex.Message}");
         }
     }
 
@@ -410,7 +410,7 @@ static partial class Diagnostics
         }
         string found = $"{soa.Zone} -> {soa.PrimaryServer} ({address}), answered by {zone.Asked}";
         if (IsCgnat(address))
-            report(new(RegZone, Status.Warn, $"{found} — a synthetic 100.64.0.0/10 address from the ZTNA client; "
+            report(new(RegZone, Status.Info, $"{found} — a synthetic 100.64.0.0/10 address from the ZTNA client; "
                 + "updates reach the real server only if the client forwards port 53 for it"));
         else if (IsPublic(address))
             report(new(RegZone, Status.Warn, $"{found} — a public address: this looks like the zone's internet-facing copy, "
@@ -458,7 +458,7 @@ static partial class Diagnostics
         Status verdict = ReportOutcome(before, after, events, report);
 
         if (verdict != Status.Pass && reg.Ztna != null)
-            report(new(RegZtna, Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and "
+            report(new(RegZtna, Status.Info, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and "
                 + $"TCP and UDP 53 to {target?.Server ?? "the zone's primary server"} to pass the tunnel as real traffic, not through the client's DNS proxy"));
         return verdict;
     }
@@ -544,7 +544,7 @@ static partial class Diagnostics
         foreach (var e in events.Events.AsEnumerable().Reverse())
             report(new("DNS Client Event", Status.Fail, DescribeEvent(e)));
         if (events.Error != null)
-            report(new("DNS Client Event", Status.Warn, $"Could not read the System event log: {events.Error}"));
+            report(new("DNS Client Event", Status.Skip, $"Not checked: could not read the System event log: {events.Error}"));
 
         if (events.Events.Count > 0)
         {

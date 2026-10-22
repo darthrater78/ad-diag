@@ -270,12 +270,12 @@ public class DnsRegistrationTests
     }
 
     [Fact]
-    public void Zone_PrimaryWithASyntheticAddressWarns_UnresolvablePrimaryFails()
+    public void Zone_PrimaryWithASyntheticAddressIsANote_UnresolvablePrimaryFails()
     {
         var probe = BehindZtna();
         probe.Hosts["dc01.contoso.com"] = [IPAddress.Parse("100.64.1.9")];
         var group = Run(probe);
-        Assert.Equal(Status.Warn, StatusOf(group, "Zone Primary Server"));
+        Assert.Equal(Status.Info, StatusOf(group, "Zone Primary Server"));
         Assert.Contains("synthetic 100.64.0.0/10 address", DetailOf(group, "Zone Primary Server"));
 
         probe.Hosts.Remove("dc01.contoso.com");
@@ -335,7 +335,7 @@ public class DnsRegistrationTests
     }
 
     [Fact]
-    public void Errors_RecentFailureEventsWarn_UnreadableLogWarns()
+    public void Errors_RecentFailureEventsWarn_UnreadableLogIsNotChecked()
     {
         var probe = Healthy();
         probe.DnsEvents = () => Samples.DnsClientEventsRefused;
@@ -345,7 +345,9 @@ public class DnsRegistrationTests
         Assert.Contains("refused the update request", DetailOf(group, "Registration Errors"));
 
         probe.DnsEvents = () => "ERROR|Access is denied";
-        Assert.Equal("Could not read the System event log: Access is denied", DetailOf(Run(probe), "Registration Errors"));
+        var unreadable = Run(probe);
+        Assert.Equal(Status.Skip, StatusOf(unreadable, "Registration Errors"));
+        Assert.Equal("Not checked: could not read the System event log: Access is denied", DetailOf(unreadable, "Registration Errors"));
     }
 
     // ── Register now ───────────────────────────────────────
@@ -412,7 +414,7 @@ public class DnsRegistrationTests
         Assert.Equal(Status.Warn, Step(steps, "Record After").Status);
         // Behind ZTNA the trace ends by saying what the tunnel has to carry
         Assert.Equal("ZTNA / VPN Client", steps[^1].Name);
-        Assert.Equal(Status.Warn, steps[^1].Status);
+        Assert.Equal(Status.Info, steps[^1].Status);
         Assert.Contains("TCP and UDP 53 to dc01.contoso.com", steps[^1].Detail);
     }
 

@@ -160,9 +160,9 @@ public class DiagnosticsTests
         Assert.Equal(5, group.Tests.Count);
         Assert.Equal(Status.Fail, StatusOf(group, "Domain Joined"));
         Assert.Contains("timed out", DetailOf(group, "Domain Joined"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Secure Channel"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Site Assignment"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Computer Password Age"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Secure Channel"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Site Assignment"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Computer Password Age"));
         Assert.Equal(Status.Pass, StatusOf(group, "Logged-on User"));
     }
 
@@ -178,7 +178,7 @@ public class DiagnosticsTests
 
     [Theory]
     [InlineData(Samples.NltestScVerifyBroken, "Fail")]
-    [InlineData(Samples.NltestScVerifyAccessDenied, "Warn")]
+    [InlineData(Samples.NltestScVerifyAccessDenied, "Skip")]
     public void Membership_SecureChannelVerdict(string nltest, string expected)
     {
         var probe = Healthy();
@@ -198,14 +198,17 @@ public class DiagnosticsTests
     }
 
     [Fact]
-    public void DcConnectivity_RequiredPortClosedFails_OptionalPortClosedWarns()
+    public void DcConnectivity_RequiredPortClosedFails_RpcWarns_LdapsIsANote()
     {
         var probe = Healthy();
         probe.OpenPorts.Remove(445);
+        probe.OpenPorts.Remove(135);
         probe.OpenPorts.Remove(636);
         var group = Diagnostics.TestDcConnectivity(Config(), probe);
         Assert.Equal(Status.Fail, StatusOf(group, "Port 445 (SMB)"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Port 636 (LDAPS)"));
+        Assert.Equal(Status.Warn, StatusOf(group, "Port 135 (RPC)"));
+        Assert.Equal(Status.Info, StatusOf(group, "Port 636 (LDAPS)"));
+        Assert.Contains("not needed to sign in", DetailOf(group, "Port 636 (LDAPS)"));
         Assert.Equal(Status.Pass, StatusOf(group, "Port 389 (LDAP)"));
     }
 
@@ -290,10 +293,11 @@ public class DiagnosticsTests
     }
 
     [Fact]
-    public void GroupPolicy_NoResults_WarnsAndSkips()
+    public void GroupPolicy_NoResults_IsNotChecked()
     {
         var group = Diagnostics.TestGroupPolicy(Config(), new FakeProbe { Rsop = "" });
-        Assert.Equal(Status.Warn, StatusOf(group, "GP Last Refresh"));
+        Assert.Equal(Status.Skip, StatusOf(group, "GP Last Refresh"));
+        Assert.StartsWith("Not checked:", DetailOf(group, "GP Last Refresh"));
         Assert.Equal(Status.Skip, StatusOf(group, "Applied GPOs"));
         Assert.Equal(Status.Skip, StatusOf(group, "Denied GPOs"));
     }

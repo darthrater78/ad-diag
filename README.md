@@ -73,6 +73,16 @@ The diagnostic run is **read-only**. Three actions change something, and each as
 
 ## Test Groups
 
+Each check ends in one of five results:
+
+- **Passed** — as it should be.
+- **Failed** — something that breaks sign-in, Group Policy or registration; fix it.
+- **Warning** — a problem to fix, though things may still work for now (a stale record, a clock a minute or two off, a port Group Policy needs).
+- **Info** — worth knowing, nothing broken (a port many domains close on purpose, a fallback this PC doesn't use). Counted as notes, never as warnings.
+- **Skipped** — not checked, with the reason: it needs Run as Administrator, a tool didn't answer, or it depends on a check that didn't pass.
+
+A group's heading shows the worst of its checks: **FAILED**, **WARNING** or **PASSED** (Info and Skipped don't lower it).
+
 ### 1. Domain Membership & Identity
 
 Parses `dsregcmd /status`, `nltest`, `WindowsIdentity.GetCurrent()`, and AD via ADSI.
@@ -89,13 +99,13 @@ Locates a domain controller and tests connectivity to required ports. Port check
 
 - **Locate DC** — `nltest /dsgetdc` finds the nearest available domain controller
 - **Port 389 (LDAP)** — directory queries, group policy, logon
-- **Port 636 (LDAPS)** — encrypted LDAP (optional)
+- **Port 636 (LDAPS)** — encrypted LDAP; closed is Info, since many DCs have no certificate for it
 - **Port 88 (Kerberos)** — KDC port, required for domain authentication
 - **Port 445 (SMB)** — required for SYSVOL/NETLOGON share access and Group Policy download
-- **Port 135 (RPC)** — RPC endpoint mapper, used for domain join and replication (optional)
-- **Port 464 (Kpasswd)** — Kerberos password change protocol (optional)
-- **Port 53 (DNS)** — AD-integrated DNS
-- **Port 3268 (Global Catalog)** — forest-wide searches (multi-domain forests)
+- **Port 135 (RPC)** — RPC endpoint mapper, used for domain join and Group Policy; closed warns
+- **Port 464 (Kpasswd)** — Kerberos password change protocol; closed warns, since password changes fail
+- **Port 53 (DNS)** — AD-integrated DNS; closed is Info, since the DC need not be a DNS server
+- **Port 3268 (Global Catalog)** — forest-wide searches (multi-domain forests); closed is Info
 
 ### 3. DNS for Active Directory
 
@@ -139,7 +149,7 @@ Checks whether this machine's own host record can reach, and is right on, the DN
 - **Registration Name** — the name Windows registers: host name plus primary DNS suffix
 - **ZTNA / VPN Client** (informational) — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Tailscale, Island, Microsoft Global Secure Access, Cisco, Fortinet and others), any other tunnel adapter, any other virtual (software) adapter that holds an address, an adapter with a `/32` address and no default gateway, addresses in `100.64.0.0/10`, or DNS answered by the client's local proxy. Hypervisor and loopback adapters are not counted. A client in "VPN mode" gives its adapter a real routable address, so detection does not depend on the address range
 - **Registering Adapters** — connected adapters with "Register this connection's addresses in DNS" turned on and the addresses they would register; warns when one is a `100.64.0.0/10` tunnel address that no other host can route to, and notes when a client's adapter holds a routable address but has registration turned off
-- **Zone Primary Server** — the zone and its primary server, found the way Windows finds where to send an update: the SOA record of the name, then of each parent, asked of the DNS servers of the adapters that register (IPv4 servers, in order; one that doesn't answer is passed over), not of whichever server the system resolver prefers. The detail names the server that answered. If no registering adapter has an IPv4 DNS server, the configured DNS servers are asked. Warns when the primary server resolves to a synthetic `100.64.0.0/10` address, or to a public address, which usually means the zone found is the internet-facing copy that takes no updates from this machine
+- **Zone Primary Server** — the zone and its primary server, found the way Windows finds where to send an update: the SOA record of the name, then of each parent, asked of the DNS servers of the adapters that register (IPv4 servers, in order; one that doesn't answer is passed over), not of whichever server the system resolver prefers. The detail names the server that answered. If no registering adapter has an IPv4 DNS server, the configured DNS servers are asked. Warns when the primary server resolves to a public address, which usually means the zone found is the internet-facing copy that takes no updates from this machine; a synthetic `100.64.0.0/10` address from a ZTNA client is Info, since updates reach the real server if the client forwards port 53 for it
 - **Update Path (Port 53)** — TCP 53 to the primary server
 - **Registered Record** — the A/AAAA records the primary server holds for this machine (asked directly; the configured DNS servers if it doesn't answer), compared with the addresses the machine has now
 - **Registration Errors** — DNS Client warnings (event IDs in the 8000s) in the System log in the last 24 hours. Windows logs one per failed registration and nothing on success
@@ -150,7 +160,7 @@ Checks whether this machine's own host record can reach, and is right on, the DN
 
 Whether this PC is ready for single sign-on to Microsoft Entra ID. It checks only this PC, for basic readiness: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated. The group ends with a **Readiness** line, and when the PC isn't ready, a **See the fixes in the Guide** link opens the Guide tab at this group's section, which has the recommended fix for each check.
 
-How the PC is joined decides what is checked. Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows; domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is only the fallback, for browsers and apps that can't use the token, so while the token is in place a Seamless SSO problem warns instead of failing, and the verdict reads "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready":
+How the PC is joined decides what is checked. Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows; domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is only the fallback, for browsers and apps that can't use the token, so while the token is in place a Seamless SSO problem is Info, not a warning, and the verdict reads "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not set up":
 
 - **Join Type** — from `dsregcmd /status`: Microsoft Entra hybrid joined, Microsoft Entra joined, domain joined only, or neither (not ready)
 - **Device Auth** — `DeviceAuthStatus` must be `SUCCESS` (Entra and hybrid joined)
@@ -161,7 +171,7 @@ Domain-joined and hybrid joined PCs (Seamless SSO):
 - **Seamless SSO Ticket** — `klist get HTTP/autologon.microsoftazuread-sso.com` must return a ticket from a domain controller; without one the `AZUREADSSOACC` account is missing from the user's domain
 - **Intranet Zone** — `https://autologon.microsoftazuread-sso.com` must be in the Local intranet zone, or browsers send it no Kerberos ticket
 - **Automatic Logon** — the Local intranet zone must log on automatically with the current user name and password
-- **Status Bar Scripts** — "Allow updates to status bar via script" must be on in the Local intranet zone
+- **Status Bar Scripts** — "Allow updates to status bar via script" in the Local intranet zone; off is Info, since only older clients need it
 
 The zone and its two settings come from the Windows URL security manager (`urlmon`), the component Edge and Chrome ask, so Group Policy, the user's own zone sites and the zone settings apply in the order they do for the browser.
 
