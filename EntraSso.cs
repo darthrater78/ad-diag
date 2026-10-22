@@ -19,7 +19,7 @@ namespace AdDiag;
 // the PRT decide which checks run and what they weigh. The fixes are in the Guide tab.
 static partial class Diagnostics
 {
-    public const string EntraSsoGroup = "Entra Single Sign-On";
+    public const string EntraSsoGroup = "Entra Seamless Single Sign-On";
     public const string SsoJoin = "Join Type", SsoDeviceAuth = "Device Auth", SsoPrt = "Primary Refresh Token",
         SsoTicket = "Seamless SSO Ticket", SsoZone = "Intranet Zone", SsoLogon = "Automatic Logon",
         SsoStatusBar = "Status Bar Scripts", SsoCloudTgt = "Cloud Kerberos", SsoOnPremTgt = "On-premises Kerberos",

@@ -113,6 +113,8 @@ class MainForm : Form
     readonly CheckBox _chkExpandAll;
     bool _expandAll; // "Expand all groups after a run"; never saved
     readonly Dictionary<string, int> _guideAnchors = []; // Guide section title -> its position in the Guide
+    readonly List<(int Start, int End, string Title)> _guideHeadings = []; // where each section title sits, to fold it
+    HashSet<string>? _guideOpen;                         // the Guide sections the reader opened; all start folded
     readonly Panel _summaryPanel, _resultsArea, _resultsBar, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox;
     bool _gpRunning, _gpLoaded, _ticketsLoaded;
@@ -131,11 +133,17 @@ class MainForm : Form
     readonly List<TestEntry> _dnsSteps = [];
     CancellationTokenSource? _dnsCts;
     long _logSeq; // the last log line written to the Log tab
-    bool _logBySection = true; // the Log tab's view: by run and section, or By time
+    enum LogView { Sections, ByTime, Raw }
+    LogView _logView = LogView.Sections; // the Log tab's view: by run and section, one timeline, or the plain log
+    bool _logBySection => _logView == LogView.Sections;
     bool _logStale;            // a heading's totals changed since the Log tab was written
     DateTime _logRenderedAt;
     LogBlock? _logLastBlock;   // By time: the block whose heading was written last
-    ThemedButton _btnLogSections = null!, _btnLogByTime = null!;
+    // Sections: the runs and sections the reader folded (a block, or a block and section name), and where each
+    // heading sits in the pane, so a click or Enter on one folds or opens it
+    readonly HashSet<object> _logOpen = []; // everything starts folded
+    readonly List<(int Start, int End, object Key)> _logHeadings = [];
+    ThemedButton _btnLogSections = null!, _btnLogByTime = null!, _btnLogRaw = null!;
     readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 300 };
 
 
@@ -320,6 +328,20 @@ class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             Visible = false,
+        };
+        _guideBox.MouseClick += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Left && GuideHeadingAt(_guideBox.GetCharIndexFromPosition(e.Location)) is { } title) ToggleGuideSection(title);
+        };
+        _guideBox.MouseMove += (s, e) =>
+            _guideBox.Cursor = GuideHeadingAt(_guideBox.GetCharIndexFromPosition(e.Location)) != null ? Cursors.Hand : Cursors.IBeam;
+        _guideBox.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode is Keys.Enter or Keys.Space && GuideHeadingAt(_guideBox.SelectionStart) is { } title)
+            {
+                ToggleGuideSection(title);
+                e.Handled = e.SuppressKeyPress = true;
+            }
         };
         PopulateGuide();
 
@@ -568,7 +590,7 @@ class MainForm : Form
     /// standard WinForms button can't follow the dark theme.
     /// </summary>
     /// <summary>Which half of a two-part button a <see cref="ThemedButton"/> is: only its outer corners are rounded.</summary>
-    enum SplitPart { None, Left, Right }
+    enum SplitPart { None, Left, Middle, Right }
 
     sealed class ThemedButton : Button
     {
@@ -633,8 +655,8 @@ class MainForm : Form
             {
                 using var brush = new SolidBrush(fill);
                 g.FillPath(brush, path);
-                // The right half of a filled pair is set off from the left by a thin line in its text colour
-                if (Split == SplitPart.Right && !plain)
+                // A filled part after the first is set off from the one before by a thin line in its text colour
+                if (Split is SplitPart.Middle or SplitPart.Right && !plain)
                 {
                     using var divider = new Pen(Blend(fill, ForeColor, 0.45));
                     g.DrawLine(divider, 0, Px(5), 0, Height - Px(6));
@@ -659,7 +681,7 @@ class MainForm : Form
         public static GraphicsPath RoundedRect(Rectangle r, int radius, SplitPart split = SplitPart.None)
         {
             int d = radius * 2;
-            bool roundLeft = split != SplitPart.Right, roundRight = split != SplitPart.Left;
+            bool roundLeft = split is SplitPart.None or SplitPart.Left, roundRight = split is SplitPart.None or SplitPart.Right;
             var path = new GraphicsPath();
             if (roundLeft) path.AddArc(r.X, r.Y, d, d, 180, 90);
             else path.AddLine(r.X, r.Y, r.X, r.Y);
@@ -774,17 +796,31 @@ class MainForm : Form
     static readonly Font GuideFixLabelFont = new("Segoe UI", 8.5f, FontStyle.Bold);
     static Color FixLabelColor => WarnColor;
 
+    static readonly Font GuideSectionFont = new("Segoe UI", 10.5f, FontStyle.Bold);
+    static readonly Font GuideChevronFont = new(MonoFamily, 9f); // ► and ▼ are in the monospace font everywhere
+
+    // Each section folds to its title, with a chevron down when open and right when folded; all start folded, so
+    // the Guide opens as a list of its sections
     void PopulateGuide()
     {
         _guideBox.Clear();
         _guideAnchors.Clear();
+        _guideHeadings.Clear();
         AppendGuide("Test guide\n", new Font("Segoe UI", 13f, FontStyle.Bold), TextColor);
+        AppendGuide("Click a section to open or fold it.\n", GuideBodyFont, DimColor);
 
+        bool previousOpen = true;
         foreach (var (title, body) in GetGuideSections())
         {
-            AppendGuide("\n", GuideBodyFont, TextColor);
+            bool open = _guideOpen?.Contains(title) == true;
+            if (open || previousOpen) AppendGuide("\n", GuideBodyFont, TextColor);
+            previousOpen = open;
             _guideAnchors[title] = _guideBox.TextLength;
-            AppendGuide($"{title}\n\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
+            AppendGuide(open ? "\u25BC " : "\u25BA ", GuideChevronFont, DimColor);
+            AppendGuide(title, GuideSectionFont, TextColor);
+            _guideHeadings.Add((_guideAnchors[title], _guideBox.TextLength, title));
+            AppendGuide(open ? "\n\n" : "\n", GuideSectionFont, TextColor);
+            if (!open) continue;
 
             var lines = body.Split('\n');
             foreach (var line in lines)
@@ -833,10 +869,28 @@ class MainForm : Form
         _guideBox.ScrollToCaret();
     }
 
-    /// <summary>Opens the Guide tab with the section <paramref name="title"/> at the top.</summary>
+    string? GuideHeadingAt(int charIndex) =>
+        _guideHeadings.FirstOrDefault(h => charIndex >= h.Start && charIndex <= h.End).Title;
+
+    // Folds or opens a section and keeps its title where it was on screen
+    void ToggleGuideSection(string title)
+    {
+        _guideOpen ??= [];
+        if (!_guideOpen.Remove(title)) _guideOpen.Add(title);
+        int top = _guideBox.GetLineFromCharIndex(_guideBox.GetCharIndexFromPosition(new Point(1, 1)));
+        PopulateGuide();
+        _guideBox.SelectionStart = _guideAnchors[title];
+        _guideBox.SelectionLength = 0;
+        int now = _guideBox.GetLineFromCharIndex(_guideBox.GetCharIndexFromPosition(new Point(1, 1)));
+        if (top != now) SendMessage(_guideBox.Handle, EmLineScroll, IntPtr.Zero, top - now);
+    }
+
+    /// <summary>Opens the Guide tab with the section <paramref name="title"/> open and at the top.</summary>
     void ShowGuideSection(string title)
     {
         SwitchTab("guide");
+        _guideOpen ??= [];
+        if (_guideOpen.Add(title)) PopulateGuide();
         if (!_guideAnchors.TryGetValue(title, out int at)) return;
         // A hidden control is left out of docking, so the Guide only gets its size now; its lines wrap at that
         // width, so it is sized before the scroll or the scroll lands on the wrong line
@@ -968,8 +1022,8 @@ class MainForm : Form
                 "  Fix: Domain members should sync from the domain hierarchy automatically. If not, run 'w32tm /config /syncfromflags:domhier /update'"),
 
             (Diagnostics.EntraSsoGroup,
-                "Checks whether this PC is ready for single sign-on to Microsoft Entra ID. Only this PC is checked: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated, where Seamless SSO doesn't apply.\n" +
-                "Microsoft Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows. Domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is the fallback, for browsers and apps that can't use the token or for when it is missing, so while the token is in place a Seamless SSO problem is a warning, not a failure. Entra joined PCs reach AD resources with cloud Kerberos trust instead.\n\n" +
+                "Checks whether this PC signs in to Microsoft 365 and other cloud apps that use Microsoft Entra ID without asking for a password, however it is joined: domain joined, hybrid joined or Entra joined. Only this PC is checked: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated, where Seamless SSO doesn't apply.\n" +
+                "Microsoft Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows. Domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is the fallback, for browsers and apps that can't use the token or for when it is missing, so while the token is in place a Seamless SSO problem shows as Info, not a warning. Entra joined PCs reach AD resources with cloud Kerberos trust instead.\n\n" +
                 "• Join Type — how this PC is joined, from dsregcmd /status: hybrid joined (AzureAdJoined and DomainJoined both YES), Entra joined (AzureAdJoined only) or domain joined only\n" +
                 "  Fix: A domain-joined PC that should be hybrid joined: check that Microsoft Entra Connect > Configure device options has set up the service connection point for this forest, and that the PC's OU is synchronized. Then restart the PC, or run 'dsregcmd /join' as SYSTEM\n\n" +
                 "• Device Auth — DeviceAuthStatus must be SUCCESS, meaning the device is enabled in Entra ID and its certificate is valid\n" +
@@ -983,7 +1037,7 @@ class MainForm : Form
                 "  Fix: In a GPO for the users: User Configuration > Policies > Administrative Templates > Windows Components > Internet Explorer > Internet Control Panel > Security Page > Site to Zone Assignment List. Enable it and add https://autologon.microsoftazuread-sso.com with the value 1. Then run gpupdate (Group Policy tab) and sign out and in. Edge and Chrome follow this setting; Firefox needs network.negotiate-auth.trusted-uris set to the same address\n\n" +
                 "• Automatic Logon — the Local intranet zone must log on automatically with the current user name and password\n" +
                 "  Fix: In the same GPO: ... Security Page > Intranet Zone > Logon options: Automatic logon only in Intranet zone\n\n" +
-                "• Status Bar Scripts — Seamless SSO needs 'Allow updates to status bar via script' on in the Local intranet zone\n" +
+                "• Status Bar Scripts — 'Allow updates to status bar via script' in the Local intranet zone; only older clients need it, so off shows as Info\n" +
                 "  Fix: In the same GPO: ... Security Page > Intranet Zone > Allow updates to status bar via script: Enabled\n\n" +
                 "• Cloud Kerberos — Entra joined PCs: CloudTgt YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources\n" +
                 "  Fix: Needs Windows 10 21H2 or later with current updates. Sign out and in\n\n" +
@@ -1013,7 +1067,7 @@ class MainForm : Form
     async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
-        DiagLog.Block = new LogBlock($"Group Policy {DateTime.Now:HH:mm:ss}", "Resultant Set of Policy query");
+        DiagLog.Block = new LogBlock($"Group Policy {Clock(DateTime.Now)}", "Resultant Set of Policy query");
         _gpRunning = _gpLoaded = true;
         int keep = keepExisting ? _gpBox.TextLength : 0;
         try
@@ -1132,7 +1186,7 @@ class MainForm : Form
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
 
-        DiagLog.Block = new LogBlock($"Group Policy {DateTime.Now:HH:mm:ss}", force ? "gpupdate /force" : "gpupdate");
+        DiagLog.Block = new LogBlock($"Group Policy {Clock(DateTime.Now)}", force ? "gpupdate /force" : "gpupdate");
         _gpRunning = true;
         _btnGpUpdate.Enabled = false;
         _gpBox.Clear();
@@ -1171,7 +1225,7 @@ class MainForm : Form
     async void RefreshTickets()
     {
         if (_ticketsRunning) return;
-        DiagLog.Block = new LogBlock($"Kerberos tickets {DateTime.Now:HH:mm:ss}", "klist");
+        DiagLog.Block = new LogBlock($"Kerberos tickets {Clock(DateTime.Now)}", "klist");
         _ticketsRunning = _ticketsLoaded = true;
         _showingExplainer = false;
         _ticketsBox.Clear();
@@ -1381,7 +1435,7 @@ class MainForm : Form
             + "Continue?",
             "Purge Kerberos Tickets", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
-        DiagLog.Block = new LogBlock($"Kerberos tickets {DateTime.Now:HH:mm:ss}", "klist purge");
+        DiagLog.Block = new LogBlock($"Kerberos tickets {Clock(DateTime.Now)}", "klist purge");
 
         _btnPurgeTickets.Enabled = false;
         try
@@ -1568,9 +1622,9 @@ class MainForm : Form
         _dnsCts = new CancellationTokenSource();
         var cts = _dnsCts;
         _dnsSteps.Clear();
-        _dnsHeading = $"{heading}, {DateTime.Now:HH:mm:ss}";
+        _dnsHeading = $"{heading}, {Clock(DateTime.Now)}";
         RenderDnsBox();
-        var block = DiagLog.Block = new LogBlock($"DNS registration {DateTime.Now:HH:mm:ss}", heading);
+        var block = DiagLog.Block = new LogBlock($"DNS registration {Clock(DateTime.Now)}", heading);
         AppLog.Info("ddns", heading);
 
         void Report(TestEntry step) => ReportDnsStep(step, cts);
@@ -1637,6 +1691,20 @@ class MainForm : Form
             Font = new Font(MonoFamily, 8.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
         };
+        box.MouseClick += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Left && LogHeadingAt(box.GetCharIndexFromPosition(e.Location)) is { } key) ToggleLogFold(key);
+        };
+        box.MouseMove += (s, e) =>
+            box.Cursor = LogHeadingAt(box.GetCharIndexFromPosition(e.Location)) != null ? Cursors.Hand : Cursors.IBeam;
+        box.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode is Keys.Enter or Keys.Space && LogHeadingAt(box.SelectionStart) is { } key)
+            {
+                ToggleLogFold(key);
+                e.Handled = e.SuppressKeyPress = true;
+            }
+        };
         var debug = new CheckBox { Text = "Debug", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(12, 8) };
         debug.CheckedChanged += (s, e) =>
         {
@@ -1648,18 +1716,22 @@ class MainForm : Form
         var btnSaveLog = new ThemedButton { Text = "Save log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(172, 3) };
         btnSaveLog.Click += BtnSaveLog_Click;
         var btnClearLog = new ThemedButton { Text = "Clear log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(260, 3) };
-        btnClearLog.Click += (s, e) => { AppLog.Clear(); RenderLog(); };
-        // The view: Sections (by run, then results section) or By time (one timeline), as one two-part control
+        btnClearLog.Click += (s, e) => { AppLog.Clear(); _logOpen.Clear(); RenderLog(); };
+        // The view: Sections (by run, then results section), By time (one timeline) or Raw (the plain log, as
+        // written), as one three-part control
         _btnLogSections = new ThemedButton { Text = "Sections", Split = SplitPart.Left, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(76, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the log by section" };
-        _btnLogByTime = new ThemedButton { Text = "By time", Split = SplitPart.Right, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(70, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the log by time" };
-        _btnLogSections.Click += (s, e) => SetLogView(bySection: true);
-        _btnLogByTime.Click += (s, e) => SetLogView(bySection: false);
+        _btnLogByTime = new ThemedButton { Text = "By time", Split = SplitPart.Middle, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(70, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the log by time" };
+        _btnLogRaw = new ThemedButton { Text = "Raw", Split = SplitPart.Right, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(56, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the raw log" };
+        _btnLogSections.Click += (s, e) => SetLogView(LogView.Sections);
+        _btnLogByTime.Click += (s, e) => SetLogView(LogView.ByTime);
+        _btnLogRaw.Click += (s, e) => SetLogView(LogView.Raw);
         StyleLogViewButtons();
         var buttons = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
-        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog, _btnLogSections, _btnLogByTime]);
+        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog, _btnLogSections, _btnLogByTime, _btnLogRaw]);
         buttons.Resize += (s, e) =>
         {
-            _btnLogByTime.Location = new Point(buttons.ClientSize.Width - _btnLogByTime.Width - S(12), S(3));
+            _btnLogRaw.Location = new Point(buttons.ClientSize.Width - _btnLogRaw.Width - S(12), S(3));
+            _btnLogByTime.Location = new Point(_btnLogRaw.Left - _btnLogByTime.Width, S(3));
             _btnLogSections.Location = new Point(_btnLogByTime.Left - _btnLogSections.Width, S(3));
         };
         var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
@@ -1676,17 +1748,17 @@ class MainForm : Form
     // The results sections in order, each with the short name the By time view shows beside a line
     static IReadOnlyList<(string Name, string Short)> LogSectionNames => Sections.Select(s => (s.Name, s.Short)).ToList();
 
-    void SetLogView(bool bySection)
+    void SetLogView(LogView view)
     {
-        if (_logBySection == bySection) return;
-        _logBySection = bySection;
+        if (_logView == view) return;
+        _logView = view;
         StyleLogViewButtons();
         RenderLog();
     }
 
     void StyleLogViewButtons()
     {
-        foreach (var (button, on) in new[] { (_btnLogSections, _logBySection), (_btnLogByTime, !_logBySection) })
+        foreach (var (button, on) in new[] { (_btnLogSections, _logView == LogView.Sections), (_btnLogByTime, _logView == LogView.ByTime), (_btnLogRaw, _logView == LogView.Raw) })
         {
             button.BackColor = on ? AccentColor : SurfaceColor;
             button.ForeColor = on ? OnAccentColor : TextColor;
@@ -1702,14 +1774,21 @@ class MainForm : Form
         _logBox.SelectionHangingIndent = hanging;
     }
 
+    // Down when open, right when folded; Sections only, where a heading folds
+    // ► and ▼ are in the log's monospace font everywhere
+    string Chevron(object key) => !_logBySection ? "" : _logOpen.Contains(key) ? "\u25BC " : "\u25BA ";
+
     // A run's or an action's heading: its name and time in primary, then what it covered and how it came out
     void AppendLogBlockHeading(LogBlock block)
     {
         LogParagraph(0, 0);
         if (_logBox.TextLength > 0) AppendRun(_logBox, "\n", TextColor, LogGapFont);
+        int start = _logBox.TextLength;
+        AppendRun(_logBox, Chevron(block), DimColor, _logBox.Font);
         AppendRun(_logBox, block.Title, AccentColor, LogBlockFont);
         AppendRun(_logBox, "    " + block.Detail, DimColor, LogNoteFont);
         if (block.Totals != null) AppendRun(_logBox, "    " + block.Totals, DimColor, LogNoteFont);
+        if (_logBySection) _logHeadings.Add((start, _logBox.TextLength, block));
         AppendRun(_logBox, "\n", TextColor, LogNoteFont);
     }
 
@@ -1717,23 +1796,82 @@ class MainForm : Form
     {
         LogParagraph(S(8), 0);
         AppendRun(_logBox, "\n", TextColor, LogGapFont);
+        int start = _logBox.TextLength;
+        var key = (block, section);
+        AppendRun(_logBox, Chevron(key), DimColor, _logBox.Font);
         AppendRun(_logBox, section, TextColor, LogSectionFont);
         if (block.SectionNotes.TryGetValue(section, out var note)) AppendRun(_logBox, "    " + note, DimColor, LogNoteFont);
+        _logHeadings.Add((start, _logBox.TextLength, key));
         AppendRun(_logBox, "\n", TextColor, LogNoteFont);
     }
 
+    static readonly Font LogBoldFont = new(MonoFamily, 8.5f, FontStyle.Bold);
+    const int LogKindColumn = 10; // "● Warning " or a source such as "tool"
+
+    // A status word's mark and colour, as in the results grid; all the marks are in the monospace font
+    static (string Mark, Color Color) LogStatusLook(string word) => word switch
+    {
+        "Passed" => ("\u25CF", PassColor),
+        "Warning" => ("\u25B2", WarnColor),
+        "Failed" => ("\u00D7", FailColor),
+        "Info" => ("i", AccentColor),
+        _ => ("\u2013", DimColor),
+    };
+
     void AppendLogLine(LogLine line)
     {
-        // By time names each line's section in a column of its own; Sections has it in the heading above
-        string? column = _logBySection ? null
-            : line.Section == null ? "" : LogSectionNames.FirstOrDefault(s => s.Name == line.Section).Short ?? line.Section;
-        string prefix = DiagLog.Prefix(line, column);
-        // A long line wraps under its message, not under the time
+        // Raw: each line exactly as Save log writes it, in one colour, with no headings, indents or wrapping hang
+        if (_logView == LogView.Raw)
+        {
+            LogParagraph(0, 0);
+            AppendRun(_logBox, DiagLog.Prefix(line) + DiagLog.Body(line) + "\n", TextColor);
+            return;
+        }
+
+        // Formatted: the time, a kind column (a result's status, or where the line came from), By time's section
+        // column, then the message. Sections drops the milliseconds and the section, which its heading names
+        string lead = _logBySection ? $"{line.Time:HH:mm:ss}  " : $"{line.Time:HH:mm:ss.fff}  ";
+        var result = DiagLog.ParseResult(line);
+        string column = _logBySection ? ""
+            : (line.Section == null ? "" : LogSectionNames.FirstOrDefault(s => s.Name == line.Section).Short ?? line.Section)
+                .PadRight(DiagLog.SectionColumn);
         // Sections: a section's lines sit under its heading, a run's own lines level with the section headings
         int indent = !_logBySection || line.Block == null ? 0 : line.Section == null ? S(8) : S(20);
-        LogParagraph(indent, TextRenderer.MeasureText(prefix, _logBox.Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width);
-        AppendRun(_logBox, prefix, DimColor);
-        AppendRun(_logBox, DiagLog.Body(line, prefix.Length) + "\n", line.Debug ? DimColor : TextColor);
+
+        LogParagraph(indent, 0);
+        int start = _logBox.TextLength;
+        AppendRun(_logBox, lead, DimColor);
+        string[] parts;
+        int message;
+        if (result is { } res)
+        {
+            var (mark, color) = LogStatusLook(res.Word);
+            AppendRun(_logBox, $"{mark} {res.Word}".PadRight(LogKindColumn), color);
+            AppendRun(_logBox, column, DimColor);
+            message = _logBox.TextLength;
+            AppendRun(_logBox, res.Name, TextColor, LogBoldFont);
+            AppendRun(_logBox, (res.Detail.Length > 0 ? "  " + res.Detail : "") + "\n", TextColor);
+            parts = [];
+        }
+        else
+        {
+            AppendRun(_logBox, line.Source.PadRight(LogKindColumn), DimColor);
+            AppendRun(_logBox, column, DimColor);
+            message = _logBox.TextLength;
+            // A debug line is dim, which already sets it apart
+            parts = line.Message.Split('\n');
+            AppendRun(_logBox, parts[0] + "\n", line.Debug ? DimColor : TextColor);
+        }
+        // Wrapped text, and the raw tool output after a debug line's first line, line up under the message. Where
+        // the message starts is read from the box, since measuring the text apart from it comes out a little wide
+        int hang = _logBox.GetPositionFromCharIndex(message).X - _logBox.GetPositionFromCharIndex(start).X;
+        _logBox.Select(start, _logBox.TextLength - start);
+        _logBox.SelectionHangingIndent = hang;
+        foreach (string raw in parts.Skip(1))
+        {
+            LogParagraph(indent + hang, 0);
+            AppendRun(_logBox, raw + "\n", DimColor);
+        }
     }
 
     /// <summary>
@@ -1767,7 +1905,7 @@ class MainForm : Form
         _logSeq = lines[^1].Seq;
         foreach (var line in lines)
         {
-            if (line.Block != null && line.Block != _logLastBlock)
+            if (line.Block != null && line.Block != _logLastBlock && _logView != LogView.Raw)
             {
                 AppendLogBlockHeading(line.Block);
                 _logLastBlock = line.Block;
@@ -1791,12 +1929,27 @@ class MainForm : Form
         try
         {
             _logBox.Clear();
+            _logHeadings.Clear();
             _logLastBlock = null;
             LogItem? previous = null;
+            bool blockFolded = false, sectionFolded = false;
             foreach (var item in DiagLog.Arrange(lines, _logBySection, LogSectionNames.Select(s => s.Name).ToList()))
             {
+                // Sections: a folded run keeps only its heading, a folded section its heading inside the run; a run's
+                // Started and Complete lines say what its heading already does
+                if (_logBySection)
+                {
+                    if (item is LogEntry { Line: var bookend } && DiagLog.IsRunBookend(bookend)) continue;
+                    if (item is LogBlockHeading b) (blockFolded, sectionFolded) = (!_logOpen.Contains(b.Block), false);
+                    else if (item is LogSectionHeading h) sectionFolded = !_logOpen.Contains((h.Block, h.Section));
+                    else if (item is LogEntry { Line.Section: null }) sectionFolded = false;
+                    if (item is not LogBlockHeading && (blockFolded && item is not LogEntry { Line.Block: null } || sectionFolded && item is LogEntry))
+                        continue;
+                }
                 switch (item)
                 {
+                    case LogBlockHeading when _logView == LogView.Raw:
+                        break;
                     case LogBlockHeading heading:
                         AppendLogBlockHeading(heading.Block);
                         _logLastBlock = heading.Block;
@@ -1827,8 +1980,17 @@ class MainForm : Form
         _logRenderedAt = DateTime.Now;
     }
 
-    // The log as text in the view on screen: what Copy log and Save log hand over
-    string LogText() => AppLog.Text(_logBySection, LogSectionNames);
+    object? LogHeadingAt(int charIndex) =>
+        _logHeadings.FirstOrDefault(h => charIndex >= h.Start && charIndex <= h.End).Key;
+
+    void ToggleLogFold(object key)
+    {
+        if (!_logOpen.Remove(key)) _logOpen.Add(key);
+        RenderLog();
+    }
+
+    // The log as text in the view on screen: what Copy log and Save log hand over; folding only changes the pane
+    string LogText() => _logView == LogView.Raw ? AppLog.Text() : AppLog.Text(_logBySection, LogSectionNames);
 
     void BtnCopyLog_Click(object? sender, EventArgs e)
     {
@@ -1961,7 +2123,7 @@ class MainForm : Form
     string HeadingNote(TestGroup group) =>
         SelectedRun is not { } run ? GroupCounts(group)
         : run.NotRun.Contains(group.Name) ? "Not run"
-        : run.RanAt.TryGetValue(group.Name, out var at) ? $"{GroupCounts(group)} · run at {at:HH:mm:ss}"
+        : run.RanAt.TryGetValue(group.Name, out var at) ? $"{GroupCounts(group)} · run at {Clock(at)}"
         : GroupCounts(group);
 
     /// <summary>
@@ -1978,6 +2140,11 @@ class MainForm : Form
             _resultsCanvas.Headings.Clear();
         }
 
+        // The counts column is as wide as the longest counts on show, at least NoteColumn, so a long one (a
+        // 12-hour "run at" time) never runs into the Run button
+        if (g != null)
+            _noteColumn = _renderedGroups!.Select(gr => TextRenderer.MeasureText(g, HeadingNote(gr), GroupCountFont, Size.Empty,
+                TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width).Append(S(NoteColumn)).Max();
         foreach (var group in _renderedGroups!)
         {
             bool notRun = SelectedRun?.NotRun.Contains(group.Name) == true;
@@ -1996,7 +2163,8 @@ class MainForm : Form
         return y + S(14);
     }
 
-    const int NoteColumn = 240; // room for the longest counts, "8 checks · 1 failed · 1 warning · run at 16:39:24"
+    const int NoteColumn = 200; // the counts column's least width
+    int _noteColumn;            // its width in this layout, in device pixels
     const int RunSlot = 88;     // room for the widest run button, "Run again"
     static readonly Font BadgeFont = new("Segoe UI", 7.5f, FontStyle.Bold);
     static readonly Font RunTextFont = new("Segoe UI", 8.5f, FontStyle.Bold);
@@ -2015,7 +2183,7 @@ class MainForm : Form
             var button = RunButtonBounds(g, right, y, notRun);
             string note = HeadingNote(group);
             // The counts start at a fixed column and the verdict sits just left of it, so both line up down the list
-            int noteX = right - S(RunSlot) - S(10) - S(NoteColumn);
+            int noteX = right - S(RunSlot) - S(10) - _noteColumn;
             TextRenderer.DrawText(g, note, GroupCountFont, new Point(noteX, y + S(5)), DimColor, oneLine);
             if (!notRun && GroupVerdict(group) is { } verdict) DrawGroupBadge(g, verdict, noteX - S(12), y);
             if (!notRun) DrawChevron(g, left, y + S(8), open);
@@ -2437,7 +2605,7 @@ class MainForm : Form
         ("Trust Relationships", "Trusts", Diagnostics.TestTrusts),
         ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime),
         ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration),
-        (Diagnostics.EntraSsoGroup, "Entra SSO", Diagnostics.TestEntraSso),
+        (Diagnostics.EntraSsoGroup, "Seamless SSO", Diagnostics.TestEntraSso),
     ];
 
     /// <summary>The domain and DC from the fields, or null (with the reason in the status line) when they're invalid.</summary>
@@ -2494,7 +2662,7 @@ class MainForm : Form
     {
         if (_running || ReadTarget() is not { } target) return;
         var (domain, dc) = target;
-        var block = DiagLog.Block = new LogBlock($"Run {DateTime.Now:HH:mm:ss}", $"{domain} · {DcText(dc)} · all sections");
+        var block = DiagLog.Block = new LogBlock($"Run {Clock(DateTime.Now)}", $"{domain} · {DcText(dc)} · all sections");
         var cts = StartRun("", domain, dc);
         _summaryPanel.Visible = false;
         _lblStatus.Text = "Running diagnostics...";
@@ -2539,7 +2707,7 @@ class MainForm : Form
     {
         if (_running || ReadTarget() is not { } target) return;
         var (domain, dc) = target;
-        var block = DiagLog.Block = new LogBlock($"{name} {DateTime.Now:HH:mm:ss}", $"{domain} · {DcText(dc)} · run on its own");
+        var block = DiagLog.Block = new LogBlock($"{name} {Clock(DateTime.Now)}", $"{domain} · {DcText(dc)} · run on its own");
         var cts = StartRun($" {name}", domain, dc);
         _lblStatus.Text = $"Running {name}...";
 
@@ -2566,7 +2734,7 @@ class MainForm : Form
         AppLog.Info("run", $"Complete {name}: {Totals(tests).Replace(" · ", ", ")}");
         block.Totals = Totals(tests);
         _logStale = true;
-        _lblStatus.Text = $"{name}: run at {DateTime.Now:HH:mm:ss}";
+        _lblStatus.Text = $"{name}: run at {Clock(DateTime.Now)}";
         SetRunning(false);
     }
 
@@ -2683,6 +2851,10 @@ class MainForm : Form
         }
     }
 
+    // A time of day as the Windows clock shows it (5:09:33 PM, or 17:09:33). Log line stamps keep a fixed 24-hour
+    // format with milliseconds, so they line up and sort
+    static string Clock(DateTime time) => time.ToString("T", System.Globalization.CultureInfo.CurrentCulture);
+
     void RebuildHistoryBar()
     {
         // Deferred: this can run from one of these buttons' own Click handler
@@ -2707,7 +2879,7 @@ class MainForm : Form
             var run = _runHistory[ri];
             bool selected = ri == _selectedRunIndex;
             bool isPending = run.IsPending;
-            string label = isPending ? "Pending..." : run.Timestamp.ToString("HH:mm:ss");
+            string label = isPending ? "Pending..." : Clock(run.Timestamp);
 
             var btn = new ThemedButton
             {
@@ -2715,11 +2887,13 @@ class MainForm : Form
                 Font = selected ? HistoryFontBold : HistoryFont,
                 BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
                 ForeColor = selected ? OnAccentColor : (isPending ? WarnColor : DimColor),
-                Size = new Size(S(isPending ? 72 : 62), S(20)), Location = new Point(x, S(4)),
+                Location = new Point(x, S(4)),
             };
+            // Fits the label, which follows the Windows clock and is wider in 12-hour time
+            btn.Size = new Size(Math.Max(S(isPending ? 72 : 62), TextRenderer.MeasureText(label, btn.Font).Width + S(14)), S(20));
             if (!isPending) btn.Click += (s, e) => SelectRun(idx);
             _historyPanel.Controls.Add(btn);
-            x += S(isPending ? 76 : 66);
+            x += btn.Width + S(4);
         }
 
         var del = new ThemedButton
@@ -2777,7 +2951,7 @@ class MainForm : Form
     {
         if (SelectedRun is not { } run) return;
         ShowResults(run.Results);
-        _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
+        _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {Clock(run.Timestamp)}";
         _btnExport.Enabled = _btnCopy.Enabled = !run.IsPending && !_running;
     }
 
@@ -2803,8 +2977,8 @@ class MainForm : Form
         var sb = new StringBuilder();
         sb.AppendLine("===================================================");
         sb.AppendLine("  AD Diagnostics Report");
-        sb.AppendLine($"  Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        sb.AppendLine($"  Run at:    {run.Timestamp:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"  Generated: {DateTime.Now:G}");
+        sb.AppendLine($"  Run at:    {run.Timestamp:G}");
         sb.AppendLine("===================================================");
         sb.AppendLine();
         sb.AppendLine("Configuration:");
@@ -2816,7 +2990,7 @@ class MainForm : Form
         {
             bool notRun = run.NotRun.Contains(group.Name);
             string stamp = notRun ? "  (not run)"
-                : run.RanAt.TryGetValue(group.Name, out var at) ? $"  (run at {at:yyyy-MM-dd HH:mm:ss})" : "";
+                : run.RanAt.TryGetValue(group.Name, out var at) ? $"  (run at {at:G})" : "";
             sb.AppendLine("---------------------------------------------------");
             sb.AppendLine($"  {group.Name.ToUpperInvariant()}{stamp}");
             sb.AppendLine("---------------------------------------------------");

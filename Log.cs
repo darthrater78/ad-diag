@@ -132,6 +132,28 @@ sealed class DiagLog(Func<DateTime>? clock = null)
     public static string Body(LogLine line) => Body(line, Prefix(line).Length);
 
     /// <summary>
+    /// A result line taken apart for the formatted views: the status word, the check's name and its detail. The
+    /// section's name in front of the check's is left out, since both views show the section beside or above the
+    /// line. Null for any other line.
+    /// </summary>
+    public static (string Word, string Name, string Detail)? ParseResult(LogLine line)
+    {
+        // Written by the app as "Warning  Group / Check: detail"
+        if (line.Source != "result" || line.Message.Length < 9) return null;
+        string word = line.Message[..8].Trim();
+        string rest = line.Message[8..].TrimStart();
+        if (line.Section is { } section && rest.StartsWith(section + " / ", StringComparison.Ordinal))
+            rest = rest[(section.Length + 3)..];
+        int colon = rest.IndexOf(": ", StringComparison.Ordinal);
+        return colon < 0 ? (word, rest, "") : (word, rest[..colon], rest[(colon + 2)..]);
+    }
+
+    /// <summary>A run's "Started" and "Complete" lines, which its heading already says in the Sections view.</summary>
+    public static bool IsRunBookend(LogLine line) =>
+        line.Source == "run" && line.Block != null && line.Section == null
+        && (line.Message.StartsWith("Started", StringComparison.Ordinal) || line.Message.StartsWith("Complete", StringComparison.Ordinal));
+
+    /// <summary>
     /// The lines in the order they show. By section: a block's lines go under its heading where the block first
     /// appears, its own lines first, then each section's under a heading of its own, in <paramref name="sectionOrder"/>
     /// (others after, as they first appear), and its own lines from after its sections began below them; lines outside

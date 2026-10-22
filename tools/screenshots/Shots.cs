@@ -109,7 +109,7 @@ static class Shots
 
         Call(form, "SwitchTab", "dns");
         FrontFill(Get<Panel>(form, "_dnsPanel"));
-        Set(form, "_dnsHeading", "Registering this computer in DNS, " + DateTime.Now.AddSeconds(-40).ToString("HH:mm:ss"));
+        Set(form, "_dnsHeading", "Registering this computer in DNS, " + DateTime.Now.AddSeconds(-40).ToString("T"));
         Get<List<TestEntry>>(form, "_dnsSteps").AddRange(MockDnsTrace());
         Call(form, "RenderDnsBox");
         Pump(500);
@@ -121,6 +121,13 @@ static class Shots
         Get<CheckBox>(form, "_chkDebug").Checked = true;
         log.Clear();
         MockLog(log);
+        // Everything starts folded; open it all as a reader would, except one section, to show both
+        var opened = Get<HashSet<object>>(form, "_logOpen");
+        foreach (var line in log.Since(0).Where(l => l.Block != null))
+        {
+            opened.Add(line.Block!);
+            if (line.Section is { } section && section != "Kerberos & Time Sync") opened.Add((line.Block!, section));
+        }
         Call(form, "RenderLog");
         Pump(500);
         Capture(form, outDir, "log.png");
@@ -161,7 +168,7 @@ static class Shots
         log.Info("log", "Debug logging on: commands, timings and raw tool output are recorded");
 
         // A full run: its sections ran side by side, so their lines arrived interleaved
-        var run = new LogBlock($"Run {now.AddSeconds(-40):HH:mm:ss}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 1 warning · 1 note" };
+        var run = new LogBlock($"Run {now.AddSeconds(-40):T}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 1 warning · 1 note" };
         run.SectionNotes[dcd] = "9 checks · 1 note";
         run.SectionNotes[krb] = "3 checks";
         run.SectionNotes[reg] = "7 checks · 1 warning";
@@ -188,7 +195,7 @@ static class Shots
         log.Info("run", "Complete: 32 passed, 0 failed, 1 warning, 1 note");
 
         // One section run again on its own
-        var single = new LogBlock($"Group Policy {now.AddSeconds(-12):HH:mm:ss}", "contoso.com · DC01.contoso.com · run on its own") { Totals = "3 passed · 0 failed · 0 warnings" };
+        var single = new LogBlock($"Group Policy {now.AddSeconds(-12):T}", "contoso.com · DC01.contoso.com · run on its own") { Totals = "3 passed · 0 failed · 0 warnings" };
         single.SectionNotes["Group Policy"] = "3 checks";
         DiagLog.Block = single;
         log.Info("run", "Started Group Policy: domain contoso.com, DC DC01.contoso.com");

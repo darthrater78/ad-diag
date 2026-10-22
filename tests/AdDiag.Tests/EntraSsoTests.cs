@@ -97,7 +97,7 @@ public class EntraSsoTests
     {
         var group = Run(Hybrid());
 
-        Assert.Equal("Entra Single Sign-On", group.Name);
+        Assert.Equal("Entra Seamless Single Sign-On", group.Name);
         Assert.Equal(["Join Type", "Device Auth", "Primary Refresh Token", "Seamless SSO Ticket", "Intranet Zone",
             "Automatic Logon", "Status Bar Scripts", "Entra Endpoints"], group.Tests.Select(t => t.Name));
         Assert.All(group.Tests, t => Assert.Equal(Status.Pass, t.Status));
