@@ -168,7 +168,7 @@ public class EntraSsoTests
         var zone = Entry(group, "Intranet Zone");
         Assert.Equal(Status.Warn, zone.Status);
         Assert.Contains("in the Internet zone", zone.Detail);
-        Assert.Contains("only browsers and apps that can't use it", zone.Detail);
+        Assert.Contains("it matters only where the token can't be used", zone.Detail);
         Assert.Equal(Status.Warn, Entry(group, "Seamless SSO Ticket").Status);
         Assert.DoesNotContain(group.Tests, t => t.Status == Status.Fail);
         Assert.Equal(new Readiness(Status.Warn,

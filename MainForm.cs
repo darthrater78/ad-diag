@@ -335,7 +335,7 @@ class MainForm : Form
         _btnGpUpdate = new ThemedButton { Text = "Run gpupdate", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28) };
         _btnGpUpdate.Click += BtnGpUpdate_Click;
         _chkGpForce = new CheckBox { Text = "Force", ForeColor = WarnColor, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true, FlatStyle = FlatStyle.Flat };
-        var gpBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        var gpBtnPanel = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
         _btnGpRefresh.Location = new Point(10, 3);
         _btnGpUpdate.Location = new Point(100, 3);
         _chkGpForce.Location = new Point(216, 8);
@@ -362,7 +362,7 @@ class MainForm : Form
         ticketsRefreshBtn.Click += (s, e) => RefreshTickets();
         var ticketsInfoBtn = new ThemedButton { Text = "What is this?", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28) };
         ticketsInfoBtn.Click += (s, e) => { if (_showingExplainer) { _showingExplainer = false; RefreshTickets(); } else ShowTicketsExplainer(); };
-        var ticketsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        var ticketsBtnPanel = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
         _btnPurgeTickets.Location = new Point(10, 3);
         ticketsRefreshBtn.Location = new Point(158, 3);
         ticketsInfoBtn.Location = new Point(246, 3);
@@ -1420,7 +1420,7 @@ class MainForm : Form
         var ztna = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(334, 5), Size = new Size(290, 24), AccessibleName = "ZTNA adapter" };
         ztna.DropDown += (s, e) => RefreshZtnaChoices();
         ztna.SelectedIndexChanged += CmbZtna_SelectedIndexChanged;
-        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
         buttons.Controls.AddRange([register, check, lblZtna, ztna]);
         // The picker takes the room the window gives it, up to where a longer line stops being easier to read
         buttons.Resize += (s, e) =>
@@ -1482,11 +1482,17 @@ class MainForm : Form
                 + "  ('ipconfig /registerdns'), then traces what happens: the record on the zone's primary server before and\n"
                 + "  after, and any failure the DNS Client logs. It changes records in DNS and requires Run as Administrator.\n\n"
                 + "  Check again repeats the read-only Dynamic DNS registration checks from the Results tab. It sends nothing.\n", DimColor);
-            return;
         }
-        AppendRun(_dnsBox, $"\n  {_dnsHeading}\n\n", TextColor, GpBoldFont);
-        foreach (var step in _dnsSteps)
-            AppendDnsStep(step);
+        else
+        {
+            AppendRun(_dnsBox, $"\n  {_dnsHeading}\n\n", TextColor, GpBoldFont);
+            foreach (var step in _dnsSteps)
+                AppendDnsStep(step);
+        }
+        // Filled while the tab is hidden the box is a few pixels tall, so Windows scrolls it to the end and keeps
+        // it there once the tab opens; start from the top
+        _dnsBox.SelectionStart = 0;
+        _dnsBox.ScrollToCaret();
     }
 
     /// <summary>An entry in the ZTNA adapter picker; <see cref="Tag"/> is what <see cref="DiagConfig.ZtnaAdapter"/> takes.</summary>
@@ -1645,7 +1651,7 @@ class MainForm : Form
         _btnLogSections.Click += (s, e) => SetLogView(bySection: true);
         _btnLogByTime.Click += (s, e) => SetLogView(bySection: false);
         StyleLogViewButtons();
-        var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
+        var buttons = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
         buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog, _btnLogSections, _btnLogByTime]);
         buttons.Resize += (s, e) =>
         {
@@ -1952,7 +1958,6 @@ class MainForm : Form
         int left = S(GridLeft), right = width - S(GridLeft);
         if (g != null)
         {
-            _paintFocus = _resultsCanvas.FocusedItem; // read before the rows it points into are rebuilt
             _resultsCanvas.Rows.Clear();
             _resultsCanvas.Headings.Clear();
         }
@@ -1975,14 +1980,15 @@ class MainForm : Form
         return y + S(14);
     }
 
-    ResultsCanvas.Row? _paintFocus; // the heading or button with the keyboard focus, as the results are painted
+    const int NoteColumn = 240; // room for the longest counts, "8 checks · 1 failed · 1 warning · run at 16:39:24"
+    const int RunSlot = 88;     // room for the widest run button, "Run again"
+    static readonly Font BadgeFont = new("Segoe UI", 7.5f, FontStyle.Bold);
+    static readonly Font RunTextFont = new("Segoe UI", 8.5f, FontStyle.Bold);
 
-    static readonly Font RunButtonFont = new("Segoe UI", 8.5f);
-
-    // A group's heading: chevron, name and counts, with a slot at the right edge for its Run button. The button shows
-    // on the heading under the mouse or the keyboard focus, and always on a group that hasn't run, but never while
-    // a run is going. Left of the slot the heading is a button that opens and closes the group; one that hasn't run
-    // has nothing to open, so there it is plain text
+    // A group's heading: chevron and name, the group's verdict as a pill, its counts, and at the right edge a button
+    // that runs the group on its own. The button stays in place while a run is going, faded and inactive. Left of it
+    // the heading is a button that opens and closes the group; one that hasn't run has nothing to open, so there it
+    // is plain text
     int LayoutHeading(Graphics? g, TestGroup group, bool open, bool notRun, int y, int left, int right)
     {
         const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
@@ -1990,58 +1996,95 @@ class MainForm : Form
         if (g != null)
         {
             var band = new Rectangle(left - S(4), y - S(2), right - left + S(8), S(28));
-            bool hovered = _resultsCanvas.HoverGroup == group.Name;
-            bool focused = _paintFocus is { } f && f.Group == group.Name && f.Kind is ResultsCanvas.Kind.Heading or ResultsCanvas.Kind.RunLink;
-            if (hovered)
-            {
-                using var hover = new SolidBrush(Blend(PanelColor, TextColor, 0.04));
-                g.FillRectangle(hover, band);
-            }
-
-            var button = RunButtonBounds(g, right, y);
+            var button = RunButtonBounds(g, right, y, notRun);
             string note = HeadingNote(group);
-            int noteW = TextRenderer.MeasureText(g, note, GroupCountFont, Size.Empty, oneLine).Width;
-            TextRenderer.DrawText(g, note, GroupCountFont, new Point(button.Left - S(12) - noteW, y + S(5)), DimColor, oneLine);
+            // The counts start at a fixed column and the verdict sits just left of it, so both line up down the list
+            int noteX = right - S(RunSlot) - S(10) - S(NoteColumn);
+            TextRenderer.DrawText(g, note, GroupCountFont, new Point(noteX, y + S(5)), DimColor, oneLine);
+            if (!notRun && GroupVerdict(group) is { } verdict) DrawGroupBadge(g, verdict, noteX - S(12), y);
             if (!notRun) DrawChevron(g, left, y + S(8), open);
             TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), notRun ? DimColor : TextColor, oneLine);
 
-            var bounds = new Rectangle(left - S(4), y, button.Left - S(8) - (left - S(4)), S(24));
+            var bounds = new Rectangle(left - S(4), y, right - S(RunSlot) - S(8) - (left - S(4)), S(24));
             _resultsCanvas.Rows.Add(notRun
                 ? new(group.Name, group.Name, "Not run", "", bounds)
                 : new(group.Name, group.Name, "", note, bounds, ResultsCanvas.Kind.Heading, open));
             _resultsCanvas.Headings.Add((group.Name, band));
+            bool hover = !_running && _resultsCanvas.HoverGroup == group.Name && _resultsCanvas.HoverButton;
+            DrawRunButton(g, button, notRun, hover);
             if (!_running)
-            {
-                if (notRun || hovered || focused)
-                    DrawRunButton(g, button, hovered && _resultsCanvas.HoverButton);
                 _resultsCanvas.Rows.Add(new(group.Name, notRun ? $"Run {group.Name}" : $"Run {group.Name} again", "", "",
                     button, ResultsCanvas.Kind.RunLink));
-            }
         }
         return y + S(26);
     }
 
-    Rectangle RunButtonBounds(Graphics g, int right, int y)
+    // The group's worst result once every check has finished, the readiness line included; null while it runs
+    static Status? GroupVerdict(TestGroup group)
     {
-        int textW = TextRenderer.MeasureText(g, "Run", RunButtonFont, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
-        int w = S(9) + S(7) + S(6) + textW + S(10);
-        return new Rectangle(right - w, y + S(1), w, S(22));
+        if (group.Tests.Count == 0 || group.Tests.Any(IsPending)) return null;
+        var all = group.Tests.Select(t => t.Status).Append(group.Readiness?.Status ?? Status.Pass).ToList();
+        return all.Contains(Status.Fail) ? Status.Fail : all.Contains(Status.Warn) ? Status.Warn : Status.Pass;
     }
 
-    // A small button: surface fill and border like the app's buttons, a play mark in primary, "Run" in text colour
-    void DrawRunButton(Graphics g, Rectangle r, bool hover)
+    // The verdict as a pill ending at right: PASSED, WARNING or FAILED in the status colour on a tint of it, all the
+    // same width so they line up
+    void DrawGroupBadge(Graphics g, Status verdict, int right, int y)
     {
-        using (var path = ThemedButton.RoundedRect(r, S(4)))
-        {
-            using var fill = new SolidBrush(hover ? Blend(SurfaceColor, TextColor, 0.07) : SurfaceColor);
-            g.FillPath(fill, path);
-            g.DrawPath(BorderPen, path);
-        }
-        int x = r.X + S(9), mid = r.Y + r.Height / 2;
-        using (var mark = new SolidBrush(AccentColor))
-            g.FillPolygon(mark, new Point[] { new(x, mid - S(4)), new(x + S(7), mid), new(x, mid + S(4)) });
-        TextRenderer.DrawText(g, "Run", RunButtonFont, new Rectangle(x + S(13), r.Y, r.Right - x - S(13), r.Height), TextColor,
+        var (word, color) = StatusLook(new TestEntry("", verdict, "-"));
+        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+        int w = TextRenderer.MeasureText(g, "WARNING", BadgeFont, Size.Empty, flags).Width + S(16);
+        var pill = new Rectangle(right - w, y + S(4), w, S(16));
+        FillRounded(g, pill, S(8), Blend(PanelColor, color, 0.16));
+        TextRenderer.DrawText(g, word.ToUpperInvariant(), BadgeFont, pill, color,
+            flags | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    // "Run again", or "Run" on a group that hasn't run, after a bolt, right-aligned in the run slot
+    Rectangle RunButtonBounds(Graphics g, int right, int y, bool notRun)
+    {
+        int textW = TextRenderer.MeasureText(g, notRun ? "Run" : "Run again", RunTextFont, Size.Empty,
+            TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
+        int w = S(10) + S(16) + textW + S(10);
+        return new Rectangle(right - w, y + S(3), w, S(19));
+    }
+
+    // A capsule like the verdict pills, in primary: a tint behind a bolt and the words, deeper under the mouse and
+    // faded during a run
+    void DrawRunButton(Graphics g, Rectangle r, bool notRun, bool hover)
+    {
+        double strength = _running ? 0.4 : 1.0;
+        FillRounded(g, r, S(9), Blend(PanelColor, AccentColor, (hover ? 0.24 : 0.12) * strength));
+        var color = Blend(PanelColor, AccentColor, strength);
+        DrawBolt(g, color, r.X + S(15), r.Y + r.Height / 2f);
+        int textX = r.X + S(26);
+        TextRenderer.DrawText(g, notRun ? "Run" : "Run again", RunTextFont, new Rectangle(textX, r.Y, r.Right - textX, r.Height), color,
             TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+    }
+
+    // A lightning bolt 12px tall, centred on (cx, cy)
+    void DrawBolt(Graphics g, Color color, float cx, float cy)
+    {
+        float u = DeviceDpi / 96f;
+        var smooth = g.SmoothingMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var brush = new SolidBrush(color))
+            g.FillPolygon(brush, new PointF[]
+            {
+                new(cx + 1.5f * u, cy - 6 * u), new(cx - 3.5f * u, cy + 1 * u), new(cx - 0.2f * u, cy + 1 * u),
+                new(cx - 1.5f * u, cy + 6 * u), new(cx + 3.5f * u, cy - 1 * u), new(cx + 0.2f * u, cy - 1 * u),
+            });
+        g.SmoothingMode = smooth;
+    }
+
+    static void FillRounded(Graphics g, Rectangle r, int radius, Color color)
+    {
+        var smooth = g.SmoothingMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var path = ThemedButton.RoundedRect(r, radius))
+        using (var fill = new SolidBrush(color))
+            g.FillPath(fill, path);
+        g.SmoothingMode = smooth;
     }
 
     // One check: mark and word, name, and the detail wrapped in its column
@@ -2115,12 +2158,10 @@ class MainForm : Form
             ControlPaint.DrawFocusRectangle(g, focused.Bounds, TextColor, PanelColor);
     }
 
-    static bool HasIssues(TestGroup group) => group.Tests.Any(t => t.Status is Status.Fail or Status.Warn);
-
-    // A group the user opened or closed stays that way; otherwise only groups with a failure or warning are open,
-    // or all of them with "Expand all groups after a run"
+    // A group the user opened or closed stays that way; otherwise groups start closed, their heading carrying the
+    // verdict, or all open with "Expand all groups after a run"
     bool IsGroupOpen(TestGroup group) =>
-        SelectedRun is { } run && run.Open.TryGetValue(group.Name, out bool open) ? open : _expandAll || HasIssues(group);
+        SelectedRun is { } run && run.Open.TryGetValue(group.Name, out bool open) ? open : _expandAll;
 
     void RerenderResults()
     {
@@ -2181,6 +2222,7 @@ class MainForm : Form
         public readonly List<(string Group, Rectangle Band)> Headings = []; // each heading's full width, for hover
         public string? HoverGroup { get; private set; }  // the group whose heading is under the mouse
         public bool HoverButton { get; private set; }    // the mouse is over that heading's Run button
+        readonly ToolTip _tip = new();                   // names the Run button under the mouse
         int _focus = -1; // index into Rows of the heading or link with the keyboard focus
 
         public event Action<Row>? Activated;
@@ -2223,6 +2265,7 @@ class MainForm : Form
             bool onButton = i >= 0 && Rows[i].Kind == Kind.RunLink;
             if (group != HoverGroup || onButton != HoverButton)
             {
+                if (onButton != HoverButton) _tip.SetToolTip(this, onButton ? Rows[i].Name : null);
                 (HoverGroup, HoverButton) = (group, onButton);
                 Invalidate();
             }
@@ -2232,6 +2275,7 @@ class MainForm : Form
         {
             base.OnMouseLeave(e);
             if (HoverGroup == null) return;
+            if (HoverButton) _tip.SetToolTip(this, null);
             (HoverGroup, HoverButton) = (null, false);
             Invalidate();
         }

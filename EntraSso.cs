@@ -92,7 +92,7 @@ static partial class Diagnostics
 
     // A Seamless SSO failure on a PC that signs in with its PRT breaks only the fallback, so it warns
     static TestEntry AsFallback(TestEntry test) => test.Status == Status.Fail
-        ? test with { Status = Status.Warn, Detail = test.Detail + "; this PC signs in with its Primary Refresh Token, so only browsers and apps that can't use it are affected" }
+        ? test with { Status = Status.Warn, Detail = test.Detail + "; this PC signs in with its Primary Refresh Token, so it matters only where the token can't be used" }
         : test;
 
     // How the PC is joined, which decides what else is checked; null when dsregcmd reported no join state
@@ -185,7 +185,7 @@ static partial class Diagnostics
         if (sec.Zone != IntranetZone)
             return [
                 new(SsoZone, Status.Fail,
-                    $"{SsoUrl} is in the {ZoneName(sec.Zone)} zone, so browsers send it no Kerberos ticket and Seamless SSO never starts"),
+                    $"{SsoUrl} is in the {ZoneName(sec.Zone)} zone, not Local intranet: browsers and apps that follow the Windows zones won't send it a Kerberos ticket, so Seamless SSO can't sign them in"),
                 new(SsoLogon, Status.Skip, "Depends on the Intranet Zone check"),
                 new(SsoStatusBar, Status.Skip, "Depends on the Intranet Zone check"),
             ];

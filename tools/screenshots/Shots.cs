@@ -50,14 +50,20 @@ static class Shots
     {
         Pump(800);
         Populate(form);
-        // Groups with no issue start collapsed, so the window only needs the height of the open ones
+        // Tall enough for the two groups opened below
         form.Height = 1120;
         Pump(800);
-        // The Run button shows on the heading under the mouse, so put the pointer on one
+        // Groups start closed; open two as a user would, to show their checks
+        var shown = (DiagRun)form.GetType().GetProperty("SelectedRun", F)!.GetValue(form)!;
+        shown.Open["DC Discovery & Connectivity"] = true;
+        shown.Open[Diagnostics.EntraSsoGroup] = true;
+        Call(form, "RerenderResults");
+        Pump(300);
+        // Put the pointer on one heading's run button to show its hover state
         var canvas = Get<Control>(form, "_resultsCanvas");
         var headings = (List<(string Group, Rectangle Band)>)canvas.GetType().GetField("Headings")!.GetValue(canvas)!;
         var band = headings.Find(h => h.Group == "DC Discovery & Connectivity").Band;
-        Cursor.Position = canvas.PointToScreen(new Point(band.Left + band.Width / 2, band.Top + band.Height / 2));
+        Cursor.Position = canvas.PointToScreen(new Point(band.Right - 16, band.Top + 14));
         Pump(300);
         Capture(form, outDir, "results.png");
         form.Height = 900;
@@ -311,7 +317,7 @@ static class Shots
                 new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
                 new("Primary Refresh Token", Status.Warn, "AzureAdPrt: NO; browsers fall back to Seamless SSO"),
                 new("Seamless SSO Ticket", Status.Pass, "HTTP/autologon.microsoftazuread-sso.com obtained from CONTOSO.COM"),
-                new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, so browsers send it no Kerberos ticket and Seamless SSO never starts"),
+                new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, not Local intranet: browsers and apps that follow the Windows zones won't send it a Kerberos ticket, so Seamless SSO can't sign them in"),
                 new("Automatic Logon", Status.Skip, "Depends on the Intranet Zone check"),
                 new("Status Bar Scripts", Status.Skip, "Depends on the Intranet Zone check"),
                 new("Entra Endpoints", Status.Pass, "login.microsoftonline.com and autologon.microsoftazuread-sso.com reachable on port 443"),
