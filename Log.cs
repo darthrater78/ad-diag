@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -11,7 +12,28 @@ using System.Threading.Tasks;
 #nullable enable
 namespace AdDiag;
 
-record LogLine(long Seq, DateTime Time, bool Debug, string Source, string Message);
+/// <summary>
+/// A run or another action (a Group Policy query, a DNS registration) whose lines the log shows under one heading.
+/// Set <see cref="DiagLog.Block"/> to it at the start of an async method: every line logged by that method, and by
+/// the tasks and threads it starts, joins it.
+/// </summary>
+sealed class LogBlock(string title, string detail)
+{
+    public string Title { get; } = title;
+    public string Detail { get; } = detail;
+    /// <summary>The outcome once it is known, such as "32 passed · 0 failed · 3 warnings".</summary>
+    public string? Totals { get; set; }
+    /// <summary>Each section's counts once it has finished, by section name.</summary>
+    public ConcurrentDictionary<string, string> SectionNotes { get; } = new();
+}
+
+record LogLine(long Seq, DateTime Time, bool Debug, string Source, string Message, LogBlock? Block = null, string? Section = null);
+
+/// <summary>One row of the log as shown: a block's heading, a section's heading inside a block, or a line.</summary>
+abstract record LogItem;
+sealed record LogBlockHeading(LogBlock Block) : LogItem;
+sealed record LogSectionHeading(LogBlock Block, string Section) : LogItem;
+sealed record LogEntry(LogLine Line) : LogItem;
 
 /// <summary>
 /// The app's log: what it did and what came back. Held in memory only (the app writes nothing to disk unless the
@@ -31,6 +53,21 @@ sealed class DiagLog(Func<DateTime>? clock = null)
     volatile bool _debug;
 
     public bool DebugEnabled { get => _debug; set => _debug = value; }
+
+    static readonly AsyncLocal<LogBlock?> CurrentBlock = new();
+    static readonly AsyncLocal<string?> CurrentSection = new();
+
+    /// <summary>The block that lines logged from here join; it flows into the tasks and threads started from here.</summary>
+    public static LogBlock? Block { get => CurrentBlock.Value; set => CurrentBlock.Value = value; }
+
+    /// <summary>The results section that lines logged from here belong to, within <see cref="Block"/>.</summary>
+    public static string? Section { get => CurrentSection.Value; set => CurrentSection.Value = value; }
+
+    /// <summary>The number of the last line added: changes whenever a line is.</summary>
+    public long LastSeq
+    {
+        get { lock (_lines) return _seq; }
+    }
 
     public void Info(string source, string message) => Add(false, source, message);
 
@@ -52,7 +89,7 @@ sealed class DiagLog(Func<DateTime>? clock = null)
             message = message[..MaxMessageChars] + $"\n... ({message.Length - MaxMessageChars} more characters not logged)";
         lock (_lines)
         {
-            _lines.Enqueue(new(++_seq, _clock(), debug, source, message));
+            _lines.Enqueue(new(++_seq, _clock(), debug, source, message, Block, Section));
             while (_lines.Count > MaxLines) _lines.Dequeue();
         }
     }
@@ -75,21 +112,120 @@ sealed class DiagLog(Func<DateTime>? clock = null)
         }
     }
 
-    /// <summary>"14:02:03.118  dns     " — the fixed-width start of a line; continuation lines are indented to match.</summary>
-    public static string Prefix(LogLine line) => $"{line.Time:HH:mm:ss.fff}  {line.Source,-7} ";
+    public const int SectionColumn = 17;
 
-    public static string Body(LogLine line)
+    /// <summary>
+    /// "14:02:03.118  dns     " — the fixed-width start of a line, followed in the By time view by its section's
+    /// short name in a column of its own; continuation lines are indented to match.
+    /// </summary>
+    public static string Prefix(LogLine line, string? section = null) =>
+        $"{line.Time:HH:mm:ss.fff}  {line.Source,-7} " + (section == null ? "" : Fit(section, SectionColumn - 1).PadRight(SectionColumn));
+
+    static string Fit(string text, int width) => text.Length <= width ? text : text[..(width - 1)] + "…";
+
+    public static string Body(LogLine line, int prefixLength)
     {
         string text = (line.Debug ? "DEBUG " : "") + line.Message;
-        return text.Replace("\n", "\n" + new string(' ', Prefix(line).Length + (line.Debug ? 6 : 0)));
+        return text.Replace("\n", "\n" + new string(' ', prefixLength + (line.Debug ? 6 : 0)));
     }
 
-    /// <summary>The whole log as plain text: what Save log writes and Copy log puts on the clipboard.</summary>
+    public static string Body(LogLine line) => Body(line, Prefix(line).Length);
+
+    /// <summary>
+    /// The lines in the order they show. By section: a block's lines go under its heading where the block first
+    /// appears, its own lines first, then each section's under a heading of its own, in <paramref name="sectionOrder"/>
+    /// (others after, as they first appear), and its own lines from after its sections began below them; lines outside
+    /// any block stay where they fall. By time: every line in
+    /// order, with a block's heading before its first line and again where its lines resume after another block's.
+    /// </summary>
+    public static List<LogItem> Arrange(IReadOnlyList<LogLine> lines, bool bySection, IReadOnlyList<string> sectionOrder)
+    {
+        var items = new List<LogItem>();
+        if (!bySection)
+        {
+            LogBlock? current = null;
+            foreach (var line in lines)
+            {
+                if (line.Block != null && line.Block != current)
+                {
+                    items.Add(new LogBlockHeading(line.Block));
+                    current = line.Block;
+                }
+                items.Add(new LogEntry(line));
+            }
+            return items;
+        }
+
+        int Rank(string section)
+        {
+            int i = sectionOrder.ToList().IndexOf(section);
+            return i < 0 ? int.MaxValue : i;
+        }
+        var seen = new HashSet<LogBlock>();
+        foreach (var line in lines)
+        {
+            if (line.Block is not { } block)
+            {
+                items.Add(new LogEntry(line));
+                continue;
+            }
+            if (!seen.Add(block)) continue;
+            var mine = lines.Where(l => l.Block == block).ToList();
+            items.Add(new LogBlockHeading(block));
+            // The block's own lines from before its sections began (such as "Started") go above them, the rest below
+            long sectionsStart = mine.FirstOrDefault(l => l.Section != null)?.Seq ?? long.MaxValue;
+            items.AddRange(mine.Where(l => l.Section == null && l.Seq < sectionsStart).Select(l => new LogEntry(l)));
+            var sections = mine.Select(l => l.Section).OfType<string>().Distinct()
+                .Select((section, first) => (section, first)).OrderBy(p => Rank(p.section)).ThenBy(p => p.first);
+            foreach (var (section, _) in sections)
+            {
+                items.Add(new LogSectionHeading(block, section));
+                items.AddRange(mine.Where(l => l.Section == section).Select(l => new LogEntry(l)));
+            }
+            items.AddRange(mine.Where(l => l.Section == null && l.Seq > sectionsStart).Select(l => new LogEntry(l)));
+        }
+        return items;
+    }
+
+    /// <summary>The whole log as plain text, one line after another: the order lines were added in.</summary>
     public string Text()
     {
         var sb = new StringBuilder();
         foreach (var line in Since(0))
             sb.Append(Prefix(line)).AppendLine(Body(line));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The whole log as plain text in the view on screen: what Save log writes and Copy log puts on the clipboard.
+    /// <paramref name="sections"/> gives the results sections in order, each with the short name By time shows.
+    /// </summary>
+    public string Text(bool bySection, IReadOnlyList<(string Name, string Short)> sections)
+    {
+        var shortNames = sections.ToDictionary(s => s.Name, s => s.Short);
+        var rule = new string('=', 72);
+        var sb = new StringBuilder();
+        foreach (var item in Arrange(Since(0), bySection, sections.Select(s => s.Name).ToList()))
+        {
+            switch (item)
+            {
+                case LogBlockHeading { Block: var block }:
+                    if (sb.Length > 0) sb.AppendLine();
+                    sb.AppendLine(rule).AppendLine($"{block.Title}  {block.Detail}");
+                    if (block.Totals != null) sb.AppendLine(block.Totals);
+                    sb.AppendLine(rule);
+                    break;
+                case LogSectionHeading { Block: var block, Section: var section }:
+                    string note = block.SectionNotes.TryGetValue(section, out var n) ? $" ({n})" : "";
+                    sb.AppendLine().AppendLine($"--- {section}{note} ".PadRight(rule.Length, '-'));
+                    break;
+                case LogEntry { Line: var line }:
+                    string? column = bySection ? null : line.Section == null ? "" : shortNames.GetValueOrDefault(line.Section, line.Section);
+                    string prefix = Prefix(line, column);
+                    sb.Append(prefix).AppendLine(Body(line, prefix.Length));
+                    break;
+            }
+        }
         return sb.ToString();
     }
 }

@@ -36,7 +36,10 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
 2. The app auto-detects the current domain on startup (from `USERDNSDOMAIN`, `dsregcmd /status`, or the machine's DNS domain suffix) and pre-fills the **Domain** field if this machine is domain-joined. Enter target details:
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
-3. Click **Run Diagnostics** — results stream in as each test group completes
+3. Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or point at its heading in Results and click the **Run** button that appears there (it is always shown on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
+
+   ![The Run button's menu over a run started from one group, the others not run yet](docs/screenshots/run-menu.png)
+
 4. Review results. Groups with a failure or warning open; the rest are collapsed to their heading and counts. Click a heading (or use Up, Down and Enter or Space) to open or close it, **Expand all** / **Collapse all** for every group, or tick **Expand all groups after a run** to open them all by default (not saved). Switch to the **Guide** tab for explanations and fix suggestions, the **Group Policy** tab for a full Computer/User scope breakdown and an in-app **gpupdate**, the **Kerberos Tickets** tab for your full ticket cache, the **DNS registration** tab to register this computer in DNS and trace the result, or the **Log** tab to see what the app ran
 
 Up to 5 diagnostic runs are stored with timestamps — click any run to review it, or **Delete Run** to remove it.
@@ -223,9 +226,9 @@ Every step is also written to the log.
 
 ![Log tab with Debug on](docs/screenshots/log.png)
 
-What the app did and what came back, newest at the bottom. Without **Debug** it records each run, every result, the DNS registration steps and any tool or query that failed. With **Debug** ticked it also records each command, DNS query (with the server it was sent to) and port check with its duration and raw output, and the Windows error number behind a failure. A script that runs again unchanged is logged once, and connected adapters that hold no address share one line. Debug is off at every start.
+What the app did and what came back. **Sections** (the default) groups it by run: each run, single-section run, Group Policy query, gpupdate, ticket refresh or DNS registration starts with a heading carrying its time, what it covered and its totals, and inside a run each results section has a heading of its own, so a section's commands, raw output and results read together even though the sections run side by side. **By time** shows the same lines in the order they happened, with each line's section named in a column. Without **Debug** it records each run, every result, the DNS registration steps and any tool or query that failed. With **Debug** ticked it also records each command, DNS query (with the server it was sent to) and port check with its duration and raw output, and the Windows error number behind a failure. A script that runs again unchanged is logged once, and connected adapters that hold no address share one line. Debug is off at every start.
 
-- **Copy log** / **Save log** — the whole log as text, to the clipboard or to a file you choose
+- **Copy log** / **Save log** — the whole log as text in the view on screen, to the clipboard or to a file you choose
 - **Clear log** — empties it
 
 ## Architecture

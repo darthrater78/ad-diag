@@ -175,17 +175,20 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 ## Components
 
 - **Button** (`ThemedButton`): surface fill, text colour label. Hover blends 7% toward text, pressed 14%, disabled fades toward the window. Focus draws the border in primary.
-- **Primary button:** one per screen (Run diagnostics); it is also the Enter-key default.
+- **Primary button:** one per screen (Run diagnostics); it is also the Enter-key default. It is the left half of a split button: the right half is 26px, primary, with a white down chevron and a thin divider in a blend of the label colour, and opens its menu: "Run all sections", a rule, then each group by name. Only the pair's outer corners are rounded.
+- **Segmented control** (Log view: Sections | By time): two buttons joined like the split button; the chosen one is primary with on-primary text, the other a normal surface button.
+- **Menu:** surface fill, 1px border, body text; the hovered item takes a 20% blend toward primary. No icons or image margin.
 - **Danger button:** a normal button with the label in fail colour (Reset all, Delete run).
 - **Tab:** bare text, dim when idle; the selected tab is bold with a 3px primary underline.
 - **Result row:** mark and word in status colour; name and detail in text colour.
-- **Group heading** (Results): a 8px text-dim chevron (right when closed, down when open), the bold group name, the counts at the right edge. The whole heading is the button; no hand cursor. Up and Down move between headings, Enter or Space toggles; the focused one draws a focus rectangle.
+- **Group heading** (Results): a 8px text-dim chevron (right when closed, down when open), the bold group name, the counts, and at the right edge a slot for a small **Run button** (a 22px surface button with a border, a primary play mark and "Run"), which runs that group alone. The button shows only on the heading under the mouse (which also takes a 4% tint across the full width) or the keyboard focus, and always on a group that hasn't run; never while a run is going. The slot is kept when the button is hidden, so the counts don't move. Left of the slot the heading is the button that opens and closes the group; no hand cursor anywhere on it. A group run on its own adds " · run at HH:mm:ss" to its counts. A group that hasn't run shows its name in text-dim, no chevron, "Not run" for counts, and isn't a button. Up and Down move between headings and Run buttons, Enter or Space acts; the focused one draws a focus rectangle.
 - **Readiness row:** a result row whose name is "Readiness" in bold and whose detail is the group's verdict in body text. When the verdict asks for action, a link in primary, underlined, follows it ("See the fixes in the Guide") and opens the Guide tab with that group's section at the top.
 - **Results bar:** above the results, on the panel: the "Expand all groups after a run" checkbox in text-dim on the left, "Expand all" and "Collapse all" links in primary on the right. Shown only when there are results.
 - **Ticket badge:** filled label in the Kerberos tickets pane; text uses on-primary.
 - **Trace row** (DNS registration pane): the result row's three columns in a text pane, with the same mark shapes as characters (● ▲ ✕ –); a long detail wraps under the detail column.
 - **Picker** (ZTNA adapter): a flat drop-down list on surface with a text-dim label to its left, in the action bar after the buttons. Its list is as wide as its longest entry.
-- **Log line:** monospace, since every line is a system value. Time and source in text-dim, message in text, debug lines wholly in text-dim.
+- **Log line:** monospace, since every line is a system value. Time and source in text-dim, message in text, debug lines wholly in text-dim. By time adds the line's section, by short name, in a text-dim column after the source.
+- **Log headings:** a run or another action (a Group Policy query, gpupdate, klist, a DNS registration) opens with its name and time in bold primary, then what it covered and its totals in text-dim. In the Sections view each results section inside it gets a bold heading in text with its counts in text-dim, indented 8px, and its lines indented 20px beneath; the run's own lines sit at 8px, "Started" above the sections and "Complete" below. A small gap goes before every heading. By time keeps one timeline and repeats a run's heading only where its lines resume after another's.
 
 ## Do's and Don'ts
 

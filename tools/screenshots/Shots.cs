@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
@@ -52,6 +53,12 @@ static class Shots
         // Groups with no issue start collapsed, so the window only needs the height of the open ones
         form.Height = 1120;
         Pump(800);
+        // The Run button shows on the heading under the mouse, so put the pointer on one
+        var canvas = Get<Control>(form, "_resultsCanvas");
+        var headings = (List<(string Group, Rectangle Band)>)canvas.GetType().GetField("Headings")!.GetValue(canvas)!;
+        var band = headings.Find(h => h.Group == "DC Discovery & Connectivity").Band;
+        Cursor.Position = canvas.PointToScreen(new Point(band.Left + band.Width / 2, band.Top + band.Height / 2));
+        Pump(300);
         Capture(form, outDir, "results.png");
         form.Height = 900;
         Pump(500);
@@ -111,6 +118,20 @@ static class Shots
         Call(form, "RenderLog");
         Pump(500);
         Capture(form, outDir, "log.png");
+
+        // Last, since the menu stays open: a run started from one section, and the Run button's drop-down
+        var history = Get<List<DiagRun>>(form, "_runHistory");
+        var single = new DiagRun(DateTime.Now, "contoso.com", "DC01.contoso.com", MockResults(DateTime.Now, clockWarn: true));
+        single.NotRun.UnionWith(single.Results.Select(g => g.Name).Where(n => n != "Kerberos & Time Sync"));
+        history.Insert(0, single);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "SwitchTab", "results");
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Call(form, "ShowRunMenu");
+        Pump(500);
+        Capture(form, outDir, "run-menu.png");
     }
 
     // A laptop at home behind a ZTNA client, whose record in DNS still holds its office address
@@ -129,22 +150,48 @@ static class Shots
 
     static void MockLog(DiagLog log)
     {
+        const string dcd = "DC Discovery & Connectivity", krb = "Kerberos & Time Sync", reg = "Dynamic DNS Registration";
+        var now = DateTime.Now;
         log.Info("log", "Debug logging on: commands, timings and raw tool output are recorded");
+
+        // A full run: its sections ran side by side, so their lines arrived interleaved
+        var run = new LogBlock($"Run {now.AddSeconds(-40):HH:mm:ss}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 3 warnings" };
+        run.SectionNotes[dcd] = "9 checks · 1 warning";
+        run.SectionNotes[krb] = "3 checks · 1 warning";
+        run.SectionNotes[reg] = "7 checks · 1 warning";
+        DiagLog.Block = run;
         log.Info("run", "Started: domain contoso.com, DC DC01.contoso.com");
+        DiagLog.Section = reg;
         log.Debug("machine", "Host name and primary DNS suffix (0 ms)\nPC042, suffix \"contoso.com\"");
-        log.Debug("machine", "Network adapters (3 ms)\nWi-Fi [Intel(R) Wi-Fi 6 AX201 160MHz]: addresses 192.168.1.50; DNS servers 100.64.0.2; registers in DNS: yes\n"
-            + "Ethernet 3 [Zscaler Network Adapter 1.0.2.0]: addresses 100.64.0.7; DNS servers 100.64.0.2; registers in DNS: no");
-        log.Debug("dns", "SOA PC042.contoso.com from 100.64.0.2 (41 ms)\nno record");
+        DiagLog.Section = dcd;
+        log.Debug("tool", "nltest /dsgetdc:contoso.com (1270 ms)\n           DC: \\\\DC01.contoso.com\n      Address: \\\\10.20.0.11\n Dc Site Name: HQ-Seattle\nThe command completed successfully");
+        DiagLog.Section = reg;
         log.Debug("dns", "SOA contoso.com from 100.64.0.2 (62 ms)\nzone contoso.com, primary server dc01.contoso.com");
-        log.Debug("tool", "nltest /dsgetdc:contoso.com (1270 ms)\n           DC: \\\\DC01.contoso.com\n      Address: \\\\10.20.0.11\n     Dom Guid: 6f1c2a54-9b1e-4a37-8f0d-2c5e7a903b11\n     Dom Name: contoso.com\n  Forest Name: contoso.com\n Dc Site Name: HQ-Seattle\nThe command completed successfully");
+        DiagLog.Section = dcd;
         log.Debug("tcp", "Connect 10.20.0.11 port 53: open (38 ms)");
         log.Debug("tcp", "Connect 10.20.0.11 port 636: no answer (3001 ms)");
+        DiagLog.Section = reg;
         log.Debug("dns", "A/AAAA PC042.contoso.com from 10.20.0.11 (57 ms)\n10.20.4.18");
-        log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
-        log.Info("result", "Warning  DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11)");
-        log.Info("result", "Passed   Dynamic DNS Registration / Zone Primary Server: contoso.com -> dc01.contoso.com (10.20.0.11), answered by 100.64.0.2 (DNS server of Wi-Fi)");
         log.Info("result", "Warning  Dynamic DNS Registration / Registered Record: dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale");
+        DiagLog.Section = krb;
+        log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
+        log.Info("result", "Warning  Kerberos & Time Sync / Clock Skew: could not be measured");
+        DiagLog.Section = dcd;
+        log.Info("result", "Warning  DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11)");
+        DiagLog.Section = null;
         log.Info("run", "Complete: 32 passed, 0 failed, 3 warnings");
+
+        // One section run again on its own
+        var single = new LogBlock($"Group Policy {now.AddSeconds(-12):HH:mm:ss}", "contoso.com · DC01.contoso.com · run on its own") { Totals = "3 passed · 0 failed · 0 warnings" };
+        single.SectionNotes["Group Policy"] = "3 checks";
+        DiagLog.Block = single;
+        log.Info("run", "Started Group Policy: domain contoso.com, DC DC01.contoso.com");
+        DiagLog.Section = "Group Policy";
+        log.Debug("tool", "RSoP query (840 ms)\n2 computer GPOs, 3 user GPOs");
+        log.Info("result", "Passed   Group Policy / GP Last Refresh: 1h 12m ago");
+        DiagLog.Section = null;
+        log.Info("run", "Complete Group Policy: 3 passed, 0 failed, 0 warnings");
+        DiagLog.Block = null;
     }
 
     static void FrontFill(Control fill)
@@ -180,7 +227,9 @@ static class Shots
         var now = DateTime.Now;
         history.Insert(0, new DiagRun(now.AddMinutes(-42), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
         history.Insert(0, new DiagRun(now.AddMinutes(-17), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
-        history.Insert(0, new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false)));
+        var latest = new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false));
+        latest.RanAt[Diagnostics.EntraSsoGroup] = now.AddSeconds(-4); // run again on its own
+        history.Insert(0, latest);
         Set(form, "_selectedRunIndex", 0);
         Call(form, "ShowSelectedRun");
         Call(form, "RebuildHistoryBar");
@@ -254,12 +303,13 @@ static class Shots
                 new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
                 new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
             ]),
-            // A hybrid joined PC whose Group Policy never put the Seamless SSO address in the intranet zone
+            // A hybrid joined PC without a PRT, so it signs in through Seamless SSO, whose address Group Policy never
+            // put in the intranet zone
             new(Diagnostics.EntraSsoGroup,
             [
                 new("Join Type", Status.Pass, "Microsoft Entra hybrid joined (DomainJoined: YES, AzureAdJoined: YES), tenant Contoso"),
                 new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
-                new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, refreshed {now.AddMinutes(-42):g} (42m ago)"),
+                new("Primary Refresh Token", Status.Warn, "AzureAdPrt: NO; browsers fall back to Seamless SSO"),
                 new("Seamless SSO Ticket", Status.Pass, "HTTP/autologon.microsoftazuread-sso.com obtained from CONTOSO.COM"),
                 new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, so browsers send it no Kerberos ticket and Seamless SSO never starts"),
                 new("Automatic Logon", Status.Skip, "Depends on the Intranet Zone check"),

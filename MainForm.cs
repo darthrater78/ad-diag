@@ -102,7 +102,7 @@ class MainForm : Form
 
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnExport, _btnCopy, _btnClear, _btnTheme;
+    readonly Button _btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, _btnTheme;
     readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
     readonly CheckBox _chkGpForce, _chkDebug;
@@ -122,6 +122,7 @@ class MainForm : Form
     readonly List<DiagRun> _runHistory = [];
     int _selectedRunIndex = -1;
     CancellationTokenSource? _runCts;
+    bool _running; // a full run or a single section is running; only one runs at a time
     // DNS registration tab: the trace on show, kept so a theme switch can write it again
     bool _dnsRunning, _fillingZtna;
     string? _ztnaAdapter; // the picker's choice (DiagConfig.ZtnaAdapter); never saved
@@ -129,6 +130,11 @@ class MainForm : Form
     readonly List<TestEntry> _dnsSteps = [];
     CancellationTokenSource? _dnsCts;
     long _logSeq; // the last log line written to the Log tab
+    bool _logBySection = true; // the Log tab's view: by run and section, or By time
+    bool _logStale;            // a heading's totals changed since the Log tab was written
+    DateTime _logRenderedAt;
+    LogBlock? _logLastBlock;   // By time: the block whose heading was written last
+    ThemedButton _btnLogSections = null!, _btnLogByTime = null!;
     readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 300 };
 
 
@@ -205,18 +211,21 @@ class MainForm : Form
         // Actions
         var actionsPanel = new Panel { Height = 36, Dock = DockStyle.Fill };
         actionsPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, actionsPanel.Height - 1, actionsPanel.Width, actionsPanel.Height - 1);
-        _btnRun = new ThemedButton { Text = "Run diagnostics", BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4) };
+        _btnRun = new ThemedButton { Text = "Run diagnostics", BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(130, 26), Location = new Point(10, 4), Split = SplitPart.Left };
         _btnRun.Click += BtnRun_Click;
-        _btnExport = new ThemedButton { Text = "Export results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(148, 4), Enabled = false };
+        // The Run button's drop-down: run all sections, or one
+        _btnRunMenu = new ThemedButton { DropArrow = true, Split = SplitPart.Right, BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Size = new Size(26, 26), Location = new Point(140, 4), AccessibleName = "Run one section", AccessibleRole = AccessibleRole.ButtonDropDown };
+        _btnRunMenu.Click += (s, e) => ShowRunMenu();
+        _btnExport = new ThemedButton { Text = "Export results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(110, 26), Location = new Point(174, 4), Enabled = false };
         _btnExport.Click += BtnExport_Click;
-        _btnCopy = new ThemedButton { Text = "Copy results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(266, 4), Enabled = false };
+        _btnCopy = new ThemedButton { Text = "Copy results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(292, 4), Enabled = false };
         _btnCopy.Click += BtnCopy_Click;
-        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(374, 4) };
+        _btnClear = new ThemedButton { Text = "Clear results", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 26), Location = new Point(400, 4) };
         _btnClear.Click += BtnClear_Click;
-        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(482, 4) };
+        var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(508, 4) };
         btnReset.Click += BtnReset_Click;
-        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(566, 4), Size = new Size(234, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-        actionsPanel.Controls.AddRange([_btnRun, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
+        _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(591, 4), Size = new Size(209, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+        actionsPanel.Controls.AddRange([_btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
         layout.Controls.Add(actionsPanel, 0, 2);
 
         // Summary bar
@@ -368,7 +377,7 @@ class MainForm : Form
 
         (_logPanel, _logBox, _chkDebug) = BuildLogTab();
         // The log is written from worker threads; the pane catches up on a timer, and only while it is on show
-        _logTimer.Tick += (s, e) => { if (_logPanel.Visible) FlushLog(); };
+        _logTimer.Tick += (s, e) => RefreshLog();
         _logTimer.Start();
 
         _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
@@ -554,12 +563,22 @@ class MainForm : Form
     /// a tab (<see cref="IsTab"/>), bare text with an accent underline when selected. Drawn here because a
     /// standard WinForms button can't follow the dark theme.
     /// </summary>
+    /// <summary>Which half of a two-part button a <see cref="ThemedButton"/> is: only its outer corners are rounded.</summary>
+    enum SplitPart { None, Left, Right }
+
     sealed class ThemedButton : Button
     {
         bool _hover, _pressed, _selected;
 
         [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool IsTab { get; init; }
+
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public SplitPart Split { get; init; }
+
+        /// <summary>Shows a down arrow instead of text: the button opens a drop-down.</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public bool DropArrow { get; init; }
 
         [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool Selected
@@ -606,27 +625,48 @@ class MainForm : Form
                 : _pressed ? Blend(BackColor, TextColor, 0.14)
                 : _hover ? Blend(BackColor, TextColor, 0.07)
                 : BackColor;
-            using (var path = RoundedRect(box, Px(4)))
+            using (var path = RoundedRect(box, Px(4), Split))
             {
                 using var brush = new SolidBrush(fill);
                 g.FillPath(brush, path);
+                // The right half of a filled pair is set off from the left by a thin line in its text colour
+                if (Split == SplitPart.Right && !plain)
+                {
+                    using var divider = new Pen(Blend(fill, ForeColor, 0.45));
+                    g.DrawLine(divider, 0, Px(5), 0, Height - Px(6));
+                }
                 if (plain || (Focused && ShowFocusCues))
                 {
                     using var pen = new Pen(Focused && ShowFocusCues ? AccentColor : BorderColor);
                     g.DrawPath(pen, path);
                 }
             }
-            TextRenderer.DrawText(g, Text, Font, box, Enabled ? ForeColor : Blend(DimColor, fill, 0.45), centered);
+            Color ink = Enabled ? ForeColor : Blend(DimColor, fill, 0.45);
+            if (DropArrow)
+            {
+                int d = Px(8), x = (Width - d) / 2, y = (Height - d / 2) / 2;
+                using var pen = new Pen(ink, Math.Max(1f, Px(3) / 2f));
+                g.DrawLines(pen, new Point[] { new(x, y), new(x + d / 2, y + d / 2), new(x + d, y) });
+            }
+            else
+                TextRenderer.DrawText(g, Text, Font, box, ink, centered);
         }
 
-        static GraphicsPath RoundedRect(Rectangle r, int radius)
+        public static GraphicsPath RoundedRect(Rectangle r, int radius, SplitPart split = SplitPart.None)
         {
             int d = radius * 2;
+            bool roundLeft = split != SplitPart.Right, roundRight = split != SplitPart.Left;
             var path = new GraphicsPath();
-            path.AddArc(r.X, r.Y, d, d, 180, 90);
-            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            if (roundLeft) path.AddArc(r.X, r.Y, d, d, 180, 90);
+            else path.AddLine(r.X, r.Y, r.X, r.Y);
+            if (roundRight)
+            {
+                path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+                path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            }
+            else path.AddLine(r.Right, r.Y, r.Right, r.Bottom);
+            if (roundLeft) path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            else path.AddLine(r.X, r.Bottom, r.X, r.Bottom);
             path.CloseFigure();
             return path;
         }
@@ -675,10 +715,10 @@ class MainForm : Form
 
     void BtnClear_Click(object? sender, EventArgs e)
     {
-        AppLog.Info("run", "Results cleared" + (_runCts is { IsCancellationRequested: false } && !_btnRun.Enabled ? "; run cancelled" : ""));
+        AppLog.Info("run", "Results cleared" + (_running ? "; run cancelled" : ""));
         _runCts?.Cancel();
-        _btnRun.Enabled = true; // a cancelled run returns early and never re-enables it
         _runHistory.Clear();
+        SetRunning(false); // a cancelled run returns early and never ends itself
         _selectedRunIndex = -1;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
@@ -714,7 +754,7 @@ class MainForm : Form
         _ticketsPanel.Visible = tab == "tickets";
         _dnsPanel.Visible = tab == "dns";
         _logPanel.Visible = tab == "log";
-        if (tab == "log") FlushLog();
+        if (tab == "log") RefreshLog(force: true);
 
         foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets"), (_btnTabDns, "dns"), (_btnTabLog, "log") })
         {
@@ -969,6 +1009,7 @@ class MainForm : Form
     async void RefreshGpTab(bool keepExisting = false)
     {
         if (_gpRunning) return;
+        DiagLog.Block = new LogBlock($"Group Policy {DateTime.Now:HH:mm:ss}", "Resultant Set of Policy query");
         _gpRunning = _gpLoaded = true;
         int keep = keepExisting ? _gpBox.TextLength : 0;
         try
@@ -1087,6 +1128,7 @@ class MainForm : Form
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
 
+        DiagLog.Block = new LogBlock($"Group Policy {DateTime.Now:HH:mm:ss}", force ? "gpupdate /force" : "gpupdate");
         _gpRunning = true;
         _btnGpUpdate.Enabled = false;
         _gpBox.Clear();
@@ -1125,6 +1167,7 @@ class MainForm : Form
     async void RefreshTickets()
     {
         if (_ticketsRunning) return;
+        DiagLog.Block = new LogBlock($"Kerberos tickets {DateTime.Now:HH:mm:ss}", "klist");
         _ticketsRunning = _ticketsLoaded = true;
         _showingExplainer = false;
         _ticketsBox.Clear();
@@ -1334,6 +1377,7 @@ class MainForm : Form
             + "Continue?",
             "Purge Kerberos Tickets", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirm != DialogResult.Yes) return;
+        DiagLog.Block = new LogBlock($"Kerberos tickets {DateTime.Now:HH:mm:ss}", "klist purge");
 
         _btnPurgeTickets.Enabled = false;
         try
@@ -1516,6 +1560,7 @@ class MainForm : Form
         _dnsSteps.Clear();
         _dnsHeading = $"{heading}, {DateTime.Now:HH:mm:ss}";
         RenderDnsBox();
+        var block = DiagLog.Block = new LogBlock($"DNS registration {DateTime.Now:HH:mm:ss}", heading);
         AppLog.Info("ddns", heading);
 
         void Report(TestEntry step) => ReportDnsStep(step, cts);
@@ -1534,6 +1579,8 @@ class MainForm : Form
         {
             _dnsRunning = false;
             _btnRegister.Enabled = _btnDnsCheck.Enabled = true;
+            block.Totals = Totals(_dnsSteps);
+            _logStale = true;
         }
     }
 
@@ -1591,27 +1638,112 @@ class MainForm : Form
         var btnSaveLog = new ThemedButton { Text = "Save log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(172, 3) };
         btnSaveLog.Click += BtnSaveLog_Click;
         var btnClearLog = new ThemedButton { Text = "Clear log", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(260, 3) };
-        btnClearLog.Click += (s, e) => { AppLog.Clear(); box.Clear(); };
+        btnClearLog.Click += (s, e) => { AppLog.Clear(); RenderLog(); };
+        // The view: Sections (by run, then results section) or By time (one timeline), as one two-part control
+        _btnLogSections = new ThemedButton { Text = "Sections", Split = SplitPart.Left, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(76, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the log by section" };
+        _btnLogByTime = new ThemedButton { Text = "By time", Split = SplitPart.Right, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(70, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right, AccessibleName = "Show the log by time" };
+        _btnLogSections.Click += (s, e) => SetLogView(bySection: true);
+        _btnLogByTime.Click += (s, e) => SetLogView(bySection: false);
+        StyleLogViewButtons();
         var buttons = new Panel { Height = 34, Dock = DockStyle.Bottom, BackColor = BgColor };
-        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog]);
+        buttons.Controls.AddRange([debug, btnCopyLog, btnSaveLog, btnClearLog, _btnLogSections, _btnLogByTime]);
+        buttons.Resize += (s, e) =>
+        {
+            _btnLogByTime.Location = new Point(buttons.ClientSize.Width - _btnLogByTime.Width - S(12), S(3));
+            _btnLogSections.Location = new Point(_btnLogByTime.Left - _btnLogSections.Width, S(3));
+        };
         var panel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
         panel.Controls.Add(box);
         panel.Controls.Add(buttons);
         return (panel, box, debug);
     }
 
-    void AppendLogLine(LogLine line)
+    static readonly Font LogBlockFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font LogSectionFont = new("Segoe UI", 9f, FontStyle.Bold);
+    static readonly Font LogNoteFont = new("Segoe UI", 8.5f);
+    static readonly Font LogGapFont = new("Segoe UI", 4f);
+
+    // The results sections in order, each with the short name the By time view shows beside a line
+    static IReadOnlyList<(string Name, string Short)> LogSectionNames => Sections.Select(s => (s.Name, s.Short)).ToList();
+
+    void SetLogView(bool bySection)
     {
-        // A long line wraps under its message, not under the time
-        string prefix = DiagLog.Prefix(line);
-        _logBox.SelectionStart = _logBox.TextLength;
-        _logBox.SelectionLength = 0;
-        _logBox.SelectionHangingIndent = TextRenderer.MeasureText(prefix, _logBox.Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
-        AppendRun(_logBox, prefix, DimColor);
-        AppendRun(_logBox, DiagLog.Body(line) + "\n", line.Debug ? DimColor : TextColor);
+        if (_logBySection == bySection) return;
+        _logBySection = bySection;
+        StyleLogViewButtons();
+        RenderLog();
     }
 
-    /// <summary>Writes the log lines added since the last call to the Log tab.</summary>
+    void StyleLogViewButtons()
+    {
+        foreach (var (button, on) in new[] { (_btnLogSections, _logBySection), (_btnLogByTime, !_logBySection) })
+        {
+            button.BackColor = on ? AccentColor : SurfaceColor;
+            button.ForeColor = on ? OnAccentColor : TextColor;
+            button.AccessibleDescription = on ? "Selected" : null;
+        }
+    }
+
+    void LogParagraph(int indent, int hanging)
+    {
+        _logBox.SelectionStart = _logBox.TextLength;
+        _logBox.SelectionLength = 0;
+        _logBox.SelectionIndent = indent;
+        _logBox.SelectionHangingIndent = hanging;
+    }
+
+    // A run's or an action's heading: its name and time in primary, then what it covered and how it came out
+    void AppendLogBlockHeading(LogBlock block)
+    {
+        LogParagraph(0, 0);
+        if (_logBox.TextLength > 0) AppendRun(_logBox, "\n", TextColor, LogGapFont);
+        AppendRun(_logBox, block.Title, AccentColor, LogBlockFont);
+        AppendRun(_logBox, "    " + block.Detail, DimColor, LogNoteFont);
+        if (block.Totals != null) AppendRun(_logBox, "    " + block.Totals, DimColor, LogNoteFont);
+        AppendRun(_logBox, "\n", TextColor, LogNoteFont);
+    }
+
+    void AppendLogSectionHeading(LogBlock block, string section)
+    {
+        LogParagraph(S(8), 0);
+        AppendRun(_logBox, "\n", TextColor, LogGapFont);
+        AppendRun(_logBox, section, TextColor, LogSectionFont);
+        if (block.SectionNotes.TryGetValue(section, out var note)) AppendRun(_logBox, "    " + note, DimColor, LogNoteFont);
+        AppendRun(_logBox, "\n", TextColor, LogNoteFont);
+    }
+
+    void AppendLogLine(LogLine line)
+    {
+        // By time names each line's section in a column of its own; Sections has it in the heading above
+        string? column = _logBySection ? null
+            : line.Section == null ? "" : LogSectionNames.FirstOrDefault(s => s.Name == line.Section).Short ?? line.Section;
+        string prefix = DiagLog.Prefix(line, column);
+        // A long line wraps under its message, not under the time
+        // Sections: a section's lines sit under its heading, a run's own lines level with the section headings
+        int indent = !_logBySection || line.Block == null ? 0 : line.Section == null ? S(8) : S(20);
+        LogParagraph(indent, TextRenderer.MeasureText(prefix, _logBox.Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width);
+        AppendRun(_logBox, prefix, DimColor);
+        AppendRun(_logBox, DiagLog.Body(line, prefix.Length) + "\n", line.Debug ? DimColor : TextColor);
+    }
+
+    /// <summary>
+    /// Brings the Log tab up to date while it shows. By time adds the new lines at the end; Sections regroups
+    /// them, so it rewrites the pane, at most once a second.
+    /// </summary>
+    void RefreshLog(bool force = false)
+    {
+        if (!_logPanel.Visible) return;
+        if (!_logBySection && !_logStale)
+        {
+            FlushLog();
+            return;
+        }
+        if (AppLog.LastSeq == _logSeq && !_logStale) return;
+        if (!force && DateTime.Now - _logRenderedAt < TimeSpan.FromSeconds(1)) return;
+        RenderLog();
+    }
+
+    /// <summary>By time: writes the lines added since the last call at the end of the pane.</summary>
     void FlushLog()
     {
         var lines = AppLog.Since(_logSeq);
@@ -1624,20 +1756,73 @@ class MainForm : Form
         }
         _logSeq = lines[^1].Seq;
         foreach (var line in lines)
+        {
+            if (line.Block != null && line.Block != _logLastBlock)
+            {
+                AppendLogBlockHeading(line.Block);
+                _logLastBlock = line.Block;
+            }
             AppendLogLine(line);
+        }
         _logBox.ScrollToCaret();
     }
 
+    const int WmSetRedraw = 0x000B;
+
+    /// <summary>Writes the whole log to the pane in the chosen view, keeping the reader's place.</summary>
     void RenderLog()
     {
-        _logBox.Clear();
-        _logSeq = 0;
-        FlushLog();
+        long last = AppLog.LastSeq;
+        var lines = AppLog.Since(0).Where(l => l.Seq <= last).ToList();
+        bool atEnd = _logBox.TextLength == 0 || _logBox.GetPositionFromCharIndex(_logBox.TextLength - 1).Y < _logBox.ClientSize.Height;
+        int top = _logBox.GetLineFromCharIndex(_logBox.GetCharIndexFromPosition(new Point(1, 1)));
+
+        SendMessage(_logBox.Handle, WmSetRedraw, IntPtr.Zero, IntPtr.Zero);
+        try
+        {
+            _logBox.Clear();
+            _logLastBlock = null;
+            LogItem? previous = null;
+            foreach (var item in DiagLog.Arrange(lines, _logBySection, LogSectionNames.Select(s => s.Name).ToList()))
+            {
+                switch (item)
+                {
+                    case LogBlockHeading heading:
+                        AppendLogBlockHeading(heading.Block);
+                        _logLastBlock = heading.Block;
+                        break;
+                    case LogSectionHeading heading:
+                        AppendLogSectionHeading(heading.Block, heading.Section);
+                        break;
+                    case LogEntry entry:
+                        // A run's own lines after its sections (such as "Complete") are set apart from the last one
+                        if (_logBySection && entry.Line.Block != null && entry.Line.Section == null && previous is LogEntry { Line.Section: not null })
+                            AppendRun(_logBox, "\n", TextColor, LogGapFont);
+                        AppendLogLine(entry.Line);
+                        break;
+                }
+                previous = item;
+            }
+            _logBox.SelectionStart = atEnd ? _logBox.TextLength : 0;
+            _logBox.ScrollToCaret();
+            if (!atEnd && top > 0) SendMessage(_logBox.Handle, EmLineScroll, IntPtr.Zero, top);
+        }
+        finally
+        {
+            SendMessage(_logBox.Handle, WmSetRedraw, 1, IntPtr.Zero);
+            _logBox.Invalidate();
+        }
+        _logSeq = last;
+        _logStale = false;
+        _logRenderedAt = DateTime.Now;
     }
+
+    // The log as text in the view on screen: what Copy log and Save log hand over
+    string LogText() => AppLog.Text(_logBySection, LogSectionNames);
 
     void BtnCopyLog_Click(object? sender, EventArgs e)
     {
-        string text = AppLog.Text();
+        string text = LogText();
         if (text.Length == 0) return;
         try
         {
@@ -1662,7 +1847,7 @@ class MainForm : Form
 
         try
         {
-            File.WriteAllText(dlg.FileName, AppLog.Text(), Encoding.UTF8);
+            File.WriteAllText(dlg.FileName, LogText(), Encoding.UTF8);
             _lblStatus.Text = $"Saved to {Path.GetFileName(dlg.FileName)}";
         }
         catch (Exception ex)
@@ -1750,6 +1935,13 @@ class MainForm : Form
 
     const string GuideLinkText = "See the fixes in the Guide";
 
+    // The heading's note: the group's counts, or that it hasn't run, and when it last ran on its own
+    string HeadingNote(TestGroup group) =>
+        SelectedRun is not { } run ? GroupCounts(group)
+        : run.NotRun.Contains(group.Name) ? "Not run"
+        : run.RanAt.TryGetValue(group.Name, out var at) ? $"{GroupCounts(group)} · run at {at:HH:mm:ss}"
+        : GroupCounts(group);
+
     /// <summary>
     /// Lays the results out at <paramref name="width"/> and returns their height. With <paramref name="g"/> it also
     /// draws them and records each item for clicks, the keyboard and screen readers; without, it only measures.
@@ -1758,12 +1950,18 @@ class MainForm : Form
     {
         int y = S(4);
         int left = S(GridLeft), right = width - S(GridLeft);
-        if (g != null) _resultsCanvas.Rows.Clear();
+        if (g != null)
+        {
+            _paintFocus = _resultsCanvas.FocusedItem; // read before the rows it points into are rebuilt
+            _resultsCanvas.Rows.Clear();
+            _resultsCanvas.Headings.Clear();
+        }
 
         foreach (var group in _renderedGroups!)
         {
-            bool open = IsGroupOpen(group);
-            y = LayoutHeading(g, group, open, y, left, right);
+            bool notRun = SelectedRun?.NotRun.Contains(group.Name) == true;
+            bool open = !notRun && IsGroupOpen(group);
+            y = LayoutHeading(g, group, open, notRun, y, left, right);
             if (!open)
             {
                 g?.DrawLine(RowLinePen, left, y, right, y);
@@ -1777,22 +1975,73 @@ class MainForm : Form
         return y + S(14);
     }
 
-    // A group's heading: chevron, name and counts, the whole width a button that opens and closes the group
-    int LayoutHeading(Graphics? g, TestGroup group, bool open, int y, int left, int right)
+    ResultsCanvas.Row? _paintFocus; // the heading or button with the keyboard focus, as the results are painted
+
+    static readonly Font RunButtonFont = new("Segoe UI", 8.5f);
+
+    // A group's heading: chevron, name and counts, with a slot at the right edge for its Run button. The button shows
+    // on the heading under the mouse or the keyboard focus, and always on a group that hasn't run, but never while
+    // a run is going. Left of the slot the heading is a button that opens and closes the group; one that hasn't run
+    // has nothing to open, so there it is plain text
+    int LayoutHeading(Graphics? g, TestGroup group, bool open, bool notRun, int y, int left, int right)
     {
         const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
         y += S(8);
         if (g != null)
         {
-            string counts = GroupCounts(group);
-            DrawChevron(g, left, y + S(8), open);
-            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), TextColor, oneLine);
-            int countsW = TextRenderer.MeasureText(g, counts, GroupCountFont, Size.Empty, oneLine).Width;
-            TextRenderer.DrawText(g, counts, GroupCountFont, new Point(right - countsW, y + S(5)), DimColor, oneLine);
-            _resultsCanvas.Rows.Add(new(group.Name, group.Name, "", counts, new Rectangle(left - S(4), y, right - left + S(8), S(24)),
-                ResultsCanvas.Kind.Heading, open));
+            var band = new Rectangle(left - S(4), y - S(2), right - left + S(8), S(28));
+            bool hovered = _resultsCanvas.HoverGroup == group.Name;
+            bool focused = _paintFocus is { } f && f.Group == group.Name && f.Kind is ResultsCanvas.Kind.Heading or ResultsCanvas.Kind.RunLink;
+            if (hovered)
+            {
+                using var hover = new SolidBrush(Blend(PanelColor, TextColor, 0.04));
+                g.FillRectangle(hover, band);
+            }
+
+            var button = RunButtonBounds(g, right, y);
+            string note = HeadingNote(group);
+            int noteW = TextRenderer.MeasureText(g, note, GroupCountFont, Size.Empty, oneLine).Width;
+            TextRenderer.DrawText(g, note, GroupCountFont, new Point(button.Left - S(12) - noteW, y + S(5)), DimColor, oneLine);
+            if (!notRun) DrawChevron(g, left, y + S(8), open);
+            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), notRun ? DimColor : TextColor, oneLine);
+
+            var bounds = new Rectangle(left - S(4), y, button.Left - S(8) - (left - S(4)), S(24));
+            _resultsCanvas.Rows.Add(notRun
+                ? new(group.Name, group.Name, "Not run", "", bounds)
+                : new(group.Name, group.Name, "", note, bounds, ResultsCanvas.Kind.Heading, open));
+            _resultsCanvas.Headings.Add((group.Name, band));
+            if (!_running)
+            {
+                if (notRun || hovered || focused)
+                    DrawRunButton(g, button, hovered && _resultsCanvas.HoverButton);
+                _resultsCanvas.Rows.Add(new(group.Name, notRun ? $"Run {group.Name}" : $"Run {group.Name} again", "", "",
+                    button, ResultsCanvas.Kind.RunLink));
+            }
         }
         return y + S(26);
+    }
+
+    Rectangle RunButtonBounds(Graphics g, int right, int y)
+    {
+        int textW = TextRenderer.MeasureText(g, "Run", RunButtonFont, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
+        int w = S(9) + S(7) + S(6) + textW + S(10);
+        return new Rectangle(right - w, y + S(1), w, S(22));
+    }
+
+    // A small button: surface fill and border like the app's buttons, a play mark in primary, "Run" in text colour
+    void DrawRunButton(Graphics g, Rectangle r, bool hover)
+    {
+        using (var path = ThemedButton.RoundedRect(r, S(4)))
+        {
+            using var fill = new SolidBrush(hover ? Blend(SurfaceColor, TextColor, 0.07) : SurfaceColor);
+            g.FillPath(fill, path);
+            g.DrawPath(BorderPen, path);
+        }
+        int x = r.X + S(9), mid = r.Y + r.Height / 2;
+        using (var mark = new SolidBrush(AccentColor))
+            g.FillPolygon(mark, new Point[] { new(x, mid - S(4)), new(x + S(7), mid), new(x, mid + S(4)) });
+        TextRenderer.DrawText(g, "Run", RunButtonFont, new Rectangle(x + S(13), r.Y, r.Right - x - S(13), r.Height), TextColor,
+            TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 
     // One check: mark and word, name, and the detail wrapped in its column
@@ -1897,6 +2146,9 @@ class MainForm : Form
             case ResultsCanvas.Kind.GuideLink:
                 ShowGuideSection(item.Group);
                 break;
+            case ResultsCanvas.Kind.RunLink:
+                RunSection(item.Group);
+                break;
         }
     }
 
@@ -1912,11 +2164,12 @@ class MainForm : Form
     /// <summary>
     /// The painted results list. It has no child controls, so it handles its own clicks and keys and describes its
     /// items to assistive technology itself: group headings (buttons that open and close the group), the rows,
-    /// and links to the Guide, as last painted. Up and Down move between headings and links; Enter or Space acts.
+    /// links to the Guide, and each heading's Run link, as last painted. Up and Down move between headings and links;
+    /// Enter or Space acts.
     /// </summary>
     sealed class ResultsCanvas : Panel
     {
-        public enum Kind { Row, Heading, GuideLink }
+        public enum Kind { Row, Heading, GuideLink, RunLink }
 
         public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds,
             Kind Kind = Kind.Row, bool Expanded = false)
@@ -1925,6 +2178,9 @@ class MainForm : Form
         }
 
         public readonly List<Row> Rows = [];
+        public readonly List<(string Group, Rectangle Band)> Headings = []; // each heading's full width, for hover
+        public string? HoverGroup { get; private set; }  // the group whose heading is under the mouse
+        public bool HoverButton { get; private set; }    // the mouse is over that heading's Run button
         int _focus = -1; // index into Rows of the heading or link with the keyboard focus
 
         public event Action<Row>? Activated;
@@ -1963,6 +2219,21 @@ class MainForm : Form
             base.OnMouseMove(e);
             int i = HitTest(e.Location);
             Cursor = i >= 0 && Rows[i].Kind == Kind.GuideLink ? Cursors.Hand : Cursors.Default;
+            string? group = Headings.Find(h => h.Band.Contains(e.Location)).Group;
+            bool onButton = i >= 0 && Rows[i].Kind == Kind.RunLink;
+            if (group != HoverGroup || onButton != HoverButton)
+            {
+                (HoverGroup, HoverButton) = (group, onButton);
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (HoverGroup == null) return;
+            (HoverGroup, HoverButton) = (null, false);
+            Invalidate();
         }
 
         protected override bool IsInputKey(Keys keyData) =>
@@ -2040,7 +2311,7 @@ class MainForm : Form
             public override string? Name => row.Kind switch
             {
                 Kind.Heading => $"{row.Name}, {row.Detail}",
-                Kind.GuideLink => row.Name,
+                Kind.GuideLink or Kind.RunLink => row.Name,
                 _ => $"{row.Name}, {row.Status}",
             };
             public override string? Value => row.Kind == Kind.Row ? row.Detail : null;
@@ -2049,6 +2320,7 @@ class MainForm : Form
             {
                 Kind.Heading => AccessibleRole.OutlineButton,
                 Kind.GuideLink => AccessibleRole.Link,
+                Kind.RunLink => AccessibleRole.PushButton,
                 _ => AccessibleRole.ListItem,
             };
             public override AccessibleStates State
@@ -2057,15 +2329,19 @@ class MainForm : Form
                 {
                     if (row.Kind == Kind.Row) return AccessibleStates.ReadOnly;
                     var state = AccessibleStates.Focusable | (owner.Focused && owner._focus == index ? AccessibleStates.Focused : 0);
-                    return row.Kind == Kind.Heading
-                        ? state | (row.Expanded ? AccessibleStates.Expanded : AccessibleStates.Collapsed)
-                        : state | AccessibleStates.Linked;
+                    return row.Kind switch
+                    {
+                        Kind.Heading => state | (row.Expanded ? AccessibleStates.Expanded : AccessibleStates.Collapsed),
+                        Kind.GuideLink => state | AccessibleStates.Linked,
+                        _ => state,
+                    };
                 }
             }
             public override string? DefaultAction => row.Kind switch
             {
                 Kind.Heading => row.Expanded ? "Collapse" : "Expand",
                 Kind.GuideLink => "Jump",
+                Kind.RunLink => "Press",
                 _ => null,
             };
             public override void DoDefaultAction()
@@ -2089,117 +2365,95 @@ class MainForm : Form
 
     // ── Events ──────────────────────────────────────────────
 
-    async void BtnRun_Click(object? sender, EventArgs e)
+    // Every section of a run, in the order they show, and the check behind each. They don't depend on each other's
+    // results, so any one can run on its own
+    static readonly (string Name, string Short, Func<DiagConfig, IProbe, TestGroup> Test)[] Sections =
+    [
+        ("Domain Membership & Identity", "Membership", Diagnostics.TestDomainMembership),
+        ("DC Discovery & Connectivity", "DC Discovery", Diagnostics.TestDcConnectivity),
+        ("DNS for Active Directory", "DNS for AD", Diagnostics.TestDnsForAd),
+        ("SYSVOL & NETLOGON", "SYSVOL", Diagnostics.TestSysvolNetlogon),
+        ("Group Policy", "Group Policy", Diagnostics.TestGroupPolicy),
+        ("Trust Relationships", "Trusts", Diagnostics.TestTrusts),
+        ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime),
+        ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration),
+        (Diagnostics.EntraSsoGroup, "Entra SSO", Diagnostics.TestEntraSso),
+    ];
+
+    /// <summary>The domain and DC from the fields, or null (with the reason in the status line) when they're invalid.</summary>
+    (string Domain, string Dc)? ReadTarget()
     {
         string domain = _txtDomain.Text.Trim();
         string dc = _txtDc.Text.Trim();
         if (_chkDcSuffix.Checked && !string.IsNullOrEmpty(domain) && !dc.Contains('.'))
             dc = string.IsNullOrEmpty(dc) ? "" : $"{dc}.{domain}";
 
-        if (string.IsNullOrEmpty(domain))
-        {
-            _lblStatus.Text = "Domain is required";
-            return;
-        }
-        if (!HostnamePattern.IsMatch(domain))
-        {
-            _lblStatus.Text = "Invalid domain characters";
-            return;
-        }
-        if (!string.IsNullOrEmpty(dc) && !HostnamePattern.IsMatch(dc))
-        {
-            _lblStatus.Text = "Invalid DC hostname";
-            return;
-        }
+        string? error = string.IsNullOrEmpty(domain) ? "Domain is required"
+            : !HostnamePattern.IsMatch(domain) ? "Invalid domain characters"
+            : !string.IsNullOrEmpty(dc) && !HostnamePattern.IsMatch(dc) ? "Invalid DC hostname"
+            : null;
+        if (error == null) return (domain, dc);
+        _lblStatus.Text = error;
+        return null;
+    }
 
+    /// <summary>Marks a run as started or ended: while one runs, nothing else can start and nothing is exported.</summary>
+    void SetRunning(bool running)
+    {
+        _running = running;
+        _btnRun.Enabled = _btnRunMenu.Enabled = !running;
+        _btnExport.Enabled = _btnCopy.Enabled = !running && SelectedRun is { IsPending: false };
+        _resultsCanvas.Invalidate(); // the Run links grey out
+    }
+
+    static string DcText(string dc) => dc.Length > 0 ? dc : "DC found automatically";
+
+    // A log heading's outcome: "32 passed · 0 failed · 3 warnings"
+    static string Totals(IEnumerable<TestEntry> tests)
+    {
+        var list = tests.ToList();
+        int warn = list.Count(t => t.Status == Status.Warn);
+        return $"{list.Count(t => t.Status == Status.Pass)} passed · {list.Count(t => t.Status == Status.Fail)} failed · {warn} warning{(warn == 1 ? "" : "s")}";
+    }
+
+    CancellationTokenSource StartRun(string what, string domain, string dc)
+    {
         _runCts?.Cancel();
         _runCts = new CancellationTokenSource();
-        var cts = _runCts;
-        AppLog.Info("run", $"Started: domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
-
-        _btnRun.Enabled = false;
-        _btnExport.Enabled = _btnCopy.Enabled = false;
-        _summaryPanel.Visible = false;
+        AppLog.Info("run", $"Started{what}: domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
+        SetRunning(true);
         _lblStatus.ForeColor = DimColor;
-        _lblStatus.Text = "Running diagnostics...";
         SwitchTab("results");
+        return _runCts;
+    }
 
-        var results = BuildSkeleton();
-        RenderResults(results);
+    void BtnRun_Click(object? sender, EventArgs e) => RunAll();
 
-        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, results);
+    async void RunAll()
+    {
+        if (_running || ReadTarget() is not { } target) return;
+        var (domain, dc) = target;
+        var block = DiagLog.Block = new LogBlock($"Run {DateTime.Now:HH:mm:ss}", $"{domain} · {DcText(dc)} · all sections");
+        var cts = StartRun("", domain, dc);
+        _summaryPanel.Visible = false;
+        _lblStatus.Text = "Running diagnostics...";
+
+        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, BuildSkeleton());
         _runHistory.Insert(0, pendingRun);
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
         var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
-        int completed = 0;
-        int totalGroups = results.Count;
-
-        void ReplaceGroup(string name, TestGroup result)
-        {
-            if (cts.IsCancellationRequested || IsDisposed) return;
-            foreach (var test in result.Tests)
-                AppLog.Info("result", $"{StatusWord(test.Status),-8} {result.Name} / {test.Name}: {test.Detail}");
-            if (result.Readiness is { } ready)
-                AppLog.Info("result", $"{StatusWord(ready.Status),-8} {result.Name} / Readiness: {ready.Text}");
-            int idx = results.FindIndex(g => g.Name == name);
-            if (idx >= 0) results[idx] = result;
-            completed++;
-            _lblStatus.Text = $"Running diagnostics... ({completed}/{totalGroups})";
-            if (ReferenceEquals(SelectedRun, pendingRun)) ShowResults(results);
-        }
-
-        // Each group blocks on external tools and the network for seconds at a time, so it gets its own
-        // thread: on the shared pool they starve the continuations that read the tools' output
-        Task<TestGroup> StartGroup(Func<DiagConfig, TestGroup> test) =>
-            Task.Factory.StartNew(() => test(config), cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-
-        var identityTask = StartGroup(cfg => Diagnostics.TestDomainMembership(cfg, Probe));
-        var dcTask = StartGroup(cfg => Diagnostics.TestDcConnectivity(cfg, Probe));
-        var dnsTask = StartGroup(cfg => Diagnostics.TestDnsForAd(cfg, Probe));
-        var sysvolTask = StartGroup(cfg => Diagnostics.TestSysvolNetlogon(cfg, Probe));
-        var gpTask = StartGroup(cfg => Diagnostics.TestGroupPolicy(cfg, Probe));
-        var trustTask = StartGroup(cfg => Diagnostics.TestTrusts(cfg, Probe));
-        var kerbTask = StartGroup(cfg => Diagnostics.TestKerberosAndTime(cfg, Probe));
-        var dnsRegTask = StartGroup(cfg => Diagnostics.TestDnsRegistration(cfg, Probe));
-        var ssoTask = StartGroup(cfg => Diagnostics.TestEntraSso(cfg, Probe));
-
-        var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
-        {
-            (identityTask, "Domain Membership & Identity", () => identityTask.GetAwaiter().GetResult()),
-            (dcTask, "DC Discovery & Connectivity", () => dcTask.GetAwaiter().GetResult()),
-            (dnsTask, "DNS for Active Directory", () => dnsTask.GetAwaiter().GetResult()),
-            (sysvolTask, "SYSVOL & NETLOGON", () => sysvolTask.GetAwaiter().GetResult()),
-            (gpTask, "Group Policy", () => gpTask.GetAwaiter().GetResult()),
-            (trustTask, "Trust Relationships", () => trustTask.GetAwaiter().GetResult()),
-            (kerbTask, "Kerberos & Time Sync", () => kerbTask.GetAwaiter().GetResult()),
-            (dnsRegTask, "Dynamic DNS Registration", () => dnsRegTask.GetAwaiter().GetResult()),
-            (ssoTask, Diagnostics.EntraSsoGroup, () => ssoTask.GetAwaiter().GetResult()),
-        };
-
-        while (pending.Count > 0)
-        {
-            var done = await Task.WhenAny(pending.Select(p => p.task));
-            if (cts.IsCancellationRequested || IsDisposed) return;
-            var match = pending.First(p => p.task == done);
-            pending.Remove(match);
-            try
-            {
-                ReplaceGroup(match.name, match.getResult());
-            }
-            catch (Exception ex)
-            {
-                ReplaceGroup(match.name, new TestGroup(match.name, [new TestEntry("Error", Status.Fail, ex.Message)]));
-            }
-        }
+        bool finished = await RunSections(pendingRun, Sections.Select(s => s.Name).ToList(), config, cts,
+            (done, total) => _lblStatus.Text = $"Running diagnostics... ({done}/{total})");
+        if (!finished) return;
 
         // The pending run may have been deleted, or another run selected, while it was running
         int pendingIndex = _runHistory.FindIndex(r => ReferenceEquals(r, pendingRun));
         if (pendingIndex >= 0)
         {
             bool wasSelected = _selectedRunIndex == pendingIndex;
-            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, dc, results) { Open = pendingRun.Open };
+            _runHistory[pendingIndex] = pendingRun with { Timestamp = DateTime.Now };
             if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
             if (wasSelected || _selectedRunIndex >= _runHistory.Count)
                 _selectedRunIndex = pendingIndex;
@@ -2208,11 +2462,164 @@ class MainForm : Form
             ShowResults(selected.Results);
         RebuildHistoryBar();
 
-        var all = results.SelectMany(g => g.Tests).ToList();
+        var all = pendingRun.Results.SelectMany(g => g.Tests).ToList();
         AppLog.Info("run", $"Complete: {all.Count(t => t.Status == Status.Pass)} passed, {all.Count(t => t.Status == Status.Fail)} failed, {all.Count(t => t.Status == Status.Warn)} warnings");
+        block.Totals = Totals(all);
+        _logStale = true;
         _lblStatus.Text = "Complete";
-        _btnRun.Enabled = true;
-        _btnExport.Enabled = _btnCopy.Enabled = SelectedRun is { IsPending: false };
+        SetRunning(false);
+    }
+
+    /// <summary>
+    /// Runs one section. For the domain and DC of the run on show its results replace that section there, stamped
+    /// with their own time; otherwise they start a new run in which the other sections show as not run.
+    /// </summary>
+    async void RunSection(string name)
+    {
+        if (_running || ReadTarget() is not { } target) return;
+        var (domain, dc) = target;
+        var block = DiagLog.Block = new LogBlock($"{name} {DateTime.Now:HH:mm:ss}", $"{domain} · {DcText(dc)} · run on its own");
+        var cts = StartRun($" {name}", domain, dc);
+        _lblStatus.Text = $"Running {name}...";
+
+        var run = SelectedRun is { IsPending: false } shown && shown.Domain == domain && shown.Dc == dc ? shown : null;
+        bool newRun = run == null;
+        if (run == null)
+        {
+            run = new DiagRun(DateTime.Now, domain, dc, BuildSkeleton());
+            run.NotRun.UnionWith(Sections.Select(s => s.Name).Where(n => n != name));
+            _runHistory.Insert(0, run);
+            if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
+            _selectedRunIndex = 0;
+            RebuildHistoryBar();
+        }
+        run.NotRun.Remove(name);
+        run.Open.Remove(name); // its new results open or close by the default rule
+
+        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
+        if (!await RunSections(run, [name], config, cts)) return;
+        if (!newRun) run.RanAt[name] = DateTime.Now;
+        if (ReferenceEquals(SelectedRun, run)) ShowResults(run.Results);
+
+        var tests = run.Results.Find(g => g.Name == name)?.Tests ?? [];
+        AppLog.Info("run", $"Complete {name}: {tests.Count(t => t.Status == Status.Pass)} passed, {tests.Count(t => t.Status == Status.Fail)} failed, {tests.Count(t => t.Status == Status.Warn)} warnings");
+        block.Totals = Totals(tests);
+        _logStale = true;
+        _lblStatus.Text = $"{name}: run at {DateTime.Now:HH:mm:ss}";
+        SetRunning(false);
+    }
+
+    /// <summary>
+    /// Runs the named sections into <paramref name="run"/>'s results and shows each as it finishes. False when the
+    /// run was cancelled (cleared, or the window closed).
+    /// </summary>
+    async Task<bool> RunSections(DiagRun run, List<string> names, DiagConfig config, CancellationTokenSource cts,
+        Action<int, int>? progress = null)
+    {
+        var skeleton = BuildSkeleton();
+        foreach (string name in names)
+        {
+            int i = run.Results.FindIndex(g => g.Name == name);
+            if (i >= 0) run.Results[i] = skeleton.First(g => g.Name == name);
+        }
+        if (ReferenceEquals(SelectedRun, run)) RenderResults(run.Results);
+
+        // Each section blocks on external tools and the network for seconds at a time, so it gets its own
+        // thread: on the shared pool they starve the continuations that read the tools' output
+        var pending = names.Select(name =>
+        {
+            var test = Sections.First(s => s.Name == name).Test;
+            return (Name: name, Task: Task.Factory.StartNew(() =>
+            {
+                DiagLog.Section = name; // the section's tool calls and queries log under it
+                return test(config, Probe);
+            }, cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default));
+        }).ToList();
+
+        int completed = 0;
+        while (pending.Count > 0)
+        {
+            var done = await Task.WhenAny(pending.Select(p => p.Task));
+            if (cts.IsCancellationRequested || IsDisposed) return false;
+            var match = pending.First(p => p.Task == done);
+            pending.Remove(match);
+
+            TestGroup result;
+            try { result = match.Task.GetAwaiter().GetResult(); }
+            catch (Exception ex) { result = new(match.Name, [new TestEntry("Error", Status.Fail, ex.Message)]); }
+            LogResult(result);
+            if (DiagLog.Block is { } block) block.SectionNotes[match.Name] = GroupCounts(result);
+
+            int idx = run.Results.FindIndex(g => g.Name == match.Name);
+            if (idx >= 0) run.Results[idx] = result;
+            progress?.Invoke(++completed, names.Count);
+            if (ReferenceEquals(SelectedRun, run)) ShowResults(run.Results);
+        }
+        return true;
+    }
+
+    static void LogResult(TestGroup result)
+    {
+        string? outer = DiagLog.Section;
+        DiagLog.Section = result.Name;
+        try
+        {
+            foreach (var test in result.Tests)
+                AppLog.Info("result", $"{StatusWord(test.Status),-8} {result.Name} / {test.Name}: {test.Detail}");
+            if (result.Readiness is { } ready)
+                AppLog.Info("result", $"{StatusWord(ready.Status),-8} {result.Name} / Readiness: {ready.Text}");
+        }
+        finally
+        {
+            DiagLog.Section = outer;
+        }
+    }
+
+    // The Run button's drop-down, built when opened so it takes the current theme
+    void ShowRunMenu()
+    {
+        if (_running) return;
+        var menu = new ContextMenuStrip { Renderer = new MenuRenderer(), ShowImageMargin = false, Font = new Font("Segoe UI", 9f), BackColor = SurfaceColor };
+        menu.Items.Add("Run all sections", null, (s, e) => RunAll());
+        menu.Items.Add(new ToolStripSeparator());
+        foreach (var (name, _, _) in Sections)
+            menu.Items.Add(name.Replace("&", "&&"), null, (s, e) => RunSection(name)); // a lone & would underline the next letter
+        menu.Closed += (s, e) => BeginInvoke(menu.Dispose);
+        menu.Show(_btnRun, new Point(0, _btnRun.Height));
+    }
+
+    /// <summary>Draws drop-down menus in the theme's colours; the default renderer is light only.</summary>
+    sealed class MenuRenderer : ToolStripProfessionalRenderer
+    {
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            using var fill = new SolidBrush(SurfaceColor);
+            e.Graphics.FillRectangle(fill, e.AffectedBounds);
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) =>
+            e.Graphics.DrawRectangle(BorderPen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (!e.Item.Selected) return;
+            using var fill = new SolidBrush(Blend(SurfaceColor, AccentColor, 0.2));
+            int inset = e.ToolStrip?.LogicalToDeviceUnits(2) ?? 2;
+            e.Graphics.FillRectangle(fill, inset, 0, e.Item.Width - 2 * inset, e.Item.Height);
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.Height / 2;
+            int inset = e.ToolStrip?.LogicalToDeviceUnits(4) ?? 4;
+            e.Graphics.DrawLine(BorderPen, inset, y, e.Item.Width - inset, y);
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = TextColor;
+            base.OnRenderItemText(e);
+        }
     }
 
     void RebuildHistoryBar()
@@ -2310,7 +2717,7 @@ class MainForm : Form
         if (SelectedRun is not { } run) return;
         ShowResults(run.Results);
         _lblStatus.Text = run.IsPending ? "Running diagnostics..." : $"Run from {run.Timestamp:HH:mm:ss}";
-        _btnExport.Enabled = _btnCopy.Enabled = !run.IsPending;
+        _btnExport.Enabled = _btnCopy.Enabled = !run.IsPending && !_running;
     }
 
     void ShowResults(List<TestGroup> results)
@@ -2342,9 +2749,17 @@ class MainForm : Form
 
         foreach (var group in run.Results)
         {
+            bool notRun = run.NotRun.Contains(group.Name);
+            string stamp = notRun ? "  (not run)"
+                : run.RanAt.TryGetValue(group.Name, out var at) ? $"  (run at {at:yyyy-MM-dd HH:mm:ss})" : "";
             sb.AppendLine("---------------------------------------------------");
-            sb.AppendLine($"  {group.Name.ToUpperInvariant()}");
+            sb.AppendLine($"  {group.Name.ToUpperInvariant()}{stamp}");
             sb.AppendLine("---------------------------------------------------");
+            if (notRun)
+            {
+                sb.AppendLine();
+                continue;
+            }
             foreach (var test in group.Tests)
             {
                 char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', _ => 'o' };
@@ -2900,4 +3315,8 @@ record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Res
     public bool IsPending => Timestamp == DateTime.MinValue;
     /// <summary>Groups the user opened (true) or closed (false) in this run; the rest follow the default.</summary>
     public Dictionary<string, bool> Open { get; init; } = [];
+    /// <summary>Sections not run yet: a run started from one section leaves the others to run later.</summary>
+    public HashSet<string> NotRun { get; init; } = [];
+    /// <summary>When a section last ran on its own, after the run it belongs to, by name.</summary>
+    public Dictionary<string, DateTime> RanAt { get; init; } = [];
 }
