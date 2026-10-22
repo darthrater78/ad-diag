@@ -105,15 +105,18 @@ public class EntraSsoTests
         Assert.Contains("tenant Contoso", Entry(group, "Join Type").Detail);
         Assert.Contains("obtained from CONTOSO.COM", Entry(group, "Seamless SSO Ticket").Detail);
         Assert.Contains("login.microsoftonline.com and autologon.microsoftazuread-sso.com", Entry(group, "Entra Endpoints").Detail);
-        Assert.Equal(new Readiness(Status.Pass, "Ready for Seamless SSO.", false), group.Readiness);
+        Assert.Equal(new Readiness(Status.Pass, "Ready for single sign-on.", false), group.Readiness);
     }
+
+    // A hybrid joined PC that has no PRT signs in through Seamless SSO alone
+    static FakeProbe HybridWithoutPrt() => Machine(Dsreg("YES", "YES", prt: "NO"));
 
     [Theory]
     [InlineData(3, "Internet")]
     [InlineData(2, "Trusted sites")]
-    public void Hybrid_UrlOutsideIntranetZone_IsNotReady(int zone, string zoneName)
+    public void Hybrid_NoPrt_UrlOutsideIntranetZone_IsNotReady(int zone, string zoneName)
     {
-        var probe = Hybrid();
+        var probe = HybridWithoutPrt();
         probe.Url = new(zone, 0x20000, 0);
 
         var group = Run(probe);
@@ -132,18 +135,18 @@ public class EntraSsoTests
     [InlineData(0x20000, true)]
     [InlineData(0x10000, false)]
     [InlineData(0x30000, false)]
-    public void Hybrid_IntranetLogonSetting_Decides(int logon, bool passes)
+    public void Hybrid_NoPrt_IntranetLogonSetting_Decides(int logon, bool passes)
     {
-        var probe = Hybrid();
+        var probe = HybridWithoutPrt();
         probe.Url = new(1, logon, 0);
 
         Assert.Equal(passes ? Status.Pass : Status.Fail, Entry(Run(probe), "Automatic Logon").Status);
     }
 
     [Fact]
-    public void Hybrid_StatusBarScriptsOff_WarnsAndPointsToGuide()
+    public void Hybrid_NoPrt_StatusBarScriptsOff_WarnsAndPointsToGuide()
     {
-        var probe = Hybrid();
+        var probe = HybridWithoutPrt();
         probe.Url = new(1, 0x20000, 3);
 
         var group = Run(probe);
@@ -152,10 +155,39 @@ public class EntraSsoTests
         Assert.Equal(new Readiness(Status.Warn, "Ready for Seamless SSO, with warnings.", true), group.Readiness);
     }
 
+    // The log from a working hybrid joined PC: PRT in place, autologon URL in the Internet zone
     [Fact]
-    public void Hybrid_NoSeamlessTicket_FailsWithTheError()
+    public void Hybrid_WithPrt_SeamlessSsoNotSetUp_IsReadyThroughThePrt()
     {
         var probe = Hybrid();
+        probe.Url = new(3, 0x20000, 0);
+        probe.Tools["klist get HTTP/autologon"] = KlistGetSsoFailed;
+
+        var group = Run(probe);
+
+        var zone = Entry(group, "Intranet Zone");
+        Assert.Equal(Status.Warn, zone.Status);
+        Assert.Contains("in the Internet zone", zone.Detail);
+        Assert.Contains("only browsers and apps that can't use it", zone.Detail);
+        Assert.Equal(Status.Warn, Entry(group, "Seamless SSO Ticket").Status);
+        Assert.DoesNotContain(group.Tests, t => t.Status == Status.Fail);
+        Assert.Equal(new Readiness(Status.Warn,
+            "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready.", true), group.Readiness);
+    }
+
+    [Fact]
+    public void Hybrid_WithPrt_OtherWarning_IsReadyWithWarnings()
+    {
+        var probe = Hybrid();
+        probe.OpenPorts.Remove(443);
+
+        Assert.Equal(new Readiness(Status.Warn, "Ready for single sign-on, with warnings.", true), Run(probe).Readiness);
+    }
+
+    [Fact]
+    public void Hybrid_NoPrt_NoSeamlessTicket_FailsWithTheError()
+    {
+        var probe = HybridWithoutPrt();
         probe.Tools["klist get HTTP/autologon"] = KlistGetSsoFailed;
 
         var group = Run(probe);
@@ -182,13 +214,37 @@ public class EntraSsoTests
     }
 
     [Fact]
-    public void Hybrid_StalePrt_Warns()
+    public void Hybrid_PrtADayOld_Passes()
     {
-        var group = Run(Machine(Dsreg("YES", "YES", prtTime: "2026-10-21 22:00:00.000 UTC")));
+        var group = Run(Machine(Dsreg("YES", "YES", prtTime: "2026-10-21 09:14:03.000 UTC")));
+
+        var entry = Entry(group, "Primary Refresh Token");
+        Assert.Equal(Status.Pass, entry.Status);
+        Assert.Contains("23h 45m ago", entry.Detail);
+    }
+
+    [Fact]
+    public void Hybrid_ExpiredPrt_WarnsAndSeamlessSsoCounts()
+    {
+        var probe = Machine(Dsreg("YES", "YES", prtTime: "2026-10-07 08:00:00.000 UTC"));
+        probe.Url = new(3, 0x20000, 0);
+
+        var group = Run(probe);
 
         var entry = Entry(group, "Primary Refresh Token");
         Assert.Equal(Status.Warn, entry.Status);
-        Assert.Contains("11h 0m ago", entry.Detail);
+        Assert.Contains("expired", entry.Detail);
+        Assert.Equal(Status.Fail, Entry(group, "Intranet Zone").Status);
+        Assert.Equal(new Readiness(Status.Fail, "Not ready for Seamless SSO.", true), group.Readiness);
+    }
+
+    [Fact]
+    public void EntraJoined_ExpiredPrt_Fails()
+    {
+        var group = Run(Machine(Dsreg("YES", "NO", prtTime: "2026-10-07 08:00:00.000 UTC")));
+
+        Assert.Equal(Status.Fail, Entry(group, "Primary Refresh Token").Status);
+        Assert.Equal(new Readiness(Status.Fail, "Not ready for single sign-on.", true), group.Readiness);
     }
 
     [Fact]

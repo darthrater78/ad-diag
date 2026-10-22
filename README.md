@@ -147,11 +147,11 @@ Checks whether this machine's own host record can reach, and is right on, the DN
 
 Whether this PC is ready for single sign-on to Microsoft Entra ID. It checks only this PC, for basic readiness: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated. The group ends with a **Readiness** line, and when the PC isn't ready, a **See the fixes in the Guide** link opens the Guide tab at this group's section, which has the recommended fix for each check.
 
-How the PC is joined decides what is checked, since Seamless SSO only applies to domain-joined and hybrid joined PCs:
+How the PC is joined decides what is checked. Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows; domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is only the fallback, for browsers and apps that can't use the token, so while the token is in place a Seamless SSO problem warns instead of failing, and the verdict reads "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready":
 
 - **Join Type** — from `dsregcmd /status`: Microsoft Entra hybrid joined, Microsoft Entra joined, domain joined only, or neither (not ready)
 - **Device Auth** — `DeviceAuthStatus` must be `SUCCESS` (Entra and hybrid joined)
-- **Primary Refresh Token** — `AzureAdPrt` must be `YES` and refreshed in the last 4 hours. Missing on a hybrid joined PC warns, since Seamless SSO covers for it; on an Entra joined PC it fails
+- **Primary Refresh Token** — `AzureAdPrt` must be `YES` and renewed in the last 14 days, its lifetime. Windows renews it at sign-in, at unlock and when apps ask for a token, so a day or two old is normal. Missing or expired on a hybrid joined PC warns, since Seamless SSO covers for it; on an Entra joined PC it fails
 
 Domain-joined and hybrid joined PCs (Seamless SSO):
 

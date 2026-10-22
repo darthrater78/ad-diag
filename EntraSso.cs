@@ -11,10 +11,12 @@ namespace AdDiag;
 // a password. It checks only this PC (how it is joined, its tokens, the browser settings Seamless SSO needs, and a
 // direct connection to the sign-in endpoints); whether Seamless SSO is turned on in the tenant isn't visible from here.
 //
-// Domain-joined and hybrid joined PCs use Seamless SSO: the browser gets a Kerberos ticket for the AZUREADSSOACC
-// account's SPN from a domain controller and hands it to Entra ID. Entra joined PCs don't use it at all: they sign in
-// with their Primary Refresh Token, and reach AD resources with the Kerberos ticket Entra ID issues through cloud
-// Kerberos trust (OnPremTgt). So the join type decides which checks run. The fixes are in the Guide tab.
+// Entra joined and hybrid joined PCs sign in with their Primary Refresh Token (PRT), which Edge, Chrome and Office
+// use on Windows. Seamless SSO, where the browser gets a Kerberos ticket for the AZUREADSSOACC account's SPN from a
+// domain controller and hands it to Entra ID, is how domain-joined PCs sign in, and on a hybrid joined PC only the
+// fallback for browsers and apps that can't use the PRT, or for when it is missing. Entra joined PCs reach AD
+// resources with the Kerberos ticket Entra ID issues through cloud Kerberos trust (OnPremTgt). So the join type and
+// the PRT decide which checks run and what they weigh. The fixes are in the Guide tab.
 static partial class Diagnostics
 {
     public const string EntraSsoGroup = "Entra Single Sign-On";
@@ -27,8 +29,12 @@ static partial class Diagnostics
     public const string SsoUrl = "https://autologon.microsoftazuread-sso.com";
     const string LoginHost = "login.microsoftonline.com", AutologonHost = "autologon.microsoftazuread-sso.com";
 
-    // Windows refreshes the Primary Refresh Token every 4 hours while the user is signed in
-    static readonly TimeSpan PrtMaxAge = TimeSpan.FromHours(4);
+    // A Primary Refresh Token is valid for 14 days. Windows renews it when the user signs in or unlocks, or an app asks
+    // for a token, so one a day or two old on an idle PC is normal; one older than its lifetime has expired
+    static readonly TimeSpan PrtLifetime = TimeSpan.FromDays(14);
+
+    // Seamless SSO's own checks: on a hybrid joined PC with a PRT these cover only the fallback
+    static readonly HashSet<string> SeamlessChecks = [SsoTicket, SsoZone, SsoLogon, SsoStatusBar];
 
     // URL security policy values (urlmon.h)
     const int LogonSilent = 0x00000, LogonPrompt = 0x10000, LogonIntranetOnly = 0x20000, LogonAnonymous = 0x30000;
@@ -65,12 +71,15 @@ static partial class Diagnostics
 
         bool seamless = kind is JoinKind.Hybrid or JoinKind.DomainOnly;
         tests.Add(DeviceAuthCheck(ds, kind.Value));
-        tests.Add(PrtCheck(ds, kind.Value, nowUtc));
+        var prt = PrtCheck(ds, kind.Value, nowUtc);
+        tests.Add(prt);
+        bool fallbackOnly = kind == JoinKind.Hybrid && prt.Status == Status.Pass;
 
         if (seamless)
         {
-            tests.Add(SeamlessTicketCheck(cfg, probe));
-            tests.AddRange(BrowserZoneChecks(cfg, probe));
+            var sso = new List<TestEntry> { SeamlessTicketCheck(cfg, probe) };
+            sso.AddRange(BrowserZoneChecks(cfg, probe));
+            tests.AddRange(fallbackOnly ? sso.Select(AsFallback) : sso);
         }
         else
         {
@@ -78,8 +87,13 @@ static partial class Diagnostics
         }
 
         tests.Add(EndpointsCheck(cfg, probe, seamless ? [LoginHost, AutologonHost] : [LoginHost]));
-        return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless));
+        return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless, fallbackOnly));
     }
+
+    // A Seamless SSO failure on a PC that signs in with its PRT breaks only the fallback, so it warns
+    static TestEntry AsFallback(TestEntry test) => test.Status == Status.Fail
+        ? test with { Status = Status.Warn, Detail = test.Detail + "; this PC signs in with its Primary Refresh Token, so only browsers and apps that can't use it are affected" }
+        : test;
 
     // How the PC is joined, which decides what else is checked; null when dsregcmd reported no join state
     static (JoinKind? Kind, TestEntry Entry) JoinCheck(Dictionary<string, string> ds)
@@ -129,10 +143,10 @@ static partial class Diagnostics
 
         var age = nowUtc - updated;
         if (age < TimeSpan.Zero) age = TimeSpan.Zero;
-        string when = $"refreshed {updated.ToLocalTime():g} ({FormatTimeSpan(age)} ago)";
-        return age <= PrtMaxAge
+        string when = $"renewed {updated.ToLocalTime():g} ({FormatTimeSpan(age)} ago)";
+        return age <= PrtLifetime
             ? new(SsoPrt, Status.Pass, $"AzureAdPrt: YES, {when}")
-            : new(SsoPrt, Status.Warn, $"AzureAdPrt: YES, but {when}; Windows refreshes it every 4 hours, so refreshing is failing");
+            : new(SsoPrt, missing, $"AzureAdPrt: YES, but {when}; it has expired, since a token is valid for 14 days" + fallback);
     }
 
     static TestEntry SeamlessTicketCheck(DiagConfig cfg, IProbe probe)
@@ -237,11 +251,24 @@ static partial class Diagnostics
                 $"No direct connection on port 443 to {string.Join(", ", unreachable)}; expected only if a proxy carries this traffic");
     }
 
-    static Readiness SsoReadiness(List<TestEntry> tests, bool seamless)
+    static Readiness SsoReadiness(List<TestEntry> tests, bool seamless, bool fallbackOnly)
     {
         var counted = tests.Where(t => t.Status != Status.Skip).ToList();
         var worst = counted.Any(t => t.Status == Status.Fail) ? Status.Fail
             : counted.Any(t => t.Status == Status.Warn) ? Status.Warn : Status.Pass;
+
+        if (fallbackOnly)
+        {
+            bool onlyFallback = counted.Where(t => t.Status != Status.Pass).All(t => SeamlessChecks.Contains(t.Name));
+            return worst switch
+            {
+                Status.Fail => new(worst, "Not ready for single sign-on.", true),
+                Status.Warn when onlyFallback =>
+                    new(worst, "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not ready.", true),
+                Status.Warn => new(worst, "Ready for single sign-on, with warnings.", true),
+                _ => new(worst, "Ready for single sign-on.", false),
+            };
+        }
 
         if (seamless)
             return worst switch
