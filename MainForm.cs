@@ -2554,17 +2554,17 @@ class MainForm : Form
 
     static int UrlPolicy(IInternetSecurityManager manager, string url, int action)
     {
-        var policy = new byte[4];
         // S_FALSE means the action isn't allowed; the policy value still says which setting applies
-        int hr = manager.ProcessUrlAction(url, action, policy, policy.Length, IntPtr.Zero, 0, PuafNoUi, 0);
+        int hr = manager.ProcessUrlAction(url, action, out int policy, sizeof(int), IntPtr.Zero, 0, PuafNoUi, 0);
         if (hr < 0) Marshal.ThrowExceptionForHR(hr);
-        return BitConverter.ToInt32(policy, 0);
+        return policy;
     }
 
     [DllImport("urlmon.dll")]
     static extern int CoInternetCreateSecurityManager(IntPtr serviceProvider, out IInternetSecurityManager manager, int reserved);
 
-    // urlmon.h; methods in vtable order, the ones not called declared with placeholder arguments
+    // urlmon.h; methods in vtable order, the ones not called declared with placeholder arguments. No arrays: a COM
+    // interface passes one as a SAFEARRAY, so a BYTE* buffer is declared as the one int it holds.
     [ComImport, Guid("79eac9ee-baf9-11ce-8c82-00aa004ba90b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IInternetSecurityManager
     {
@@ -2573,7 +2573,7 @@ class MainForm : Form
         [PreserveSig] int MapUrlToZone([MarshalAs(UnmanagedType.LPWStr)] string url, out int zone, int flags);
         [PreserveSig] int GetSecurityId(IntPtr url, IntPtr securityId, IntPtr securityIdSize, IntPtr reserved);
         [PreserveSig] int ProcessUrlAction([MarshalAs(UnmanagedType.LPWStr)] string url, int action,
-            [Out] byte[] policy, int policySize, IntPtr context, int contextSize, int flags, int reserved);
+            out int policy, int policySize, IntPtr context, int contextSize, int flags, int reserved);
     }
 
     const ushort DnsTypeSrv = 33;
