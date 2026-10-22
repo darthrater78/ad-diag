@@ -205,4 +205,8 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
         Call("dns", $"A/AAAA {name} {From(server)}", () => inner.QueryAddresses(name, server, ct), Addresses);
 
     public bool IsElevated() => Call("machine", "Elevation", inner.IsElevated, elevated => elevated ? "running as Administrator" : "not elevated");
+
+    public UrlSecurity UrlSecurity(string url, CancellationToken ct) =>
+        Call("machine", $"Internet settings for {url}", () => inner.UrlSecurity(url, ct),
+            s => $"zone {s.Zone}, logon policy 0x{s.Logon:x}, status bar policy {s.StatusBar}");
 }

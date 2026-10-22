@@ -46,7 +46,17 @@ interface IProbe
     /// </summary>
     IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct);
     bool IsElevated();
+    /// <summary>
+    /// How this user's Windows Internet settings treat <paramref name="url"/>: its security zone and the policies
+    /// for automatic logon and status bar updates by script, as the URL security manager that browsers ask reports them.
+    /// </summary>
+    UrlSecurity UrlSecurity(string url, CancellationToken ct);
 }
+
+/// <param name="Zone">0 Local machine, 1 Local intranet, 2 Trusted sites, 3 Internet, 4 Restricted sites.</param>
+/// <param name="Logon">URLACTION_CREDENTIALS_USE policy: 0 automatic logon, 0x10000 prompt, 0x20000 automatic in the intranet zone only, 0x30000 anonymous.</param>
+/// <param name="StatusBar">"Allow status bar updates via script" policy: 0 allowed, 1 prompt, 3 disallowed.</param>
+record UrlSecurity(int Zone, int Logon, int StatusBar);
 
 /// <param name="ZtnaAdapter">
 /// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
@@ -54,7 +64,9 @@ interface IProbe
 record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
 enum Status { Pass, Fail, Warn, Skip }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
-record TestGroup(string Name, List<TestEntry> Tests);
+record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
+/// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>
+record Readiness(Status Status, string Text, bool ShowGuide);
 
 // The test groups (the eighth, dynamic DNS registration, is in DnsRegistration.cs). Kept free of any WinForms
 // dependency so they can be unit tested (see tests/AdDiag.Tests).

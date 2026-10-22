@@ -98,6 +98,12 @@ public class DiagnosticsTests
         }
 
         public bool IsElevated() => Elevated;
+
+        // The Seamless SSO URL in the Local intranet zone, automatic logon in the intranet zone, status bar scripts allowed
+        public UrlSecurity Url = new(1, 0x20000, 0);
+        public Exception? UrlError;
+
+        public UrlSecurity UrlSecurity(string url, CancellationToken ct) => UrlError != null ? throw UrlError : Url;
     }
 
     // A machine where everything works

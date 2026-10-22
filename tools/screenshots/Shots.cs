@@ -49,11 +49,19 @@ static class Shots
     {
         Pump(800);
         Populate(form);
-        form.Height = 1460;
+        // Groups with no issue start collapsed, so the window only needs the height of the open ones
+        form.Height = 1120;
         Pump(800);
         Capture(form, outDir, "results.png");
         form.Height = 900;
         Pump(500);
+
+        // Where "See the fixes in the Guide" under a group that isn't ready leads
+        Call(form, "SwitchTab", "guide");
+        FrontFill(Get<RichTextBox>(form, "_guideBox"));
+        Call(form, "ShowGuideSection", Diagnostics.EntraSsoGroup);
+        Pump(500);
+        Capture(form, outDir, "guide-sso.png");
 
         Call(form, "SwitchTab", "gp");
         // Wine re-syncs the child order from its native z-order, which leaves the Runs bar in front of
@@ -246,6 +254,18 @@ static class Shots
                 new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
                 new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
             ]),
+            // A hybrid joined PC whose Group Policy never put the Seamless SSO address in the intranet zone
+            new(Diagnostics.EntraSsoGroup,
+            [
+                new("Join Type", Status.Pass, "Microsoft Entra hybrid joined (DomainJoined: YES, AzureAdJoined: YES), tenant Contoso"),
+                new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
+                new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, refreshed {now.AddMinutes(-42):g} (42m ago)"),
+                new("Seamless SSO Ticket", Status.Pass, "HTTP/autologon.microsoftazuread-sso.com obtained from CONTOSO.COM"),
+                new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, so browsers send it no Kerberos ticket and Seamless SSO never starts"),
+                new("Automatic Logon", Status.Skip, "Depends on the Intranet Zone check"),
+                new("Status Bar Scripts", Status.Skip, "Depends on the Intranet Zone check"),
+                new("Entra Endpoints", Status.Pass, "login.microsoftonline.com and autologon.microsoftazuread-sso.com reachable on port 443"),
+            ], new Readiness(Status.Fail, "Not ready for Seamless SSO.", true)),
         ];
     }
 

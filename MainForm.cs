@@ -86,6 +86,8 @@ class MainForm : Form
     static readonly Font TestNameFont = new("Segoe UI", 9f);
     static readonly Font TestDetailFont = new(MonoFamily, 8.5f);
     static readonly Font PlaceholderFont = new("Segoe UI", 10f);
+    static readonly Font ReadinessNameFont = new("Segoe UI", 9f, FontStyle.Bold);
+    static readonly Font ResultsLinkFont = new("Segoe UI", 9f, FontStyle.Underline);
     static SolidBrush PassBrush = new(PassColor);
     static SolidBrush FailBrush = new(FailColor);
     static SolidBrush WarnBrush = new(WarnColor);
@@ -107,7 +109,10 @@ class MainForm : Form
     readonly ComboBox _cmbZtna;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount;
     readonly ResultsCanvas _resultsCanvas;
-    readonly Panel _summaryPanel, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
+    readonly CheckBox _chkExpandAll;
+    bool _expandAll; // "Expand all groups after a run"; never saved
+    readonly Dictionary<string, int> _guideAnchors = []; // Guide section title -> its position in the Guide
+    readonly Panel _summaryPanel, _resultsArea, _resultsBar, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
     readonly RichTextBox _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox;
     bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
@@ -248,10 +253,38 @@ class MainForm : Form
         tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog]);
 
         // Results canvas (owner-drawn)
-        _resultsScrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
+        _resultsScrollPanel = new KeepScrollPanel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
         _resultsCanvas = new ResultsCanvas { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results" };
         _resultsCanvas.Paint += PaintResults;
+        _resultsCanvas.Activated += ActivateResultsItem;
         _resultsScrollPanel.Controls.Add(_resultsCanvas);
+
+        // Above the results: whether groups open after a run, and opening or closing them all
+        _chkExpandAll = new CheckBox { Text = "Expand all groups after a run", ForeColor = DimColor, BackColor = PanelColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(14, 4) };
+        _chkExpandAll.CheckedChanged += (s, e) =>
+        {
+            _expandAll = _chkExpandAll.Checked;
+            SelectedRun?.Open.Clear(); // the new default applies to the run on show too
+            RerenderResults();
+        };
+        LinkLabel BarLink(string text, bool open)
+        {
+            var link = new LinkLabel { Text = text, Font = new Font("Segoe UI", 8.5f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, BackColor = PanelColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            link.LinkClicked += (s, e) => SetAllGroupsOpen(open);
+            return link;
+        }
+        var lnkExpandAll = BarLink("Expand all", true);
+        var lnkCollapseAll = BarLink("Collapse all", false);
+        _resultsBar = new Panel { Height = 26, Dock = DockStyle.Top, BackColor = PanelColor, Visible = false };
+        _resultsBar.Controls.AddRange([_chkExpandAll, lnkExpandAll, lnkCollapseAll]);
+        _resultsBar.Resize += (s, e) =>
+        {
+            lnkCollapseAll.Location = new Point(_resultsBar.ClientSize.Width - lnkCollapseAll.Width - S(14), S(6));
+            lnkExpandAll.Location = new Point(lnkCollapseAll.Left - lnkExpandAll.Width - S(14), S(6));
+        };
+        _resultsArea = new Panel { Dock = DockStyle.Fill, BackColor = PanelColor };
+        _resultsArea.Controls.Add(_resultsScrollPanel);
+        _resultsArea.Controls.Add(_resultsBar);
 
         _resultsScrollPanel.Resize += (s, e) =>
         {
@@ -341,7 +374,7 @@ class MainForm : Form
         _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
         _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
 
-        contentWrapper.Controls.Add(_resultsScrollPanel);
+        contentWrapper.Controls.Add(_resultsArea);
         contentWrapper.Controls.Add(_guideBox);
         contentWrapper.Controls.Add(_gpPanel);
         contentWrapper.Controls.Add(_ticketsPanel);
@@ -649,6 +682,7 @@ class MainForm : Form
         _selectedRunIndex = -1;
         _renderedGroups = null;
         _placeholderText = "Enter target domain and run diagnostics";
+        _resultsBar.Visible = false;
         _resultsCanvas.Height = S(200);
         _resultsCanvas.Invalidate();
         _summaryPanel.Visible = false;
@@ -674,7 +708,7 @@ class MainForm : Form
 
     void SwitchTab(string tab)
     {
-        _resultsScrollPanel.Visible = tab == "results";
+        _resultsArea.Visible = tab == "results";
         _guideBox.Visible = tab == "guide";
         _gpPanel.Visible = tab == "gp";
         _ticketsPanel.Visible = tab == "tickets";
@@ -699,11 +733,14 @@ class MainForm : Form
     void PopulateGuide()
     {
         _guideBox.Clear();
+        _guideAnchors.Clear();
         AppendGuide("Test guide\n", new Font("Segoe UI", 13f, FontStyle.Bold), TextColor);
 
         foreach (var (title, body) in GetGuideSections())
         {
-            AppendGuide($"\n{title}\n\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
+            AppendGuide("\n", GuideBodyFont, TextColor);
+            _guideAnchors[title] = _guideBox.TextLength;
+            AppendGuide($"{title}\n\n", new Font("Segoe UI", 10.5f, FontStyle.Bold), TextColor);
 
             var lines = body.Split('\n');
             foreach (var line in lines)
@@ -730,6 +767,12 @@ class MainForm : Form
                     AppendGuide("  Fix: ", GuideFixLabelFont, FixLabelColor);
                     AppendGuide(trimmed[5..].TrimStart() + "\n\n", GuideFixFont, DimColor);
                 }
+                else if (line.TrimStart().StartsWith("Recommended:"))
+                {
+                    string trimmed = line.TrimStart();
+                    AppendGuide("  Recommended: ", GuideFixLabelFont, FixLabelColor);
+                    AppendGuide(trimmed[12..].TrimStart() + "\n\n", GuideFixFont, DimColor);
+                }
                 else if (line.TrimStart().StartsWith("- "))
                 {
                     AppendGuide("    " + line.TrimStart() + "\n", GuideBodyFont, DimColor);
@@ -745,6 +788,32 @@ class MainForm : Form
         _guideBox.SelectionStart = 0;
         _guideBox.ScrollToCaret();
     }
+
+    /// <summary>Opens the Guide tab with the section <paramref name="title"/> at the top.</summary>
+    void ShowGuideSection(string title)
+    {
+        SwitchTab("guide");
+        if (!_guideAnchors.TryGetValue(title, out int at)) return;
+        // A hidden control is left out of docking, so the Guide only gets its size now; its lines wrap at that
+        // width, so it is sized before the scroll or the scroll lands on the wrong line
+        _guideBox.Parent?.PerformLayout();
+        _guideBox.SelectionStart = at;
+        _guideBox.SelectionLength = 0;
+        // Scrolled by lines so the section's title is the first line shown, not just somewhere on screen. The line
+        // on top is read back after each scroll and corrected, since not every rich edit scrolls exactly as asked
+        int target = _guideBox.GetLineFromCharIndex(at);
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            int top = _guideBox.GetLineFromCharIndex(_guideBox.GetCharIndexFromPosition(new Point(1, 1)));
+            if (top == target) break;
+            SendMessage(_guideBox.Handle, EmLineScroll, IntPtr.Zero, target - top);
+        }
+    }
+
+    const int EmLineScroll = 0x00B6;
+
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
 
     void AppendGuide(string text, Font font, Color color)
     {
@@ -853,6 +922,32 @@ class MainForm : Form
                 "  Fix: Run 'w32tm /resync'. Verify the Windows Time service (W32Time) is running and syncing from the domain hierarchy: 'w32tm /query /status'\n\n" +
                 "• Time Source — confirms this client is syncing from the domain hierarchy, not an external NTP server\n" +
                 "  Fix: Domain members should sync from the domain hierarchy automatically. If not, run 'w32tm /config /syncfromflags:domhier /update'"),
+
+            (Diagnostics.EntraSsoGroup,
+                "Checks whether this PC is ready for single sign-on to Microsoft Entra ID. Only this PC is checked: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated, where Seamless SSO doesn't apply.\n" +
+                "Domain-joined and Microsoft Entra hybrid joined PCs use Seamless SSO. Microsoft Entra joined PCs don't: they sign in to cloud apps with their Primary Refresh Token, and to AD resources with cloud Kerberos trust.\n\n" +
+                "• Join Type — how this PC is joined, from dsregcmd /status: hybrid joined (AzureAdJoined and DomainJoined both YES), Entra joined (AzureAdJoined only) or domain joined only\n" +
+                "  Fix: A domain-joined PC that should be hybrid joined: check that Microsoft Entra Connect > Configure device options has set up the service connection point for this forest, and that the PC's OU is synchronized. Then restart the PC, or run 'dsregcmd /join' as SYSTEM\n\n" +
+                "• Device Auth — DeviceAuthStatus must be SUCCESS, meaning the device is enabled in Entra ID and its certificate is valid\n" +
+                "  Fix: If FAILED, an Entra admin checks the device in the Microsoft Entra admin center > Devices. Disabled: enable it. Deleted: run 'dsregcmd /leave' as Administrator and restart to join again\n\n" +
+                "• Primary Refresh Token — AzureAdPrt must be YES. Windows refreshes it every 4 hours; an older one means refreshing is failing\n" +
+                "  Fix: Lock and unlock, or sign out and in. If it stays NO, read the Diagnostic Data section of 'dsregcmd /status' for the error, and check that login.microsoftonline.com and device.login.microsoftonline.com are reachable without TLS inspection\n\n" +
+                "• Seamless SSO Ticket — a Kerberos ticket for HTTP/autologon.microsoftazuread-sso.com from a domain controller ('klist get'). Without it the AZUREADSSOACC computer account is missing from the user's domain, which means Seamless SSO was never turned on for this forest\n" +
+                "  Fix: On the Microsoft Entra Connect server: Change user sign-in > Enable single sign-on, and enter Domain Admin credentials for this forest. To confirm, run 'Get-ADComputer AZUREADSSOACC -Properties servicePrincipalName'\n" +
+                "  Recommended: allow only AES256 on AZUREADSSOACC ('Set-ADComputer AZUREADSSOACC -KerberosEncryptionType AES256') and roll its key at least every 30 days with 'Update-AzureADSSOForest' on the Entra Connect server\n\n" +
+                "• Intranet Zone — https://autologon.microsoftazuread-sso.com must be in the Local intranet zone; browsers send a Kerberos ticket only to intranet sites\n" +
+                "  Fix: In a GPO for the users: User Configuration > Policies > Administrative Templates > Windows Components > Internet Explorer > Internet Control Panel > Security Page > Site to Zone Assignment List. Enable it and add https://autologon.microsoftazuread-sso.com with the value 1. Then run gpupdate (Group Policy tab) and sign out and in. Edge and Chrome follow this setting; Firefox needs network.negotiate-auth.trusted-uris set to the same address\n\n" +
+                "• Automatic Logon — the Local intranet zone must log on automatically with the current user name and password\n" +
+                "  Fix: In the same GPO: ... Security Page > Intranet Zone > Logon options: Automatic logon only in Intranet zone\n\n" +
+                "• Status Bar Scripts — Seamless SSO needs 'Allow updates to status bar via script' on in the Local intranet zone\n" +
+                "  Fix: In the same GPO: ... Security Page > Intranet Zone > Allow updates to status bar via script: Enabled\n\n" +
+                "• Cloud Kerberos — Entra joined PCs: CloudTgt YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources\n" +
+                "  Fix: Needs Windows 10 21H2 or later with current updates. Sign out and in\n\n" +
+                "• On-premises Kerberos — Entra joined PCs: OnPremTgt YES, a ticket for AD issued through cloud Kerberos trust. Without it, file shares and printers ask for a password\n" +
+                "  Fix: The user must be synchronized from AD: in the Microsoft Entra admin center, Users > the user > On-premises sync enabled must be Yes. Once per domain, a Domain Admin who is also a Hybrid Identity Administrator creates the Microsoft Entra Kerberos server object: 'Install-Module AzureADHybridAuthenticationManagement', then 'Set-AzureADKerberosServer -Domain <domain> -UserPrincipalName <admin UPN>'. Then sign out and in on this PC\n\n" +
+                "• Entra Endpoints — a direct TCP connection on port 443 to login.microsoftonline.com and, for Seamless SSO, autologon.microsoftazuread-sso.com; nothing is sent\n" +
+                "  Fix: Allow both through the firewall and proxy, and exclude them from TLS inspection. Behind a ZTNA client, check that its policy carries them. Through a proxy a warning here can be expected\n\n" +
+                "Microsoft's guides: 'Microsoft Entra seamless single sign-on: quickstart' and 'How SSO to on-premises resources works on Microsoft Entra joined devices' on learn.microsoft.com"),
         };
 
         return s;
@@ -1588,24 +1683,7 @@ class MainForm : Form
 
     static bool IsPending(TestEntry test) => test.Status == Status.Skip && test.Detail.Length == 0;
 
-    int MeasureResultsHeight(int width)
-    {
-        if (_renderedGroups == null)
-            return S(200);
-
-        int y = S(4);
-        int detailW = DetailWidth(width);
-        foreach (var group in _renderedGroups)
-        {
-            y += S(34);
-            foreach (var test in group.Tests)
-            {
-                var sz = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
-                y += S(4) + Math.Max(S(20), sz.Height + S(4));
-            }
-        }
-        return y + S(14);
-    }
+    int MeasureResultsHeight(int width) => _renderedGroups == null ? S(200) : LayoutResults(null, width);
 
     /// <summary>"9 checks · 1 failed · 1 warning", so a group's state reads without scanning its rows.</summary>
     static string GroupCounts(TestGroup group)
@@ -1619,6 +1697,14 @@ class MainForm : Form
         if (running > 0) text += $" · {running} running";
         return text;
     }
+
+    static (string Word, Color Color) StatusLook(TestEntry test) => IsPending(test) ? ("Running", DimColor) : test.Status switch
+    {
+        Status.Pass => ("Passed", PassColor),
+        Status.Fail => ("Failed", FailColor),
+        Status.Warn => ("Warning", WarnColor),
+        _ => ("Skipped", DimColor),
+    };
 
     // Each state has its own shape as well as its own colour, so it reads without colour vision
     void DrawStatusMark(Graphics g, TestEntry test, int x, int y)
@@ -1651,77 +1737,291 @@ class MainForm : Form
         }
     }
 
+    // Points right when the group is closed, down when it is open
+    void DrawChevron(Graphics g, int x, int y, bool open)
+    {
+        int d = S(8);
+        using var pen = new Pen(DimColor, Math.Max(1f, S(3) / 2f));
+        Point[] points = open
+            ? [new(x, y + d / 4), new(x + d / 2, y + d * 3 / 4), new(x + d, y + d / 4)]
+            : [new(x + d / 4, y), new(x + d * 3 / 4, y + d / 2), new(x + d / 4, y + d)];
+        g.DrawLines(pen, points);
+    }
+
+    const string GuideLinkText = "See the fixes in the Guide";
+
+    /// <summary>
+    /// Lays the results out at <paramref name="width"/> and returns their height. With <paramref name="g"/> it also
+    /// draws them and records each item for clicks, the keyboard and screen readers; without, it only measures.
+    /// </summary>
+    int LayoutResults(Graphics? g, int width)
+    {
+        int y = S(4);
+        int left = S(GridLeft), right = width - S(GridLeft);
+        if (g != null) _resultsCanvas.Rows.Clear();
+
+        foreach (var group in _renderedGroups!)
+        {
+            bool open = IsGroupOpen(group);
+            y = LayoutHeading(g, group, open, y, left, right);
+            if (!open)
+            {
+                g?.DrawLine(RowLinePen, left, y, right, y);
+                continue;
+            }
+            foreach (var test in group.Tests)
+                y = LayoutTest(g, group.Name, test, y, left, right, DetailWidth(width));
+            if (group.Readiness is { } ready)
+                y = LayoutReadiness(g, group.Name, ready, y, left, right);
+        }
+        return y + S(14);
+    }
+
+    // A group's heading: chevron, name and counts, the whole width a button that opens and closes the group
+    int LayoutHeading(Graphics? g, TestGroup group, bool open, int y, int left, int right)
+    {
+        const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        y += S(8);
+        if (g != null)
+        {
+            string counts = GroupCounts(group);
+            DrawChevron(g, left, y + S(8), open);
+            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), TextColor, oneLine);
+            int countsW = TextRenderer.MeasureText(g, counts, GroupCountFont, Size.Empty, oneLine).Width;
+            TextRenderer.DrawText(g, counts, GroupCountFont, new Point(right - countsW, y + S(5)), DimColor, oneLine);
+            _resultsCanvas.Rows.Add(new(group.Name, group.Name, "", counts, new Rectangle(left - S(4), y, right - left + S(8), S(24)),
+                ResultsCanvas.Kind.Heading, open));
+        }
+        return y + S(26);
+    }
+
+    // One check: mark and word, name, and the detail wrapped in its column
+    int LayoutTest(Graphics? g, string group, TestEntry test, int y, int left, int right, int detailW)
+    {
+        var detailSize = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+        int rowHeight = Math.Max(S(20), detailSize.Height + S(4));
+        if (g != null)
+        {
+            var (word, color) = StatusLook(test);
+            g.DrawLine(RowLinePen, left, y, right, y);
+            DrawStatusMark(g, test, left, y + S(8));
+            TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(5)), color, TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, test.Name, TestNameFont,
+                new Rectangle(S(NameX), y + S(4), S(DetailX - NameX - 6), S(18)), TextColor,
+                TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            // The detail is plain text: the mark and word carry the status, so a long line stays readable
+            TextRenderer.DrawText(g, test.Detail, TestDetailFont,
+                new Rectangle(S(DetailX), y + S(5), detailW, detailSize.Height),
+                test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
+            _resultsCanvas.Rows.Add(new(group, test.Name, word, test.Detail, new Rectangle(left, y + S(4), right - left, rowHeight)));
+        }
+        return y + S(4) + rowHeight;
+    }
+
+    // The group's verdict as one more row: its mark and word, "Readiness", the verdict, and a link to the Guide's fixes
+    int LayoutReadiness(Graphics? g, string group, Readiness ready, int y, int left, int right)
+    {
+        const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        var entry = new TestEntry("Readiness", ready.Status, ready.Text);
+        var (word, color) = StatusLook(entry);
+        int textW = TextRenderer.MeasureText(ready.Text, TestNameFont, Size.Empty, oneLine).Width;
+        int linkW = TextRenderer.MeasureText(GuideLinkText, ResultsLinkFont, Size.Empty, oneLine).Width;
+        bool linkBelow = ready.ShowGuide && S(DetailX) + textW + S(10) + linkW > right;
+        int rowHeight = linkBelow ? S(40) : S(22);
+        if (g != null)
+        {
+            g.DrawLine(RowLinePen, left, y, right, y);
+            DrawStatusMark(g, entry, left, y + S(9));
+            TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(6)), color, oneLine);
+            TextRenderer.DrawText(g, "Readiness", ReadinessNameFont, new Point(S(NameX), y + S(5)), TextColor, oneLine);
+            TextRenderer.DrawText(g, ready.Text, TestNameFont, new Point(S(DetailX), y + S(5)), TextColor, oneLine);
+            _resultsCanvas.Rows.Add(new(group, "Readiness", word, ready.Text, new Rectangle(left, y + S(4), right - left, rowHeight)));
+            if (ready.ShowGuide)
+            {
+                var at = linkBelow ? new Point(S(DetailX), y + S(23)) : new Point(S(DetailX) + textW + S(10), y + S(5));
+                TextRenderer.DrawText(g, GuideLinkText, ResultsLinkFont, at, AccentColor, oneLine);
+                _resultsCanvas.Rows.Add(new(group, GuideLinkText, "", "", new Rectangle(at.X - S(2), at.Y - S(1), linkW + S(4), S(18)),
+                    ResultsCanvas.Kind.GuideLink));
+            }
+        }
+        return y + S(4) + rowHeight;
+    }
+
     void PaintResults(object? sender, PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-        int w = _resultsCanvas.Width;
 
         if (_renderedGroups == null)
         {
+            _resultsCanvas.Rows.Clear();
             string msg = _placeholderText ?? "Enter target domain and run diagnostics";
             TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(S(GridLeft), S(40)), DimColor, TextFormatFlags.NoPrefix);
             return;
         }
 
-        int y = S(4);
-        int left = S(GridLeft), right = w - S(GridLeft);
-        int detailW = DetailWidth(w);
-        _resultsCanvas.Rows.Clear();
+        LayoutResults(g, _resultsCanvas.Width);
+        if (_resultsCanvas.FocusedItem is { } focused && _resultsCanvas.Focused && _resultsCanvas.ShowFocus)
+            ControlPaint.DrawFocusRectangle(g, focused.Bounds, TextColor, PanelColor);
+    }
 
-        foreach (var group in _renderedGroups)
+    static bool HasIssues(TestGroup group) => group.Tests.Any(t => t.Status is Status.Fail or Status.Warn);
+
+    // A group the user opened or closed stays that way; otherwise only groups with a failure or warning are open,
+    // or all of them with "Expand all groups after a run"
+    bool IsGroupOpen(TestGroup group) =>
+        SelectedRun is { } run && run.Open.TryGetValue(group.Name, out bool open) ? open : _expandAll || HasIssues(group);
+
+    void RerenderResults()
+    {
+        if (_renderedGroups != null) RenderResults(_renderedGroups);
+    }
+
+    void SetAllGroupsOpen(bool open)
+    {
+        if (SelectedRun is not { } run || _renderedGroups == null) return;
+        foreach (var group in _renderedGroups) run.Open[group.Name] = open;
+        RerenderResults();
+    }
+
+    void ActivateResultsItem(ResultsCanvas.Row item)
+    {
+        switch (item.Kind)
         {
-            y += S(12);
-            TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left - S(3), y), TextColor, TextFormatFlags.NoPrefix);
-            string counts = GroupCounts(group);
-            int countsW = TextRenderer.MeasureText(g, counts, GroupCountFont, Size.Empty, TextFormatFlags.NoPrefix).Width;
-            TextRenderer.DrawText(g, counts, GroupCountFont, new Point(right - countsW, y + S(2)), DimColor, TextFormatFlags.NoPrefix);
-            y += S(22);
-
-            foreach (var test in group.Tests)
-            {
-                bool pending = IsPending(test);
-                var (word, color) = pending ? ("Running", DimColor) : test.Status switch
-                {
-                    Status.Pass => ("Passed", PassColor),
-                    Status.Fail => ("Failed", FailColor),
-                    Status.Warn => ("Warning", WarnColor),
-                    _ => ("Skipped", DimColor),
-                };
-
-                g.DrawLine(RowLinePen, left, y, right, y);
-                y += S(4);
-                DrawStatusMark(g, test, left, y + S(4));
-                TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(1)), color, TextFormatFlags.NoPrefix);
-                TextRenderer.DrawText(g, test.Name, TestNameFont,
-                    new Rectangle(S(NameX), y, S(DetailX - NameX - 6), S(18)), TextColor,
-                    TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-
-                // The detail is plain text: the mark and word carry the status, so a long line stays readable
-                var detailSize = TextRenderer.MeasureText(g, test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
-                TextRenderer.DrawText(g, test.Detail, TestDetailFont,
-                    new Rectangle(S(DetailX), y + S(1), detailW, detailSize.Height),
-                    test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
-
-                int rowHeight = Math.Max(S(20), detailSize.Height + S(4));
-                _resultsCanvas.Rows.Add(new(group.Name, test.Name, word, test.Detail, new Rectangle(left, y, right - left, rowHeight)));
-                y += rowHeight;
-            }
+            case ResultsCanvas.Kind.Heading:
+                if (SelectedRun is not { } run || _renderedGroups?.Find(g => g.Name == item.Group) is not { } group) return;
+                run.Open[group.Name] = !IsGroupOpen(group);
+                RerenderResults();
+                break;
+            case ResultsCanvas.Kind.GuideLink:
+                ShowGuideSection(item.Group);
+                break;
         }
     }
 
     /// <summary>
-    /// The painted results list. It has no child controls, so it describes its rows to assistive technology
-    /// itself: a list whose items are the rows as last painted (name and status, the detail as the value).
+    /// The results panel's scroll area. A plain panel scrolls back to the top of the results whenever they take the
+    /// keyboard focus (a click on a group heading); this one stays where it is.
+    /// </summary>
+    sealed class KeepScrollPanel : Panel
+    {
+        protected override Point ScrollToControl(Control activeControl) => DisplayRectangle.Location;
+    }
+
+    /// <summary>
+    /// The painted results list. It has no child controls, so it handles its own clicks and keys and describes its
+    /// items to assistive technology itself: group headings (buttons that open and close the group), the rows,
+    /// and links to the Guide, as last painted. Up and Down move between headings and links; Enter or Space acts.
     /// </summary>
     sealed class ResultsCanvas : Panel
     {
-        public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds);
+        public enum Kind { Row, Heading, GuideLink }
+
+        public record struct Row(string Group, string Name, string Status, string Detail, Rectangle Bounds,
+            Kind Kind = Kind.Row, bool Expanded = false)
+        {
+            public readonly bool Actionable => Kind != Kind.Row;
+        }
 
         public readonly List<Row> Rows = [];
+        int _focus = -1; // index into Rows of the heading or link with the keyboard focus
 
-        public ResultsCanvas() { DoubleBuffered = true; }
+        public event Action<Row>? Activated;
+
+        public ResultsCanvas()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+        }
+
+        public Row? FocusedItem => _focus >= 0 && _focus < Rows.Count && Rows[_focus].Actionable ? Rows[_focus] : null;
+        public bool ShowFocus => ShowFocusCues;
+
+        public void Activate(Row item) => Activated?.Invoke(item);
+
+        int HitTest(Point p) => Rows.FindIndex(r => r.Actionable && r.Bounds.Contains(p));
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            int i = HitTest(e.Location);
+            if (e.Button != MouseButtons.Left || i < 0) return;
+            _focus = i;
+            Activate(Rows[i]);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int i = HitTest(e.Location);
+            Cursor = i >= 0 && Rows[i].Kind == Kind.GuideLink ? Cursors.Hand : Cursors.Default;
+        }
+
+        protected override bool IsInputKey(Keys keyData) =>
+            keyData is Keys.Up or Keys.Down or Keys.Enter or Keys.Space || base.IsInputKey(keyData);
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            var targets = Enumerable.Range(0, Rows.Count).Where(i => Rows[i].Actionable).ToList();
+            if (targets.Count == 0) return;
+            int pos = targets.IndexOf(_focus);
+            switch (e.KeyCode)
+            {
+                case Keys.Down:
+                    MoveFocus(targets[pos < 0 ? 0 : Math.Min(pos + 1, targets.Count - 1)]);
+                    break;
+                case Keys.Up:
+                    MoveFocus(targets[pos <= 0 ? 0 : pos - 1]);
+                    break;
+                case Keys.Enter or Keys.Space when pos >= 0:
+                    Activate(Rows[_focus]);
+                    break;
+                default:
+                    return;
+            }
+            e.Handled = e.SuppressKeyPress = true;
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            base.OnGotFocus(e);
+            if (FocusedItem == null) _focus = Rows.FindIndex(r => r.Actionable);
+            Invalidate();
+            if (_focus >= 0) AccessibilityNotifyClients(AccessibleEvents.Focus, _focus);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            base.OnLostFocus(e);
+            Invalidate();
+        }
+
+        void MoveFocus(int index)
+        {
+            _focus = index;
+            ScrollIntoView(Rows[index].Bounds);
+            Invalidate();
+            AccessibilityNotifyClients(AccessibleEvents.Focus, index);
+        }
+
+        void ScrollIntoView(Rectangle r)
+        {
+            if (Parent is not ScrollableControl area) return;
+            int top = -Top, height = area.ClientSize.Height, margin = r.Height;
+            int y = r.Top - margin < top ? r.Top - margin
+                : r.Bottom + margin > top + height ? r.Bottom + margin - height
+                : top;
+            if (y != top) area.AutoScrollPosition = new Point(0, Math.Max(0, y));
+        }
 
         protected override AccessibleObject CreateAccessibilityInstance() => new ListAccessible(this);
 
@@ -1730,16 +2030,48 @@ class MainForm : Form
             public override AccessibleRole Role => AccessibleRole.List;
             public override int GetChildCount() => owner.Rows.Count;
             public override AccessibleObject? GetChild(int index) =>
-                index >= 0 && index < owner.Rows.Count ? new RowAccessible(owner, this, owner.Rows[index]) : null;
+                index >= 0 && index < owner.Rows.Count ? new ItemAccessible(owner, this, owner.Rows[index], index) : null;
+            public override AccessibleObject? GetFocused() =>
+                owner.Focused && owner.FocusedItem != null ? GetChild(owner._focus) : base.GetFocused();
         }
 
-        sealed class RowAccessible(ResultsCanvas owner, AccessibleObject list, Row row) : AccessibleObject
+        sealed class ItemAccessible(ResultsCanvas owner, AccessibleObject list, Row row, int index) : AccessibleObject
         {
-            public override string? Name => $"{row.Name}, {row.Status}";
-            public override string? Value => row.Detail;
+            public override string? Name => row.Kind switch
+            {
+                Kind.Heading => $"{row.Name}, {row.Detail}",
+                Kind.GuideLink => row.Name,
+                _ => $"{row.Name}, {row.Status}",
+            };
+            public override string? Value => row.Kind == Kind.Row ? row.Detail : null;
             public override string? Description => row.Group;
-            public override AccessibleRole Role => AccessibleRole.ListItem;
-            public override AccessibleStates State => AccessibleStates.ReadOnly;
+            public override AccessibleRole Role => row.Kind switch
+            {
+                Kind.Heading => AccessibleRole.OutlineButton,
+                Kind.GuideLink => AccessibleRole.Link,
+                _ => AccessibleRole.ListItem,
+            };
+            public override AccessibleStates State
+            {
+                get
+                {
+                    if (row.Kind == Kind.Row) return AccessibleStates.ReadOnly;
+                    var state = AccessibleStates.Focusable | (owner.Focused && owner._focus == index ? AccessibleStates.Focused : 0);
+                    return row.Kind == Kind.Heading
+                        ? state | (row.Expanded ? AccessibleStates.Expanded : AccessibleStates.Collapsed)
+                        : state | AccessibleStates.Linked;
+                }
+            }
+            public override string? DefaultAction => row.Kind switch
+            {
+                Kind.Heading => row.Expanded ? "Collapse" : "Expand",
+                Kind.GuideLink => "Jump",
+                _ => null,
+            };
+            public override void DoDefaultAction()
+            {
+                if (row.Actionable) owner.Activate(row);
+            }
             public override AccessibleObject? Parent => list;
             public override Rectangle Bounds => owner.RectangleToScreen(row.Bounds);
         }
@@ -1749,6 +2081,7 @@ class MainForm : Form
     {
         _renderedGroups = groups;
         _placeholderText = null;
+        _resultsBar.Visible = true;
         int h = MeasureResultsHeight(_resultsCanvas.Width);
         _resultsCanvas.Height = h;
         _resultsCanvas.Invalidate();
@@ -1808,6 +2141,8 @@ class MainForm : Form
             if (cts.IsCancellationRequested || IsDisposed) return;
             foreach (var test in result.Tests)
                 AppLog.Info("result", $"{StatusWord(test.Status),-8} {result.Name} / {test.Name}: {test.Detail}");
+            if (result.Readiness is { } ready)
+                AppLog.Info("result", $"{StatusWord(ready.Status),-8} {result.Name} / Readiness: {ready.Text}");
             int idx = results.FindIndex(g => g.Name == name);
             if (idx >= 0) results[idx] = result;
             completed++;
@@ -1828,6 +2163,7 @@ class MainForm : Form
         var trustTask = StartGroup(cfg => Diagnostics.TestTrusts(cfg, Probe));
         var kerbTask = StartGroup(cfg => Diagnostics.TestKerberosAndTime(cfg, Probe));
         var dnsRegTask = StartGroup(cfg => Diagnostics.TestDnsRegistration(cfg, Probe));
+        var ssoTask = StartGroup(cfg => Diagnostics.TestEntraSso(cfg, Probe));
 
         var pending = new List<(Task task, string name, Func<TestGroup> getResult)>
         {
@@ -1839,6 +2175,7 @@ class MainForm : Form
             (trustTask, "Trust Relationships", () => trustTask.GetAwaiter().GetResult()),
             (kerbTask, "Kerberos & Time Sync", () => kerbTask.GetAwaiter().GetResult()),
             (dnsRegTask, "Dynamic DNS Registration", () => dnsRegTask.GetAwaiter().GetResult()),
+            (ssoTask, Diagnostics.EntraSsoGroup, () => ssoTask.GetAwaiter().GetResult()),
         };
 
         while (pending.Count > 0)
@@ -1862,7 +2199,7 @@ class MainForm : Form
         if (pendingIndex >= 0)
         {
             bool wasSelected = _selectedRunIndex == pendingIndex;
-            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, dc, results);
+            _runHistory[pendingIndex] = new DiagRun(DateTime.Now, domain, dc, results) { Open = pendingRun.Open };
             if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
             if (wasSelected || _selectedRunIndex >= _runHistory.Count)
                 _selectedRunIndex = pendingIndex;
@@ -1950,6 +2287,7 @@ class MainForm : Form
             _selectedRunIndex = -1;
             _renderedGroups = null;
             _placeholderText = "Run diagnostics for this domain";
+            _resultsBar.Visible = false;
             _resultsCanvas.Height = S(200);
             _resultsCanvas.Invalidate();
             _summaryPanel.Visible = false;
@@ -2012,6 +2350,8 @@ class MainForm : Form
                 char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', _ => 'o' };
                 sb.AppendLine($"  {icon} {test.Name,-26} {test.Detail}");
             }
+            if (group.Readiness is { } ready)
+                sb.AppendLine($"  = {"Readiness",-26} {ready.Text}" + (ready.ShowGuide ? $" Fixes: Guide tab, {group.Name}." : ""));
             sb.AppendLine();
         }
         return sb.ToString();
@@ -2093,6 +2433,11 @@ class MainForm : Form
                 new("Registration Name"), new("ZTNA / VPN Client"), new("Registering Adapters"),
                 new("Zone Primary Server"), new("Update Path (Port 53)"), new("Registered Record"),
                 new("Registration Errors"),
+            ]),
+            new(Diagnostics.EntraSsoGroup, [
+                new(Diagnostics.SsoJoin), new(Diagnostics.SsoDeviceAuth), new(Diagnostics.SsoPrt),
+                new(Diagnostics.SsoTicket), new(Diagnostics.SsoZone), new(Diagnostics.SsoLogon),
+                new(Diagnostics.SsoStatusBar), new(Diagnostics.SsoEndpoints),
             ]),
         };
         return groups;
@@ -2179,6 +2524,56 @@ class MainForm : Form
             using var id = WindowsIdentity.GetCurrent();
             return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
         }
+
+        public UrlSecurity UrlSecurity(string url, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => QueryUrlSecurity(url), UrlSecurityTimeoutMs, $"Internet settings for {url}", ct);
+    }
+
+    const int UrlSecurityTimeoutMs = 5000;
+    const int UrlActionCredentialsUse = 0x1A00, UrlActionStatusBarScript = 0x2103, PuafNoUi = 0x1;
+
+    /// <summary>
+    /// A URL's zone and two of its zone's policies, from the URL security manager: the component Edge and Chrome ask
+    /// on Windows, which applies Group Policy, the user's own zone sites and the zone settings in the same order they
+    /// do. So nothing here reads the registry or second-guesses that order.
+    /// </summary>
+    static UrlSecurity QueryUrlSecurity(string url)
+    {
+        int hr = CoInternetCreateSecurityManager(IntPtr.Zero, out var manager, 0);
+        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+        try
+        {
+            Marshal.ThrowExceptionForHR(manager.MapUrlToZone(url, out int zone, 0));
+            return new(zone, UrlPolicy(manager, url, UrlActionCredentialsUse), UrlPolicy(manager, url, UrlActionStatusBarScript));
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(manager);
+        }
+    }
+
+    static int UrlPolicy(IInternetSecurityManager manager, string url, int action)
+    {
+        var policy = new byte[4];
+        // S_FALSE means the action isn't allowed; the policy value still says which setting applies
+        int hr = manager.ProcessUrlAction(url, action, policy, policy.Length, IntPtr.Zero, 0, PuafNoUi, 0);
+        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+        return BitConverter.ToInt32(policy, 0);
+    }
+
+    [DllImport("urlmon.dll")]
+    static extern int CoInternetCreateSecurityManager(IntPtr serviceProvider, out IInternetSecurityManager manager, int reserved);
+
+    // urlmon.h; methods in vtable order, the ones not called declared with placeholder arguments
+    [ComImport, Guid("79eac9ee-baf9-11ce-8c82-00aa004ba90b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IInternetSecurityManager
+    {
+        [PreserveSig] int SetSecuritySite(IntPtr site);
+        [PreserveSig] int GetSecuritySite(out IntPtr site);
+        [PreserveSig] int MapUrlToZone([MarshalAs(UnmanagedType.LPWStr)] string url, out int zone, int flags);
+        [PreserveSig] int GetSecurityId(IntPtr url, IntPtr securityId, IntPtr securityIdSize, IntPtr reserved);
+        [PreserveSig] int ProcessUrlAction([MarshalAs(UnmanagedType.LPWStr)] string url, int action,
+            [Out] byte[] policy, int policySize, IntPtr context, int contextSize, int flags, int reserved);
     }
 
     const ushort DnsTypeSrv = 33;
@@ -2503,4 +2898,6 @@ class MainForm : Form
 record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Results)
 {
     public bool IsPending => Timestamp == DateTime.MinValue;
+    /// <summary>Groups the user opened (true) or closed (false) in this run; the rest follow the default.</summary>
+    public Dictionary<string, bool> Open { get; init; } = [];
 }

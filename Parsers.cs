@@ -337,6 +337,52 @@ static class Parsers
 
         return new(headers, tickets);
     }
+
+    static readonly Regex DsregLinePattern = new(@"^\s*([A-Za-z][A-Za-z0-9 ]*?)\s+:\s?(.*?)\s*$", RegexOptions.Multiline);
+
+    /// <summary>
+    /// The "Name : value" fields of <c>dsregcmd /status</c>, keyed by name (case-insensitive). dsregcmd prints its
+    /// field names in English on every display language; a name that appears twice keeps its first value.
+    /// </summary>
+    public static Dictionary<string, string> ParseDsreg(string output)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in DsregLinePattern.Matches(output))
+            fields.TryAdd(m.Groups[1].Value.Trim(), m.Groups[2].Value.Trim());
+        return fields;
+    }
+
+    /// <summary>A dsregcmd YES/NO field: true for YES, false for NO, null when absent or anything else.</summary>
+    public static bool? DsregFlag(Dictionary<string, string> fields, string name) =>
+        fields.TryGetValue(name, out var v) ? v.Equals("YES", StringComparison.OrdinalIgnoreCase) ? true
+            : v.Equals("NO", StringComparison.OrdinalIgnoreCase) ? false : null : null;
+
+    /// <summary>A dsregcmd time such as "2026-10-22 08:14:03.000 UTC", as UTC; null if absent or unreadable.</summary>
+    public static DateTime? DsregTime(Dictionary<string, string> fields, string name)
+    {
+        if (!fields.TryGetValue(name, out var v)) return null;
+        var m = Regex.Match(v, @"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})");
+        return m.Success && DateTime.TryParseExact(m.Groups[1].Value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc) ? utc : null;
+    }
+
+    /// <summary>
+    /// The realm a <c>klist get &lt;spn&gt;</c> obtained a ticket from, read from the cached ticket's "spn @ REALM"
+    /// line (language-neutral); null when no ticket for the SPN is listed.
+    /// </summary>
+    public static string? TicketRealm(string klistOutput, string spn)
+    {
+        var m = Regex.Match(klistOutput, $@"{Regex.Escape(spn)}\s*@\s*([A-Za-z0-9.\-]+)", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+    }
+
+    /// <summary>The error code a failed <c>klist get</c> printed (NTSTATUS first, then any other hex code); null if none.</summary>
+    public static string? KlistGetError(string output)
+    {
+        if (KlistError(output) is { } status) return status;
+        var m = Regex.Match(output, @"\b0x[0-9a-f]{2,8}\b", RegexOptions.IgnoreCase);
+        return m.Success ? m.Value.ToLowerInvariant() : null;
+    }
 }
 
 /// <summary>Computer account's domain and pwdLastSet (UTC); both null with <c>Error</c> set if the query failed. LastSetUtc null with Domain set means not found.</summary>

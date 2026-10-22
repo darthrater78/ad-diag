@@ -28,7 +28,7 @@ gh attestation verify .\ad-diag-vX.Y.Z-win-x64.exe --repo darthrater78/ad-diag
 
 ## Windows SmartScreen
 
-On first launch, Windows SmartScreen may display a warning ("Windows protected your PC"). This is normal for unsigned executables from the internet. The app is not code-signed — it is a self-contained .NET 8 single-file executable built from the source in this repository. Click **More info** then **Run anyway** to proceed.
+On first launch, Windows SmartScreen may display a warning ("Windows protected your PC"). This is normal for unsigned executables from the internet. The app is not code-signed — it is a self-contained .NET 10 single-file executable built from the source in this repository. Click **More info** then **Run anyway** to proceed.
 
 ## Usage
 
@@ -37,7 +37,7 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
 3. Click **Run Diagnostics** — results stream in as each test group completes
-4. Review results, switch to the **Guide** tab for explanations and fix suggestions, the **Group Policy** tab for a full Computer/User scope breakdown and an in-app **gpupdate**, the **Kerberos Tickets** tab for your full ticket cache, the **DNS registration** tab to register this computer in DNS and trace the result, or the **Log** tab to see what the app ran
+4. Review results. Groups with a failure or warning open; the rest are collapsed to their heading and counts. Click a heading (or use Up, Down and Enter or Space) to open or close it, **Expand all** / **Collapse all** for every group, or tick **Expand all groups after a run** to open them all by default (not saved). Switch to the **Guide** tab for explanations and fix suggestions, the **Group Policy** tab for a full Computer/User scope breakdown and an in-app **gpupdate**, the **Kerberos Tickets** tab for your full ticket cache, the **DNS registration** tab to register this computer in DNS and trace the result, or the **Log** tab to see what the app ran
 
 Up to 5 diagnostic runs are stored with timestamps — click any run to review it, or **Delete Run** to remove it.
 
@@ -53,15 +53,16 @@ Up to 5 diagnostic runs are stored with timestamps — click any run to review i
 The diagnostic run is **read-only**. Three actions change something, and each asks first: **Run gpupdate**, **Purge all tickets** and **Register now** (which asks Windows to register this computer's records in DNS). The app does not store, transmit, or log any credentials, tokens, or secrets.
 
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session. The only files it writes are the ones you save yourself: **Export results** and **Save log**.
+- **Two connections leave the corporate network, and they send nothing.** The Entra Single Sign-On group opens a TCP connection on port 443 to `login.microsoftonline.com` and, on a domain-joined or hybrid joined PC, `autologon.microsoftazuread-sso.com`, then closes it: no TLS handshake, no request, no account name. Everything else the app contacts is your own DNS servers and domain controllers.
 - **Exported reports contain only metadata.** The text export includes test names and diagnostic details (trust names, GPO counts, port status). No raw tokens, password hashes, or credential material is included.
 - **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `w32tm`, PowerShell queries, and other tools is parsed in memory for specific values only. The raw output is never written to disk, and is kept only while **Debug** is ticked on the Log tab (see below).
-- **The log stays in memory.** The Log tab holds the last 5,000 lines until you clear it or close the app. With **Debug** on it includes raw tool output: host names, addresses, GPO names and Kerberos ticket details such as service names and encryption types (never keys or passwords). Read a debug log before sending it to anyone.
+- **The log stays in memory.** The Log tab holds the last 5,000 lines until you clear it or close the app. With **Debug** on it includes raw tool output: host names, addresses, GPO names, Kerberos ticket details such as service names and encryption types, and `dsregcmd`'s device and tenant IDs (never keys, passwords or tokens). Read a debug log before sending it to anyone.
 
 ### Process isolation
 
 - **Single instance enforced.** A per-session mutex prevents multiple instances from running simultaneously in the same logon session (other users on a shared host can run their own).
 - **Nothing outlives the app.** Every external tool is started inside a Windows job object set to kill-on-close, so the tools end with the app however it exits (normal close, crash or End Task). On close, the in-flight diagnostic run is cancelled, the job is emptied and the process terminates itself outright rather than waiting on worker threads.
-- **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s) and share access (20s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
+- **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s), share access (20s) and reading the Internet settings (5s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
 - **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
@@ -142,6 +143,36 @@ Checks whether this machine's own host record can reach, and is right on, the DN
 
 **Behind a ZTNA client** the same failures have different causes, and the details say so: the client's DNS proxy can know a different zone than the registering adapter's own DNS server, which is why the zone is looked up through the latter; a DNS proxy that answers A/AAAA/SRV but not SOA leaves Windows unable to find where to send an update; a primary server with a synthetic address is reachable only if the client forwards port 53 for it; and a policy that carries DNS queries doesn't necessarily carry updates, which also need Kerberos (port 88) to a domain controller.
 
+### 9. Entra Single Sign-On
+
+Whether this PC is ready for single sign-on to Microsoft Entra ID. It checks only this PC, for basic readiness: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated. The group ends with a **Readiness** line, and when the PC isn't ready, a **See the fixes in the Guide** link opens the Guide tab at this group's section, which has the recommended fix for each check.
+
+How the PC is joined decides what is checked, since Seamless SSO only applies to domain-joined and hybrid joined PCs:
+
+- **Join Type** — from `dsregcmd /status`: Microsoft Entra hybrid joined, Microsoft Entra joined, domain joined only, or neither (not ready)
+- **Device Auth** — `DeviceAuthStatus` must be `SUCCESS` (Entra and hybrid joined)
+- **Primary Refresh Token** — `AzureAdPrt` must be `YES` and refreshed in the last 4 hours. Missing on a hybrid joined PC warns, since Seamless SSO covers for it; on an Entra joined PC it fails
+
+Domain-joined and hybrid joined PCs (Seamless SSO):
+
+- **Seamless SSO Ticket** — `klist get HTTP/autologon.microsoftazuread-sso.com` must return a ticket from a domain controller; without one the `AZUREADSSOACC` account is missing from the user's domain
+- **Intranet Zone** — `https://autologon.microsoftazuread-sso.com` must be in the Local intranet zone, or browsers send it no Kerberos ticket
+- **Automatic Logon** — the Local intranet zone must log on automatically with the current user name and password
+- **Status Bar Scripts** — "Allow updates to status bar via script" must be on in the Local intranet zone
+
+The zone and its two settings come from the Windows URL security manager (`urlmon`), the component Edge and Chrome ask, so Group Policy, the user's own zone sites and the zone settings apply in the order they do for the browser.
+
+Microsoft Entra joined PCs (no Seamless SSO; it shows as skipped):
+
+- **Cloud Kerberos** — `CloudTgt`: a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources
+- **On-premises Kerberos** — `OnPremTgt`: a ticket for AD resources through cloud Kerberos trust. Without it the verdict is "Ready for cloud apps, not for on-premises resources"
+
+Both:
+
+- **Entra Endpoints** — a TCP connection on port 443 to `login.microsoftonline.com` (and `autologon.microsoftazuread-sso.com` for Seamless SSO). Nothing is sent. A miss warns rather than fails, since a proxy may still carry the traffic
+
+![Guide tab opened at the Entra Single Sign-On fixes](docs/screenshots/guide-sso.png)
+
 ## Group Policy Tab
 
 ![Group Policy tab with Computer and User scope breakdown](docs/screenshots/group-policy.png)
@@ -201,11 +232,11 @@ What the app did and what came back, newest at the bottom. Without **Debug** it 
 
 **Runtime:** .NET 10 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs` and `DnsRegistration.cs` hold the eight test groups and the traced DNS registration, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
+**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs`, `DnsRegistration.cs` and `EntraSso.cs` hold the nine test groups and the traced DNS registration, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Starts in the Windows light or dark app setting; the header button switches between **Dark mode** and the light theme, **Flashbang**, at any time (the choice is not saved, since the app writes nothing to disk). Scales with the display DPI; every status has its own shape as well as its own colour, and each result row is exposed to screen readers as a list item. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
-**Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and DNS lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too. DNS Client events are matched by ID; their text is shown as Windows wrote it.
+**Non-English Windows:** tool output is translated on localized Windows, so parsers anchor on structure, numeric status codes and symbolic names (e.g. `Status = 1311 0x51f ERROR_NO_LOGON_SERVERS`) rather than English labels, and output is decoded in the console's OEM code page so non-ASCII names aren't garbled. `klist`'s translated field labels are identified by their fixed position in each ticket. Group Policy (RSoP) and DNS lookups (`DnsQuery`) use APIs rather than tool output, so they're language-neutral too. DNS Client events are matched by ID; their text is shown as Windows wrote it. `dsregcmd /status` prints its field names (`AzureAdJoined`, `AzureAdPrt` and so on) untranslated, the Seamless SSO ticket is found by its `SPN @ REALM` line, and the browser zone settings come from an API.
 
 **Input Validation:**
 - `HostnamePattern`: `^[a-zA-Z0-9.\-]+$` — domain and DC fields
@@ -216,7 +247,7 @@ What the app did and what came back, newest at the bottom. Without **Debug** it 
 
 | Process | Purpose | Timeout |
 |---|---|---|
-| `dsregcmd /status` | Domain join state (and startup domain auto-detect) | 15s (5s at startup) |
+| `dsregcmd /status` | Domain join state (and startup domain auto-detect); Entra join, device and token state for single sign-on | 15s (5s at startup) |
 | `nltest /sc_verify` | Secure channel verification | 10s |
 | `nltest /dsgetsite` | AD site assignment | 5s |
 | `nltest /dsgetdc` | DC locator | 8s |
@@ -224,6 +255,7 @@ What the app did and what came back, newest at the bottom. Without **Debug** it 
 | `gpupdate` / `gpupdate /force` | Manual policy refresh (Group Policy tab) | 90s |
 | `klist` | Kerberos ticket cache (diagnostics + tab) | 5s |
 | `klist get krbtgt/REALM` | Request a TGT when none is cached | 10s |
+| `klist get HTTP/autologon.microsoftazuread-sso.com` | Request the Seamless SSO ticket (domain-joined and hybrid joined PCs) | 10s |
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
 | `w32tm /stripchart` | Clock skew measurement | 5s |
 | `w32tm /query /source` | Time source | 5s |
@@ -258,7 +290,7 @@ The README screenshots are generated from mock data by `tools/screenshots/run.sh
 
 ## Releasing
 
-Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the eight diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
+Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vMAJOR.MINOR.PATCH` (or `vMAJOR.MINOR.PATCH-rc1` etc. for a prerelease). The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the nine diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
 
 ## Version History
 

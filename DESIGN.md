@@ -160,6 +160,7 @@ Windows 11's own system values, so the app matches the OS around it.
 - 14px side gutter. Fixed 96-DPI pixel values in code go through `S()` so they scale with the display.
 - Results are a grid: status (mark + word) at 14px, test name at 100px, detail at 280px to the right edge. Rows are at least 24px with a 1px row line above each.
 - Each group heading carries its count at the right edge: "9 checks · 1 warning".
+- Groups collapse to their heading. After a run only groups with a failure or warning are open, unless "Expand all groups after a run" is ticked; a group the user opens or closes stays that way for that run. The counts stay on a closed heading, so its state still reads.
 
 ## Elevation & Depth
 
@@ -178,6 +179,9 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 - **Danger button:** a normal button with the label in fail colour (Reset all, Delete run).
 - **Tab:** bare text, dim when idle; the selected tab is bold with a 3px primary underline.
 - **Result row:** mark and word in status colour; name and detail in text colour.
+- **Group heading** (Results): a 8px text-dim chevron (right when closed, down when open), the bold group name, the counts at the right edge. The whole heading is the button; no hand cursor. Up and Down move between headings, Enter or Space toggles; the focused one draws a focus rectangle.
+- **Readiness row:** a result row whose name is "Readiness" in bold and whose detail is the group's verdict in body text. When the verdict asks for action, a link in primary, underlined, follows it ("See the fixes in the Guide") and opens the Guide tab with that group's section at the top.
+- **Results bar:** above the results, on the panel: the "Expand all groups after a run" checkbox in text-dim on the left, "Expand all" and "Collapse all" links in primary on the right. Shown only when there are results.
 - **Ticket badge:** filled label in the Kerberos tickets pane; text uses on-primary.
 - **Trace row** (DNS registration pane): the result row's three columns in a text pane, with the same mark shapes as characters (● ▲ ✕ –); a long detail wraps under the detail column.
 - **Picker** (ZTNA adapter): a flat drop-down list on surface with a text-dim label to its left, in the action bar after the buttons. Its list is as wide as its longest entry.
