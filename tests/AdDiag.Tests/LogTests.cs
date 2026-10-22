@@ -232,7 +232,7 @@ public class LogTests
     }
 
     [Fact]
-    public void BlockAndSection_FollowLinesIntoTasksAndThreads_AndStayOutOfTheCaller()
+    public async Task BlockAndSection_FollowLinesIntoTasksAndThreads_AndStayOutOfTheCaller()
     {
         var log = NewLog();
         var run = new LogBlock("Run", "");
@@ -249,7 +249,7 @@ public class LogTests
             }, TaskCreationOptions.LongRunning);
             log.Info("run", "back in the run");
         }
-        Run().GetAwaiter().GetResult();
+        await Run();
         log.Info("log", "after the run");
 
         var lines = log.Since(0);
