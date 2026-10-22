@@ -1806,7 +1806,7 @@ class MainForm : Form
     }
 
     static readonly Font LogBoldFont = new(MonoFamily, 8.5f, FontStyle.Bold);
-    const int LogKindColumn = 10; // "● Warning " or a source such as "tool"
+    const int LogKindColumn = DiagLog.KindColumn; // "● Warning " or a source such as "tool"
 
     // A status word's mark and colour, as in the results grid; all the marks are in the monospace font
     static (string Mark, Color Color) LogStatusLook(string word) => word switch

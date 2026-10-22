@@ -148,6 +148,24 @@ sealed class DiagLog(Func<DateTime>? clock = null)
         return colon < 0 ? (word, rest, "") : (word, rest[..colon], rest[(colon + 2)..]);
     }
 
+    public const int KindColumn = 10;
+
+    /// <summary>
+    /// A line as the Sections and By time views write it: the time (with milliseconds only By time), a kind column
+    /// holding a result's status or the line's source, By time's <paramref name="section"/> column, then the
+    /// message: a result's "Check: detail" without its section's name, any other message without a DEBUG label.
+    /// Further lines, such as raw tool output, line up under the message.
+    /// </summary>
+    public static string Formatted(LogLine line, bool bySection, string? section)
+    {
+        string time = bySection ? $"{line.Time:HH:mm:ss}  " : $"{line.Time:HH:mm:ss.fff}  ";
+        var result = ParseResult(line);
+        string prefix = time + (result?.Word ?? line.Source).PadRight(KindColumn)
+            + (section == null ? "" : Fit(section, SectionColumn - 1).PadRight(SectionColumn));
+        string message = result is { } r ? (r.Detail.Length > 0 ? $"{r.Name}: {r.Detail}" : r.Name) : line.Message;
+        return prefix + message.Replace("\n", "\n" + new string(' ', prefix.Length));
+    }
+
     /// <summary>A run's "Started" and "Complete" lines, which its heading already says in the Sections view.</summary>
     public static bool IsRunBookend(LogLine line) =>
         line.Source == "run" && line.Block != null && line.Section == null
@@ -241,10 +259,11 @@ sealed class DiagLog(Func<DateTime>? clock = null)
                     string note = block.SectionNotes.TryGetValue(section, out var n) ? $" ({n})" : "";
                     sb.AppendLine().AppendLine($"--- {section}{note} ".PadRight(rule.Length, '-'));
                     break;
+                case LogEntry { Line: var line } when bySection && IsRunBookend(line):
+                    break; // the banner above says it
                 case LogEntry { Line: var line }:
                     string? column = bySection ? null : line.Section == null ? "" : shortNames.GetValueOrDefault(line.Section, line.Section);
-                    string prefix = Prefix(line, column);
-                    sb.Append(prefix).AppendLine(Body(line, prefix.Length));
+                    sb.AppendLine(Formatted(line, bySection, column));
                     break;
             }
         }

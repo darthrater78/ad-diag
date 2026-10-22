@@ -225,10 +225,46 @@ public class LogTests
         string text = log.Text(bySection: false, Order);
 
         string column(string section) => section.PadRight(DiagLog.SectionColumn);
-        Assert.Contains("14:02:03.118  tcp     " + column("DC Discovery") + "dc one", text);
+        string kind(string source) => source.PadRight(DiagLog.KindColumn);
+        Assert.Contains("14:02:03.118  " + kind("tcp") + column("DC Discovery") + "dc one", text);
         // A run's own lines, and lines outside any run, leave the column blank so the messages line up
-        Assert.Contains("14:02:03.118  run     " + column("") + "Complete", text);
-        Assert.Contains("14:02:03.118  log     " + column("") + "Debug logging off", text);
+        Assert.Contains("14:02:03.118  " + kind("run") + column("") + "Complete", text);
+        Assert.Contains("14:02:03.118  " + kind("log") + column("") + "Debug logging off", text);
+    }
+
+    [Fact]
+    public void Text_BySection_DropsTheRunsBookendsAndShortensTheTime()
+    {
+        var (log, _) = SectionedLog();
+
+        string text = log.Text(bySection: true, Order);
+
+        Assert.DoesNotContain("Started", text);
+        Assert.DoesNotContain("Complete", text);
+        Assert.Contains("14:02:03  " + "dns".PadRight(DiagLog.KindColumn) + "dns one", text);
+        Assert.DoesNotContain("14:02:03.118", text.Split(Environment.NewLine).Where(l => l.Contains("dns one")).Single());
+    }
+
+    [Fact]
+    public void Formatted_ResultShowsStatusAndCheck_DebugDropsItsLabel_RawOutputLinesUp()
+    {
+        DiagLog.Block = new LogBlock("Run", "");
+        DiagLog.Section = "Group Policy";
+        var log = NewLog();
+        log.DebugEnabled = true;
+        log.Info("result", "Warning  Group Policy / GP Last Refresh: 3 days ago");
+        log.Debug("tool", "RSoP query (840 ms)\n2 computer GPOs");
+        DiagLog.Block = null;
+        DiagLog.Section = null;
+        var lines = log.Since(0);
+
+        Assert.Equal("14:02:03  Warning   GP Last Refresh: 3 days ago", DiagLog.Formatted(lines[0], bySection: true, null));
+        string pad = new(' ', "14:02:03  ".Length + DiagLog.KindColumn);
+        Assert.Equal($"14:02:03  {"tool".PadRight(DiagLog.KindColumn)}RSoP query (840 ms)\n{pad}2 computer GPOs",
+            DiagLog.Formatted(lines[1], bySection: true, null));
+        // The raw log keeps every line as written
+        Assert.Contains("Warning  Group Policy / GP Last Refresh", log.Text());
+        Assert.Contains("DEBUG RSoP query", log.Text());
     }
 
     [Fact]
