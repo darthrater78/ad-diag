@@ -43,8 +43,7 @@ static partial class Diagnostics
         ("anyconnect", "Cisco AnyConnect"), ("cisco secure client", "Cisco Secure Client"),
         ("fortinet", "FortiClient"), ("citrix secure access", "Citrix Secure Access"), ("appgate", "Appgate"),
         ("cato networks", "Cato"), ("check point", "Check Point"), ("banyan", "Banyan"), ("ip-https", "DirectAccess"),
-        ("island private access", "Island"),
-        // Generic tunnel drivers other clients build on (Island runs on Wintun), so a product name above wins
+        // Generic tunnel drivers other clients build on, so a product name above wins
         ("wireguard", "WireGuard"), ("openvpn", "OpenVPN"), ("tap-windows", "OpenVPN"), ("wintun", "Wintun"),
     ];
 
@@ -64,7 +63,7 @@ static partial class Diagnostics
 
     /// <summary>
     /// Ranges reserved for documentation, which nothing routes: 3fff::/20 and 2001:db8::/32, and 192.0.2.0/24,
-    /// 198.51.100.0/24 and 203.0.113.0/24. Some clients (Island) give their adapter 3fff:: as a placeholder.
+    /// 198.51.100.0/24 and 203.0.113.0/24. Some clients give their adapter 3fff:: as a placeholder.
     /// </summary>
     public static bool IsDocumentation(IPAddress ip)
     {
