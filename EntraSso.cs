@@ -62,7 +62,7 @@ static partial class Diagnostics
             return new(EntraSsoGroup, tests, new(Status.Skip, "Readiness unknown: dsregcmd did not answer.", true));
         }
 
-        var (kind, join) = JoinCheck(ds);
+        var (kind, join) = ProfileJoin(cfg, ds);
         tests.Add(join);
         if (kind == null)
             return new(EntraSsoGroup, tests, new(Status.Skip, "Readiness unknown: dsregcmd reported no join state.", true));
@@ -74,7 +74,45 @@ static partial class Diagnostics
         bool fallbackOnly = kind == JoinKind.Hybrid && prt.Status == Status.Pass;
         tests.AddRange(SignInChecks(cfg, probe, ds, kind.Value, prt, fallbackOnly, nowUtc));
         tests.Add(EndpointsCheck(cfg, probe, seamless ? [LoginHost, AutologonHost] : [LoginHost]));
+        // One order for every profile, so switching profile only adds or removes rows
+        tests = [.. tests.OrderBy(t => Array.IndexOf(SsoRowOrder, t.Name) is var i and >= 0 ? i : int.MaxValue)];
         return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless, fallbackOnly));
+    }
+
+    /// <summary>Every row the group can show, in the one order all profiles keep; each profile leaves some out.</summary>
+    internal static readonly string[] SsoRowOrder =
+    [
+        SsoJoin, SsoDeviceAuth, SsoPrt, SsoTicket, SsoZone, SsoLogon, SsoStatusBar, SeamlessKeyCheck,
+        SsoCloudTgt, SsoOnPremTgt, CloudTrustGroupsCheck, CloudKerberosKeyCheck, SsoEndpoints,
+    ];
+
+    /// <summary>
+    /// The rows a profile's run shows, in <see cref="SsoRowOrder"/>, for Results to list before a run. The Cloud Kerberos
+    /// key shows on a hybrid joined PC only when it uses cloud Kerberos trust, so its list leaves it out.
+    /// </summary>
+    public static IEnumerable<string> SsoRows(JoinProfile profile) => SsoRowOrder.Where(row => profile switch
+    {
+        JoinProfile.Domain => row is not (SsoDeviceAuth or SsoPrt or SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
+        JoinProfile.Hybrid => row is not (SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
+        _ => row is not (SsoTicket or SsoZone or SsoLogon or SsoStatusBar or SeamlessKeyCheck),
+    });
+
+    /// <summary>
+    /// How the PC is joined, as the Join Type row reports it, and the join type the checks follow: the picked profile's
+    /// when there is one, so another profile's checks can be seen on this PC. The row says when they differ.
+    /// </summary>
+    static (JoinKind? Kind, TestEntry Entry) ProfileJoin(DiagConfig cfg, Dictionary<string, string> ds)
+    {
+        var (detected, entry) = JoinCheck(ds);
+        if (cfg.Profile is not { } profile || detected is null or JoinKind.None) return (detected, entry);
+        var (kind, name) = profile switch
+        {
+            JoinProfile.Domain => (JoinKind.DomainOnly, "Domain joined"),
+            JoinProfile.Hybrid => (JoinKind.Hybrid, "Microsoft Entra hybrid joined"),
+            _ => (JoinKind.EntraOnly, "Microsoft Entra joined"),
+        };
+        return kind == detected ? (kind, entry)
+            : (kind, entry with { Status = Status.Info, Detail = $"{entry.Detail}; checked as {name}, the profile picked" });
     }
 
     // The checks for how this PC signs in. One that doesn't apply to how it is joined isn't shown at all: a

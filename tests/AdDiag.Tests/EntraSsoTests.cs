@@ -92,6 +92,62 @@ public class EntraSsoTests
 
     static TestEntry Entry(TestGroup group, string name) => Assert.Single(group.Tests, t => t.Name == name);
 
+    static TestGroup RunAs(FakeProbe probe, JoinProfile profile) =>
+        Diagnostics.TestEntraSso(new DiagConfig("contoso.com", "", default, Profile: profile), probe, Now);
+
+    // ── The picked profile, and one order ──
+
+    [Fact]
+    public void ThePickedProfileDecidesTheRows()
+    {
+        // An Entra joined PC checked as hybrid joined: the Seamless SSO rows, not the cloud Kerberos ones
+        var group = RunAs(Machine(Dsreg("YES", "NO")), JoinProfile.Hybrid);
+
+        Assert.Contains(group.Tests, t => t.Name == Diagnostics.SsoTicket);
+        Assert.DoesNotContain(group.Tests, t => t.Name == Diagnostics.SsoCloudTgt);
+        var join = Entry(group, Diagnostics.SsoJoin);
+        Assert.Equal(Status.Info, join.Status);
+        Assert.Contains("Microsoft Entra joined", join.Detail);
+        Assert.Contains("checked as Microsoft Entra hybrid joined, the profile picked", join.Detail);
+    }
+
+    [Fact]
+    public void TheMatchingProfileChangesNothing()
+    {
+        var detected = Run(Hybrid());
+        var picked = RunAs(Hybrid(), JoinProfile.Hybrid);
+        Assert.Equal(detected.Tests.Select(t => (t.Name, t.Status)), picked.Tests.Select(t => (t.Name, t.Status)));
+    }
+
+    [Theory]
+    [InlineData("Domain")]
+    [InlineData("Hybrid")]
+    [InlineData("Entra")]
+    public void EveryProfileKeepsTheOneOrder(string picked)
+    {
+        var profile = Enum.Parse<JoinProfile>(picked);
+        var master = Diagnostics.SsoRowOrder.ToList();
+        var ran = RunAs(Machine(Dsreg("YES", "YES")), profile).Tests.Select(t => master.IndexOf(t.Name)).ToList();
+        Assert.DoesNotContain(-1, ran);
+        Assert.Equal(ran.OrderBy(i => i), ran);
+        // The list shown before a run is a subset in the same order as well
+        var listed = Diagnostics.SsoRows(profile).Select(r => master.IndexOf(r)).ToList();
+        Assert.Equal(listed.OrderBy(i => i), listed);
+    }
+
+    [Fact]
+    public void SharedRowsSitInTheSameOrderOnEveryProfile()
+    {
+        var domain = Diagnostics.SsoRows(JoinProfile.Domain).ToList();
+        var hybrid = Diagnostics.SsoRows(JoinProfile.Hybrid).ToList();
+        var entra = Diagnostics.SsoRows(JoinProfile.Entra).ToList();
+        foreach (var (a, b) in new[] { (domain, hybrid), (hybrid, entra), (domain, entra) })
+        {
+            var shared = a.Intersect(b).ToList();
+            Assert.Equal(shared, b.Where(shared.Contains));
+        }
+    }
+
     [Fact]
     public void Hybrid_AllInPlace_IsReady()
     {

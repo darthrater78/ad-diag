@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -113,6 +114,54 @@ static class SmbNative
             if (context.IsSet) DeleteSecurityContext(ref context);
             if (credential.IsSet) FreeCredentialsHandle(ref credential);
         }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ShareInfo1
+    {
+        public IntPtr NetName;
+        public uint Type;
+        public IntPtr Remark;
+    }
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetShareEnum(string server, int level, out IntPtr buffer, int maxLength, out int read, out int total, ref int resume);
+
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buffer);
+
+    const int MaxPreferredLength = -1, ErrorMoreData = 234;
+    const uint StypeTypeMask = 0xFF, StypeDisktree = 0, StypeSpecial = 0x80000000;
+
+    /// <summary>
+    /// The folder shares <paramref name="server"/> offers, as Explorer lists them for \\server: visible disk shares only,
+    /// so admin shares (C$, ADMIN$) and IPC$ are left out. Runs as the signed-in user; nothing is changed.
+    /// </summary>
+    public static ShareList ListShares(string server)
+    {
+        var shares = new List<string>();
+        int resume = 0, status;
+        do
+        {
+            status = NetShareEnum(server, 1, out var buffer, MaxPreferredLength, out int read, out _, ref resume);
+            try
+            {
+                if (status != 0 && status != ErrorMoreData) return new(null, status, new System.ComponentModel.Win32Exception(status).Message);
+                int size = Marshal.SizeOf<ShareInfo1>();
+                for (int i = 0; i < read; i++)
+                {
+                    var info = Marshal.PtrToStructure<ShareInfo1>(buffer + i * size);
+                    if ((info.Type & StypeTypeMask) == StypeDisktree && (info.Type & StypeSpecial) == 0 && Marshal.PtrToStringUni(info.NetName) is { } name)
+                        shares.Add(name);
+                }
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero) NetApiBufferFree(buffer);
+            }
+        } while (status == ErrorMoreData);
+        shares.Sort(StringComparer.OrdinalIgnoreCase);
+        return new(shares, 0, "");
     }
 
     /// <summary>The most entries counted in a share's root; a huge share isn't listed in full.</summary>

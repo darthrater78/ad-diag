@@ -21,6 +21,7 @@ partial class MainForm
     TestMode _mode = TestMode.Ad;
     ThemedButton _btnModeAd = null!, _btnModeSmb = null!, _btnSmbTest = null!, _btnOpenShare = null!;
     TextBox _txtSmbServer = null!, _txtSmbShare = null!;
+    CheckBox _chkSmbSuffix = null!;
     Label _lblDomain = null!, _lblSmbServer = null!, _lblSmbShare = null!;
     Panel _tabBar = null!;
     int _tabDividerX;
@@ -98,7 +99,7 @@ partial class MainForm
         // no domain of its own, so the user gives the on-prem one
         _lblDomain.Visible = _txtDomain.Visible = !entra || smb;
         _lblDomain.Text = smb && entra ? "On-prem domain" : "Domain";
-        _lblSmbServer.Visible = _txtSmbServer.Visible = _lblSmbShare.Visible = _txtSmbShare.Visible = smb;
+        _lblSmbServer.Visible = _txtSmbServer.Visible = _lblSmbShare.Visible = _txtSmbShare.Visible = _chkSmbSuffix.Visible = smb;
         _lblProfileHint.Visible = entra && !smb;
 
         _btnRun.Visible = _btnRunMenu.Visible = !smb;
@@ -209,7 +210,7 @@ partial class MainForm
                 : state switch
                 {
                     Status.Pass => "Passed", Status.Warn => "Warning", Status.Fail => steps[i] == stoppedAt ? "Failed here" : "Failed",
-                    Status.Skip => SkippedText(steps[i]), _ => "",
+                    Status.Skip => "Not reached", _ => "",
                 };
             var nameBox = new Rectangle(cx - slot / 2, cy + r + S(4), slot, S(18));
             TextRenderer.DrawText(g, steps[i], GpBoldFont, nameBox, state is null or Status.Skip ? DimColor : TextColor,
@@ -248,8 +249,6 @@ partial class MainForm
         + "A short name gets the domain. On an Entra joined PC, the on-prem domain is needed for the Kerberos checks.\n\n"
         + "Everything is read only: nothing is written, and no password is asked for or saved.";
 
-    // A step that didn't run: never reached, or, for Share, no share was typed
-    string SkippedText(string step) => step == Diagnostics.SmbShare && _smbTarget?.Share == null ? "No share given" : "Not reached";
 
     /// <summary>
     /// Lays the SMB results out at <paramref name="width"/> and returns their height; with <paramref name="g"/> it
@@ -296,7 +295,7 @@ partial class MainForm
         {
             y += S(14);
             var state = StepState(group) ?? Status.Skip;
-            string counts = state == Status.Skip ? SkippedText(group.Name) : GroupCounts(group);
+            string counts = state == Status.Skip ? "Not reached" : GroupCounts(group);
             if (g != null)
             {
                 TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Rectangle(left, y + S(2), right - left - S(NoteColumn) - BadgeWidth(g) - S(16), S(20)), TextColor,
@@ -335,7 +334,7 @@ partial class MainForm
     /// </summary>
     void OpenSmbInExplorer()
     {
-        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, _txtDomain.Text.Trim());
+        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, SmbSuffix());
         if (target == null)
         {
             _lblStatus.ForeColor = WarnColor;
@@ -358,13 +357,16 @@ partial class MainForm
         }
     }
 
+    // The domain a short file server name gets: none when Add domain suffix is off, to test the name as typed
+    string SmbSuffix() => _chkSmbSuffix.Checked ? _txtDomain.Text.Trim() : "";
+
     // ── Running ──
 
     async void RunSmbTest()
     {
         if (_smbRunning) return;
         string domain = _txtDomain.Text.Trim();
-        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, domain);
+        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, SmbSuffix());
         if (target == null)
         {
             _lblStatus.ForeColor = WarnColor;

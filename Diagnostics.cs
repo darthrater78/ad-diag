@@ -71,6 +71,8 @@ interface IProbe
     SspiResult Authenticate(string package, string spn, CancellationToken ct);
     /// <summary>Lists a share's root over SMB: the entry count, or the Win32 error that stopped it.</summary>
     ShareOpen OpenShare(string unc, CancellationToken ct);
+    /// <summary>The shares a server offers, as opening \\server in Explorer lists them: the visible folder shares, or the error.</summary>
+    ShareList ListShares(string server, CancellationToken ct);
 }
 
 /// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
@@ -84,7 +86,11 @@ record UrlSecurity(int Zone, int Logon, int StatusBar);
 /// <param name="ZtnaAdapter">
 /// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
 /// </param>
-record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
+/// <param name="Profile">
+/// The profile the user picked, which decides the checks a group makes even where the PC is joined another way; null
+/// to follow how the PC is joined.
+/// </param>
+record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null, JoinProfile? Profile = null);
 enum Status { Pass, Fail, Warn, Skip, Info }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "")
 {

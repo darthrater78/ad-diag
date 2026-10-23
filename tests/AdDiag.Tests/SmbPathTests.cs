@@ -185,6 +185,19 @@ public class SmbPathTests
     }
 
     [Fact]
+    public void AShortNameIsTestedAsTypedWhenTheSuffixIsOff()
+    {
+        var probe = Machine();
+        probe.Hosts["files"] = [FilesIp];
+        var target = Diagnostics.ParseSmbTarget("files", "Finance$", "").Target!; // Add domain suffix off
+        var groups = Run(probe, target: target);
+
+        Assert.Equal("files", target.Server);
+        Assert.Contains("DNS suffix search list", Row(groups, Diagnostics.SmbNameRow).Detail);
+        Assert.Equal(Status.Pass, Row(groups, Diagnostics.SmbNameRow).Status);
+    }
+
+    [Fact]
     public void ANameThatDoesntResolveStopsThePath()
     {
         var probe = Machine();
@@ -486,13 +499,35 @@ public class SmbPathTests
     }
 
     [Fact]
-    public void NoShareMeansTheServerAloneIsTested()
+    public void WithNoShareTheServersSharesAreListed()
     {
         var probe = Machine();
         var groups = Run(probe, target: Target("files"));
-        Assert.Equal(Status.Skip, Row(groups, Diagnostics.SmbShareRow).Status);
-        Assert.Empty(probe.ShareCalls);
-        Assert.Contains("Type a share", Diagnostics.SmbVerdictFor(Target("files"), JoinProfile.Domain, groups).Text);
+
+        var row = Row(groups, Diagnostics.SmbShareRow);
+        Assert.Equal(Status.Pass, row.Status);
+        Assert.Contains("3 shares: Finance, HR, Public", row.Detail);
+        Assert.Equal([@"\\files.contoso.com"], probe.ShareCalls);
+        Assert.StartsWith("Listed the shares on files.contoso.com", Diagnostics.SmbVerdictFor(Target("files"), JoinProfile.Domain, groups).Text);
+    }
+
+    [Fact]
+    public void AServerThatRefusesTheListingFailsTheShareStep()
+    {
+        var probe = Machine();
+        probe.ServerShares = _ => new(null, 5, "Access is denied.");
+        var groups = Run(probe, target: Target("files"));
+
+        Assert.Equal(Status.Fail, Row(groups, Diagnostics.SmbShareRow).Status);
+        Assert.StartsWith("Stopped at Share", Diagnostics.SmbVerdictFor(Target("files"), JoinProfile.Domain, groups).Text);
+    }
+
+    [Fact]
+    public void AServerWithOnlyHiddenSharesIsANote()
+    {
+        var probe = Machine();
+        probe.ServerShares = _ => new([], 0, "");
+        Assert.Equal(Status.Info, Row(Run(probe, target: Target("files")), Diagnostics.SmbShareRow).Status);
     }
 
     [Theory]

@@ -29,6 +29,9 @@ record SspiResult(int Status, string? Package)
 /// <summary>Opening a share: how many entries its root holds, or the Win32 error that stopped it.</summary>
 record ShareOpen(int? Entries, int Error, string Message);
 
+/// <summary>A server's visible folder shares (hidden ones, ending in $, left out), or the Win32 error that stopped the listing.</summary>
+record ShareList(List<string>? Shares, int Error, string Message);
+
 /// <summary>Where the test stopped or what it found, and what to do about it.</summary>
 record SmbVerdict(Status Status, string Text, string? Fix);
 
@@ -174,7 +177,8 @@ static partial class Diagnostics
                 new(SmbNameRow, Status.Info, $"{target.Server} is an address, not a name; Kerberos needs a name, so Windows signs in with NTLM"),
                 new(SmbAddressesRow, Status.Pass, target.Server)]), [ip]);
         }
-        string named = target.Typed.Equals(target.Server, StringComparison.OrdinalIgnoreCase) ? target.Server : $"{target.Server} (typed {target.Typed})";
+        string named = !target.Server.Contains('.') ? $"{target.Server} (short name, resolved through this PC's DNS suffix search list)"
+            : target.Typed.Equals(target.Server, StringComparison.OrdinalIgnoreCase) ? target.Server : $"{target.Server} (typed {target.Typed})";
         IPAddress[] found;
         try { found = probe.Resolve(target.Server, cfg.Cancel); }
         catch (SocketException ex) when (ex.SocketErrorCode is SocketError.HostNotFound or SocketError.NoData)
@@ -537,8 +541,7 @@ static partial class Diagnostics
 
     static TestGroup SmbShareStep(SmbTarget target, DiagConfig cfg, IProbe probe)
     {
-        if (target.Share == null)
-            return new(SmbShare, [new(SmbShareRow, Status.Skip, "Not checked: no share given; type one in Share to test opening it")]);
+        if (target.Share == null) return SmbServerSharesStep(target, cfg, probe);
         ShareOpen open;
         try { open = probe.OpenShare(target.Unc, cfg.Cancel); }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -548,6 +551,23 @@ static partial class Diagnostics
         if (open.Entries is { } n)
             return new(SmbShare, [new(SmbShareRow, Status.Pass, $"{target.Unc} opened; {(n >= 1000 ? "1000 or more entries" : $"{n} entr{(n == 1 ? "y" : "ies")}")} in its root")]);
         return new(SmbShare, [new(SmbShareRow, Status.Fail, $"{target.Unc}: {ShareErrorText(open)}")]);
+    }
+
+    // No share typed: list the server's shares, as opening \\server in Explorer does. An answer passes the step
+    static TestGroup SmbServerSharesStep(SmbTarget target, DiagConfig cfg, IProbe probe)
+    {
+        ShareList list;
+        try { list = probe.ListShares(target.Server, cfg.Cancel); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new(SmbShare, [new(SmbShareRow, Status.Fail, $"{target.Unc}: {ex.Message}")]);
+        }
+        if (list.Shares is not { } shares)
+            return new(SmbShare, [new(SmbShareRow, Status.Fail, $"{target.Unc}: {ShareErrorText(new(null, list.Error, list.Message))}")]);
+        if (shares.Count == 0)
+            return new(SmbShare, [new(SmbShareRow, Status.Info, $"{target.Unc} answered, but offers no visible shares (only hidden ones ending in $)")]);
+        string names = string.Join(", ", shares.Take(6)) + (shares.Count > 6 ? $" and {shares.Count - 6} more" : "");
+        return new(SmbShare, [new(SmbShareRow, Status.Pass, $"{target.Unc} answered; {shares.Count} share{(shares.Count == 1 ? "" : "s")}: {names}")]);
     }
 
     /// <summary>What a failure to open a share means, by its Win32 error number.</summary>
@@ -621,8 +641,8 @@ static partial class Diagnostics
             return new(Status.Fail, $"Stopped at {group.Name}: {failed.Detail}", SmbFix(target, profile, group.Name, failed, Row));
         }
 
-        bool shareTested = Row(SmbShareRow) is { Status: Status.Pass };
-        string reached = shareTested ? $"Opened {target.Unc}" : $"Reached {target.Server}";
+        bool shareTested = Row(SmbShareRow) is { Status: Status.Pass or Status.Info };
+        string reached = !shareTested ? $"Reached {target.Server}" : target.Share == null ? $"Listed the shares on {target.Server}" : $"Opened {target.Unc}";
         var negotiation = Row(SmbNegotiationRow);
         if (negotiation is { Status: Status.Warn })
         {
@@ -631,7 +651,7 @@ static partial class Diagnostics
                 cause != null ? SmbFix(target, profile, SmbKerberos, cause, Row) : null);
         }
         string how = negotiation?.Detail.StartsWith("Kerberos", StringComparison.Ordinal) == true ? "with Kerberos" : "";
-        string tail = shareTested ? "" : target.Share == null ? " Type a share to test opening it too." : "";
+        string tail = "";
         var warn = groups.SelectMany(g => g.Tests).FirstOrDefault(t => t.Status == Status.Warn);
         return warn == null
             ? new(Status.Pass, $"{reached} {how}. Every step passed.{tail}".Replace("  ", " "), null)

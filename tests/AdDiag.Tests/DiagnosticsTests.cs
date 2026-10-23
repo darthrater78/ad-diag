@@ -156,6 +156,12 @@ public class DiagnosticsTests
         }
         public string Spn = "SPN|FILES$|cifs/files.contoso.com";
         public Func<string, ShareOpen> Shares = _ => new(14, 0, "");
+        public Func<string, ShareList> ServerShares = _ => new(["Finance", "HR", "Public"], 0, "");
+        public ShareList ListShares(string server, CancellationToken ct)
+        {
+            ShareCalls.Add(@"\\" + server);
+            return ServerShares(server);
+        }
         public ShareOpen OpenShare(string unc, CancellationToken ct)
         {
             ShareCalls.Add(unc);

@@ -237,26 +237,29 @@ partial class MainForm : Form
     Panel BuildHeader(string appVersion, bool elevated)
     {
         // Header
-        var header = new Panel { Height = 34, Dock = DockStyle.Fill };
+        var header = new Panel { Height = 40, Dock = DockStyle.Fill };
         header.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, header.Height - 1, header.Width, header.Height - 1);
-        var lblTitle = new Label { Text = "AD Diagnostics", ForeColor = TextColor, Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(10, 6) };
-        var lblTag = new Label { Text = appVersion, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(148, 9) };
+        // The app's icon at 32px, twice the title bar's, taken from the exe at the display's scale so it stays sharp
+        var logo = new PictureBox { Size = new Size(32, 32), Location = new Point(10, 4), SizeMode = PictureBoxSizeMode.Zoom, AccessibleRole = AccessibleRole.Graphic, AccessibleName = "AD Diagnostics" };
+        try { logo.Image = Icon.ExtractIcon(Environment.ProcessPath ?? Application.ExecutablePath, 0, S(32))?.ToBitmap(); } catch { }
+        var lblTitle = new Label { Text = "AD Diagnostics", ForeColor = TextColor, Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(48, 9) };
+        var lblTag = new Label { Text = appVersion, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(186, 12) };
         var lnkGithub = new LinkLabel { Text = "GitHub", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
         var lnkRelease = new LinkLabel { Text = "Release Notes", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkRelease.LinkClicked += (s, e) => OpenUrl($"https://github.com/darthrater78/ad-diag/releases/tag/v{appVersion}");
         // Names the theme it switches to; the light theme is called Flashbang
-        _btnTheme = new ThemedButton { Text = ThemeButtonText, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 8f), Size = new Size(84, 22), Location = new Point(0, 6) };
+        _btnTheme = new ThemedButton { Text = ThemeButtonText, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 8f), Size = new Size(84, 22), Location = new Point(0, 9) };
         _btnTheme.Click += (s, e) => SetTheme(!Dark);
-        header.Controls.AddRange([lblTitle, lblTag, _btnTheme, lnkGithub, lnkRelease]);
+        header.Controls.AddRange([logo, lblTitle, lblTag, _btnTheme, lnkGithub, lnkRelease]);
         var admin = elevated ? AdminIndicator() : null;
         if (admin != null) header.Controls.Add(admin);
         header.Resize += (s, e) =>
         {
             lblTag.Left = lblTitle.Right + S(8);
-            if (admin != null) admin.Location = new Point(lblTag.Right + S(12), S(7));
-            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(10));
-            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
+            if (admin != null) admin.Location = new Point(lblTag.Right + S(12), S(10));
+            lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(13));
+            lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(13));
             _btnTheme.Left = lnkGithub.Left - _btnTheme.Width - S(14);
         };
         return header;
@@ -307,10 +310,14 @@ partial class MainForm : Form
         _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
         _domainControls.Add(_chkDcSuffix);
+        // SMB's twin of it: off, a short file server name is tested as typed, through the PC's own DNS suffix search
+        _chkSmbSuffix = new CheckBox { Text = "Add suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0), Visible = false, AccessibleName = "Add the domain to a short file server name" };
+        configPanel.Controls.Add(_chkSmbSuffix);
         configPanel.Resize += (s, e) =>
         {
             // Right-aligned over the DC field, clear of its label whatever the font or DPI
             _chkDcSuffix.Location = new Point(_txtDc.Right - _chkDcSuffix.Width, _txtDc.Top - _chkDcSuffix.Height - S(1));
+            _chkSmbSuffix.Location = new Point(_txtSmbServer.Right - _chkSmbSuffix.Width, _txtSmbServer.Top - _chkSmbSuffix.Height - S(1));
         };
 
         return configPanel;
@@ -702,9 +709,34 @@ partial class MainForm : Form
         // Windows ignores the attribute). DWM takes a COLORREF: 0x00BBGGRR
         int border = AccentColor.R | AccentColor.G << 8 | AccentColor.B << 16;
         try { DwmSetWindowAttribute(Handle, DwmwaBorderColor, ref border, sizeof(int)); } catch { }
+        int round = DwmwcpRound;
+        try { DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref round, sizeof(int)); } catch { }
     }
 
-    const int DwmwaBorderColor = 34;
+    const int DwmwaBorderColor = 34, DwmwaWindowCornerPreference = 33, DwmwcpRound = 2;
+
+    // Windows draws its border 1px wide and nothing makes it wider, so the window adds a second px in primary just
+    // inside it; maximized, Windows draws none, and neither does this
+    protected override void OnResize(EventArgs e)
+    {
+        var edge = WindowState == FormWindowState.Maximized ? Padding.Empty : new Padding(S(1));
+        if (Padding != edge) Padding = edge;
+        base.OnResize(e);
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        int w = Padding.Left;
+        if (w <= 0) return;
+        using var brush = new SolidBrush(AccentColor);
+        var r = ClientRectangle;
+        e.Graphics.FillRectangle(brush, r.Left, r.Top, r.Width, w);
+        e.Graphics.FillRectangle(brush, r.Left, r.Bottom - w, r.Width, w);
+        e.Graphics.FillRectangle(brush, r.Left, r.Top, w, r.Height);
+        e.Graphics.FillRectangle(brush, r.Right - w, r.Top, w, r.Height);
+    }
 
     static string ThemeButtonText => Dark ? "Flashbang" : "Dark mode";
 
@@ -916,7 +948,7 @@ partial class MainForm : Form
         int domainWidth = room * 2 / 5;
         if (col <= 1) return col == 0 ? (left, domainWidth) : (left + domainWidth + gap, room - domainWidth);
         // SMB mode splits the DC's column: the file server, then the share
-        int x = left + domainWidth + gap, w = room - domainWidth, server = (w - gap) * 11 / 20;
+        int x = left + domainWidth + gap, w = room - domainWidth, server = (w - gap) * 2 / 3;
         return col == 2 ? (x, server) : (x + server + gap, w - server - gap);
     }
 
@@ -1306,7 +1338,7 @@ partial class MainForm : Form
                 "  Fix: None arriving: check the device's and user's group assignments in the Intune admin center, then sync"),
 
             (SmbGuideTitle,
-                "Switch to SMB at the top, type the File server (files, or files.contoso.com) and, to test opening one, the Share, then click Test connection. A whole path such as \\\\files\\Finance pasted into File server works too. The test follows the path a connection takes and stops at the first step that fails: Name, Port 445, Kerberos, Sign-in, Share. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked. It runs only when asked, never with Run diagnostics, and it is read only: no password is asked for or saved. Every step is in the Log tab, and with Debug ticked so is each lookup, query and SSPI status it made.\n\n" +
+                "Switch to SMB at the top, type the File server (files, or files.contoso.com) and, to test opening one, the Share, then click Test connection. A whole path such as \\\\files\\Finance pasted into File server works too. A short name gets the domain while Add suffix is ticked; untick it to test the name as typed, through this PC's DNS suffix search list. The test follows the path a connection takes and stops at the first step that fails: Name, Port 445, Kerberos, Sign-in, Share. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked. It runs only when asked, never with Run diagnostics, and it is read only: no password is asked for or saved. Every step is in the Log tab, and with Debug ticked so is each lookup, query and SSPI status it made.\n\n" +
                 "• Name — the server's name in DNS, after a short name gets the Domain field's domain, and its addresses. IPv6 only is a note: some networks and apps need IPv4. A server given by address skips Kerberos, which needs a name\n" +
                 "  Fix: Check the spelling and the server's A record. On an Entra joined PC, check the on-prem domain and that this PC's DNS servers (on a VPN, its DNS settings) can answer for it\n\n" +
                 "• Port 445 (SMB) — a TCP connection to the server on 445, IPv4 first\n" +
@@ -1331,7 +1363,7 @@ partial class MainForm : Form
                 "  Fix: Set 'Network security: LAN Manager authentication level' to 'Send NTLMv2 response only' (level 3) or higher\n\n" +
                 "• Saved credential — a Windows credential in Credential Manager for this server (its name and user only; the password isn't read). Windows signs in to the server with it instead of your own sign-in\n" +
                 "  Fix: If it's stale or the wrong account, remove it in Control Panel > Credential Manager > Windows Credentials, or 'cmdkey /delete:<server>'\n\n" +
-                "• Share access — opens the share and counts the entries in its root (up to 1000). Errors are read by number: 5 access denied, 67 no such share, 1326 sign-in refused, 1272 guest only, 1219 already connected as someone else\n" +
+                "• Share access — opens the share and counts the entries in its root (up to 1000). With no share typed, it lists the server's folder shares instead, as opening \\\\server in Explorer does, and the server answering passes. Errors are read by number: 5 access denied, 67 no such share, 1326 sign-in refused, 1272 guest only, 1219 already connected as someone else\n" +
                 "  Fix: Access denied: the share and folder (NTFS) permissions. No such share: 'net view \\\\<server>' lists them. Sign-in refused: the password, a lockout, or the Kerberos step\n\n" +
                 "• Signing — whether this PC requires SMB signing. Not required is a note: packets are signed when the server requires it\n" +
                 "  Fix: To require it, enable 'Microsoft network client: Digitally sign communications (always)'\n\n" +
@@ -1741,8 +1773,10 @@ partial class MainForm : Form
     {
         var app = group.Current;
         var (text, look) = Diagnostics.MsiStatus(app.Status);
-        var (mark, color) = StatusMark(look);
-        AppendIntuneLine($"    {mark} ", color);
+        var (_, color) = StatusMark(look);
+        AppendIntuneLine("    ", TextColor);
+        AppendMark(_intuneBox, look);
+        AppendIntuneLine(" ", TextColor);
         AppendIntuneLine(group.Name ?? "Unnamed app", TextColor, bold: group.Name != null);
         if (app.Version is { Length: > 0 } version) AppendIntuneLine($"  {version}", DimColor);
         if (app.User) AppendIntuneLine("  (user)", DimColor);
@@ -2209,13 +2243,33 @@ partial class MainForm : Form
     // The wait is a step in progress, not a verdict, in the pane and in the log alike
     static string StepWord(TestEntry step) => step.Name == Diagnostics.RegWait ? "Waiting" : StatusWord(step.Status);
 
-    static void AppendRun(RichTextBox box, string text, Color color, Font? font = null)
+    static void AppendRun(RichTextBox box, string text, Color color, Font? font = null, Color? back = null)
     {
         box.SelectionStart = box.TextLength;
         box.SelectionLength = 0;
         box.SelectionColor = color;
+        box.SelectionBackColor = back ?? box.BackColor;
         box.SelectionFont = font ?? box.Font;
         box.AppendText(text);
+    }
+
+    static readonly Dictionary<Font, Font> BoldOf = [];
+
+    /// <summary>
+    /// A status mark in a text pane. Info is a bold "i" in on-primary on a primary square one character wide, the
+    /// nearest text gets to the results grid's disc with an "i" cut out; the others are their glyphs in the status colour.
+    /// </summary>
+    static void AppendMark(RichTextBox box, Status status, Font? font = null)
+    {
+        var face = font ?? box.Font;
+        if (status != Status.Info)
+        {
+            var (mark, color) = StatusMark(status);
+            AppendRun(box, mark, color, face);
+            return;
+        }
+        if (!BoldOf.TryGetValue(face, out var bold)) BoldOf[face] = bold = new Font(face, FontStyle.Bold);
+        AppendRun(box, "i", OnAccentColor, bold, AccentColor);
     }
 
     // Starts a paragraph in a step pane (DNS registration, SMB): a result row has the grid's three columns (status,
@@ -2239,9 +2293,11 @@ partial class MainForm : Form
     // One result row in a step pane, with the results grid's shapes so the status reads without colour
     void AppendStepRow(RichTextBox box, TestEntry step, string word)
     {
-        var (mark, color) = StatusMark(step.Status);
+        var (_, color) = StatusMark(step.Status);
         StepParagraph(box, row: true);
-        AppendRun(box, $"  {mark} {word}", color);
+        AppendRun(box, "  ", color);
+        AppendMark(box, step.Status);
+        AppendRun(box, $" {word}", color);
         AppendRun(box, $"\t{step.Name}", TextColor, GpBoldFont);
         var detailColor = step.Status == Status.Skip ? DimColor : TextColor;
         string[] lines = step.Detail.Split('\n');
@@ -2589,7 +2645,12 @@ partial class MainForm : Form
         if (DiagLog.ParseResult(line) is { } res)
         {
             var (mark, color) = LogStatusLook(res.Word);
-            AppendRun(_logBox, $"{mark} {res.Word}".PadRight(LogKindColumn), color);
+            if (res.Word == "Info")
+            {
+                AppendMark(_logBox, Status.Info);
+                AppendRun(_logBox, $" {res.Word}".PadRight(LogKindColumn - 1), color);
+            }
+            else AppendRun(_logBox, $"{mark} {res.Word}".PadRight(LogKindColumn), color);
             AppendRun(_logBox, column, DimColor);
             int at = _logBox.TextLength;
             AppendRun(_logBox, res.Name, TextColor, LogBoldFont);
@@ -3529,7 +3590,7 @@ partial class MainForm : Form
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
-        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
+        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter, _profile);
         bool finished = await RunSections(pendingRun, ProfileSections, config, cts,
             (done, total) => _lblStatus.Text = $"Running diagnostics... ({done}/{total})");
         if (!finished) return;
@@ -3582,7 +3643,7 @@ partial class MainForm : Form
         run.NotRun.Remove(name);
         run.Open[name] = true; // a group run on its own opens to show its new results, or stays open
 
-        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
+        var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter, run.Profile);
         if (!await RunSections(run, [name], config, cts)) return;
         if (!newRun) run.RanAt[name] = DateTime.Now;
         if (ReferenceEquals(SelectedRun, run)) ShowResults(run.Results);
@@ -3977,13 +4038,7 @@ partial class MainForm : Form
                 new("Zone Primary Server"), new("Update Path (Port 53)"), new("Registered Record"),
                 new("Registration Errors"),
             ]),
-            new(Diagnostics.EntraSsoGroup, [new(Diagnostics.SsoJoin),
-                .. profile == JoinProfile.Domain ? Array.Empty<TestEntry>() : [new(Diagnostics.SsoDeviceAuth), new(Diagnostics.SsoPrt)],
-                .. profile == JoinProfile.Entra
-                    ? [new(Diagnostics.SsoCloudTgt), new(Diagnostics.SsoOnPremTgt)]
-                    : new TestEntry[] { new(Diagnostics.SsoTicket), new(Diagnostics.SsoZone), new(Diagnostics.SsoLogon), new(Diagnostics.SsoStatusBar) },
-                new(Diagnostics.SsoEndpoints),
-            ]),
+            new(Diagnostics.EntraSsoGroup, [.. Diagnostics.SsoRows(profile).Select(row => new TestEntry(row))]),
             new(Diagnostics.CredentialsGroup, [
                 new(Diagnostics.HelloCheck), new(Diagnostics.HelloTrustCheck), new(Diagnostics.SignInMethodsCheck), new(Diagnostics.TpmCheck),
                 new(Diagnostics.TicketEncryptionCheck), new(Diagnostics.SavedCredentialsCheck),
@@ -4130,6 +4185,9 @@ partial class MainForm : Form
 
         public SspiResult Authenticate(string package, string spn, CancellationToken ct) =>
             Runner.RunWithTimeout(() => SmbNative.Authenticate(package, spn), SspiTimeoutMs, $"{package} sign-in to {spn}", ct);
+
+        public ShareList ListShares(string server, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => SmbNative.ListShares(server), ShareTimeoutMs, $"Listing the shares on {server}", ct);
 
         public ShareOpen OpenShare(string unc, CancellationToken ct) =>
             Runner.RunWithTimeout(() => SmbNative.OpenShare(unc), ShareTimeoutMs, $"Opening {unc}", ct);

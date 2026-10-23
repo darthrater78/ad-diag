@@ -31,7 +31,7 @@ static partial class Diagnostics
 
         var hello = HelloStatusCheck(ds, dsError);
         bool helloSet = hello.Status == Status.Pass;
-        var kind = ds == null ? null : JoinCheck(ds).Kind;
+        var kind = ds == null ? null : ProfileJoin(cfg, ds).Kind;
         var tests = new List<TestEntry> { hello };
         if (helloSet)
         {

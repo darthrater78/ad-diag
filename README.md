@@ -69,7 +69,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session. The only files it writes are the ones you save yourself: **Export results** and **Save log**.
 - **Two connections leave the corporate network, and they send nothing.** The Entra Seamless Single Sign-On group opens a TCP connection on port 443 to `login.microsoftonline.com` and, on a domain-joined or hybrid joined PC, `autologon.microsoftazuread-sso.com`, then closes it: no TLS handshake, no request, no account name. Everything else the app contacts is your own DNS servers and domain controllers.
 - **Saved credentials are listed by name only.** `cmdkey /list` gives the targets of saved Windows credentials and, for the SMB test, their user names; the app never asks Credential Manager for a password.
-- **The SMB test signs in to nothing.** It asks Windows' own SSPI (Kerberos, then Negotiate) for the first token of a sign-in to `cifs/<server>` with the signed-in user's own credentials, reads the status and the package it chose, and frees the token without sending it. For Kerberos that makes the KDC issue the service ticket, which Windows caches in memory as any connection would. No password is asked for, supplied or stored. It then lists the root of the share you typed, counting at most 1,000 entries, and changes nothing there.
+- **The SMB test signs in to nothing.** It asks Windows' own SSPI (Kerberos, then Negotiate) for the first token of a sign-in to `cifs/<server>` with the signed-in user's own credentials, reads the status and the package it chose, and frees the token without sending it. For Kerberos that makes the KDC issue the service ticket, which Windows caches in memory as any connection would. No password is asked for, supplied or stored. It then lists the root of the share you typed, counting at most 1,000 entries, or with no share typed asks the server for its list of shares (`NetShareEnum`, as Explorer does), and changes nothing there.
 - **Intune details are read, never changed.** The Intune group and tab read the registry keys the Windows MDM client keeps (`HKLM\SOFTWARE\Microsoft\Enrollments`, `Provisioning\OMADM`, `PolicyManager`), opened read-only, and ask the service manager for one service's state with query rights only. Policy values can name internal hosts or groups; they stay in memory like everything else.
 - **Exported reports contain only metadata.** The text export includes test names and diagnostic details (trust names, GPO counts, port status). No raw tokens, password hashes, or credential material is included.
 - **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `w32tm`, PowerShell queries, and other tools is parsed in memory for specific values only. The raw output is never written to disk, and is kept only while **Debug** is ticked on the Log tab (see below).
@@ -118,7 +118,7 @@ A group's heading shows the worst of its checks: **FAILED**, **WARNING** or **PA
 
 ### Profiles
 
-The profile decides which groups run. A check that doesn't apply to how the PC is joined isn't shown or logged at all, rather than showing as skipped.
+The profile decides which groups run, and which checks they make. Pick a profile other than how the PC is joined and its checks run anyway, so you can see what that profile would need; the Join Type row then says how the PC is really joined and which profile was checked. A check that doesn't apply to the profile isn't shown or logged at all, rather than showing as skipped. Rows keep one order on every profile, so switching profile only adds or removes them, and the list Results shows before a run is in that order too.
 
 | Profile | Groups | Left out |
 |---|---|---|
@@ -266,7 +266,7 @@ Reading the sync times or policy settings may need Run as Administrator; without
 
 ![The SMB test: a share reached, but with NTLM, because the server's SPN is missing](docs/screenshots/smb.png)
 
-Switch **Test** to **SMB**, type the **File server** (`files`, `files.contoso.com`, or an IP address) and, to test opening one, the **Share** (`Finance`), then click **Test connection** or press Enter. A whole path such as `\\files\Finance`, pasted into File server, works too. A short name gets the **Domain** field's domain. It runs only when you ask, never with Run diagnostics.
+Switch **Test** to **SMB**, type the **File server** (`files`, `files.contoso.com`, or an IP address) and, to test opening one, the **Share** (`Finance`), then click **Test connection** or press Enter. A whole path such as `\\files\Finance`, pasted into File server, works too. A short name gets the **Domain** field's domain while **Add suffix** (above File server) is ticked; untick it to test the short name as typed, through the PC's own DNS suffix search list, and Kerberos with the short name's SPN. It runs only when you ask, never with Run diagnostics.
 
 The test follows the path a connection takes, and the strip at the top lights each connection point as it passes. It stops at the first step that fails, and the line under the strip says where it stopped and what to do. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked.
 
@@ -276,7 +276,7 @@ The test follows the path a connection takes, and the strip at the top lights ea
 | **Port 445** | A TCP connection on 445, IPv4 first |
 | **Kerberos** | Cloud Kerberos Trust (see below); the ticket-granting ticket; the `_kpasswd._tcp` SRV record (domain and hybrid joined); the account holding `cifs/<server>` or `HOST/<server>` in AD, and a duplicate; a `cifs/<server>` service ticket from the KDC and why it failed, read by status number, tried up to 3 times, 2 seconds apart, when the failure can pass (no DC answered, no credentials yet, timed out), since the first request after sign-in or over a VPN often fails; the strip then shows "Passed on try 2"; the ticket's encryption; Max Token Size |
 | **Sign-in** | What Windows' Negotiate picks for the server: Kerberos, or NTLM and why; the LAN Manager authentication level; a saved credential in Credential Manager that replaces your own sign-in |
-| **Share** | Opens the share and counts its root's entries; errors are read by number (access denied, no such share, sign-in refused, guest only, already connected as someone else) |
+| **Share** | Opens the share and counts its root's entries; with no share typed, lists the server's folder shares, as opening `\\server` in Explorer does (hidden shares ending in `$` left out), and the server answering passes. Errors are read by number (access denied, no such share, sign-in refused, guest only, already connected as someone else) |
 | *This PC's SMB settings* | Signing required, the SMBv1 client driver, insecure guest logons (Group Policy first). Listed under the path, since none stops a connection on its own |
 
 The **Profile** changes what the steps check:
@@ -446,6 +446,7 @@ Newest first. Each version's section is its GitHub release notes: the release wo
 - The window's border is the app's blue.
 
 #### Results
+- The checks follow the profile picked, not only how the PC is joined, and keep one order on every profile.
 - Result details are set in Segoe UI, like the rest of the window, instead of a monospace font.
 - SMB results are drawn like the Results grid.
 

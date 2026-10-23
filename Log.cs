@@ -406,6 +406,10 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
         Call("sspi", $"{package} sign-in to {spn}", () => inner.Authenticate(package, spn, ct),
             r => $"status 0x{r.Status:X8}" + (r.Package != null ? $", package {r.Package}" : ""));
 
+    public ShareList ListShares(string server, CancellationToken ct) =>
+        Call("share", $"List the shares on {server}", () => inner.ListShares(server, ct),
+            r => r.Shares is { } s ? $"{s.Count} visible: {string.Join(", ", s)}" : $"error {r.Error}: {r.Message}");
+
     public ShareOpen OpenShare(string unc, CancellationToken ct) =>
         Call("share", $"Open {unc}", () => inner.OpenShare(unc, ct),
             r => r.Entries is { } n ? $"{n} entries" : $"error {r.Error}: {r.Message}");
