@@ -150,6 +150,26 @@ static class Shots
         Get<Control>(form, "_btnExport").Enabled = Get<Control>(form, "_btnCopy").Enabled = true;
         Pump(500);
         Capture(form, outDir, "smb.png");
+
+        // An Entra joined laptop on the SMB tab: no share typed, so the server's shares are listed, and the first
+        // Kerberos request failed while Windows traded its cloud ticket, then worked on the second try
+        Call(form, "SetProfile", JoinProfile.Entra, false);
+        Get<TextBox>(form, "_txtSmbServer").Text = "files";
+        Get<TextBox>(form, "_txtSmbShare").Text = "";
+        var entraTarget = Diagnostics.ParseSmbTarget("files", "", "contoso.com").Target!;
+        Set(form, "_smbTarget", entraTarget);
+        Set(form, "_smbProfile", JoinProfile.Entra);
+        Set(form, "_smbTestedSpn", entraTarget.Spn);
+        var entraGroups = MockSmbEntra();
+        var shownGroups = Get<List<TestGroup>>(form, "_smbGroups");
+        shownGroups.Clear();
+        shownGroups.AddRange(entraGroups);
+        Set(form, "_smbVerdict", Diagnostics.SmbVerdictFor(entraTarget, JoinProfile.Entra, entraGroups));
+        Call(form, "RenderSmb");
+        Get<Label>(form, "_lblStatus").Text = "Connected";
+        Pump(500);
+        Capture(form, outDir, "smb-entra.png");
+        Call(form, "SetProfile", JoinProfile.Hybrid, false);
         Call(form, "SetMode", Enum.Parse(modeType, "Ad"));
         Pump(300);
 
@@ -252,6 +272,30 @@ static class Shots
             new(Diagnostics.SmbNtlmRow, Status.Pass, "Level 3 (OS default): sends NTLMv2 only"),
             new(Diagnostics.SmbSavedRow, Status.Pass, @"None for files.contoso.com; signs in as CONTOSO\jdoe")]),
         new(Diagnostics.SmbShare, [new(Diagnostics.SmbShareRow, Status.Pass, @"\\files.contoso.com\Finance$ opened; 14 entries in its root")]),
+        new(Diagnostics.SmbSettings, [
+            new(Diagnostics.SmbSigningRow, Status.Pass, "Required (RequireSecuritySignature=1)"),
+            new(Diagnostics.SmbV1Row, Status.Pass, "Not installed (no mrxsmb10 driver)"),
+            new(Diagnostics.SmbGuestRow, Status.Pass, "Blocked by Group Policy")]),
+    ];
+
+    // An Entra joined PC with cloud Kerberos trust listing a file server's shares; Kerberos answered on its second try
+    static List<TestGroup> MockSmbEntra() =>
+    [
+        new(Diagnostics.SmbName, [new(Diagnostics.SmbNameRow, Status.Pass, "files.contoso.com (typed files)"), new(Diagnostics.SmbAddressesRow, Status.Pass, "10.20.5.40 (IPv4 only)")]),
+        new(Diagnostics.SmbPort, [new(Diagnostics.SmbPortRow, Status.Pass, "Reachable at 10.20.5.40")]),
+        new(Diagnostics.SmbKerberos, [
+            new(Diagnostics.SmbCloudTrustRow, Status.Pass, "CloudTgt: YES, OnPremTgt: YES"),
+            new(Diagnostics.SmbTgtRow, Status.Pass, "krbtgt/CONTOSO.COM cached"),
+            new(Diagnostics.SmbSpnRow, Status.Pass, "HOST/files.contoso.com (covers cifs) on account FILES$"),
+            new(Diagnostics.SmbTicketRow, Status.Info, "cifs/files.contoso.com issued on try 2; the first failed: " + Diagnostics.SspiStatusText(unchecked((int)0x80090311))
+                + ". A slow first answer is common over a VPN, or just after sign-in while Windows fetches its ticket") { Tries = 2 },
+            new(Diagnostics.SmbEncryptionRow, Status.Pass, "AES-256-CTS-HMAC-SHA1-96"),
+            new(Diagnostics.SmbTokenRow, Status.Pass, "Default (48000 bytes)")]),
+        new(Diagnostics.SmbSignIn, [
+            new(Diagnostics.SmbNegotiationRow, Status.Pass, "Kerberos"),
+            new(Diagnostics.SmbNtlmRow, Status.Info, "Level 3 (OS default): sends NTLMv2 only; after a Windows Hello sign-in there is no password hash, so NTLM can't sign in and Kerberos must work"),
+            new(Diagnostics.SmbSavedRow, Status.Pass, @"None for files.contoso.com; signs in as CONTOSO\jdoe")]),
+        new(Diagnostics.SmbShare, [new(Diagnostics.SmbShareRow, Status.Pass, @"\\files.contoso.com answered; 4 shares: Finance, HR, Projects, Public")]),
         new(Diagnostics.SmbSettings, [
             new(Diagnostics.SmbSigningRow, Status.Pass, "Required (RequireSecuritySignature=1)"),
             new(Diagnostics.SmbV1Row, Status.Pass, "Not installed (no mrxsmb10 driver)"),
