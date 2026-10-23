@@ -88,6 +88,26 @@ public class DnsRegistrationTests
         Assert.Equal([("pc042.nscriven.net", (string?)null)], Diagnostics.RegistrationNames("pc042", "nscriven.net", SuffixedAdapters(useSuffix: true)));
     }
 
+    [Fact]
+    public void Adapters_OnePerLine_AndFilterCopiesDropped()
+    {
+        // The user's PC: Npcap's filter on the client adapter shows up as a second interface with the same addresses
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, false,
+            [IPAddress.Parse("3fff::1"), IPAddress.Parse("172.16.50.5")], [], PointToPoint: true);
+        var npcap = island with { Name = "Island Private Access-Npcap Packet Driver (NPCAP)-0000" };
+        var lan = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
+        var wifi = new NetAdapter("Wi-Fi", "Intel(R) Wi-Fi 6 AX201", false, true, [HomeIp], [DcIp]);
+        // A name that merely starts the same, with other addresses, is a real adapter
+        var other = new NetAdapter("IOT-2", "Red Hat VirtIO Ethernet Adapter #2", false, false, [IPAddress.Parse("10.9.9.9")], []);
+        Assert.Equal(["Island Private Access", "IOT", "Wi-Fi", "IOT-2"],
+            Diagnostics.DropFilterBindings([island, npcap, lan, wifi, other]).Select(a => a.Name));
+
+        var probe = new FakeProbe();
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([lan, wifi]);
+        Assert.Equal($"IOT: {ClientIp}\nWi-Fi: {HomeIp}", DetailOf(Run(probe), "Registering Adapters"));
+    }
+
     [Theory]
     [InlineData("100.64.0.0", true)]
     [InlineData("100.127.255.255", true)]
@@ -106,7 +126,7 @@ public class DnsRegistrationTests
         Assert.Equal("Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)", DetailOf(group, "ZTNA / VPN Client"));
         // The home address is what gets registered; that is worth saying but is how ZTNA clients work
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
-        Assert.StartsWith("Wi-Fi: 192.168.1.50 — behind the ZTNA client", DetailOf(group, "Registering Adapters"));
+        Assert.StartsWith("Wi-Fi: 192.168.1.50\nBehind the ZTNA client", DetailOf(group, "Registering Adapters"));
         Assert.Equal(Status.Warn, StatusOf(group, "Registered Record")); // DNS still holds the office address
         Assert.Contains("the record is stale", DetailOf(group, "Registered Record"));
     }

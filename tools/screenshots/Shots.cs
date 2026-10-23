@@ -450,6 +450,9 @@ static class Shots
         [
             new("BitLocker", "RequireDeviceEncryption", "1", true, null),
             new("BitLocker", "EncryptionMethodByDriveType", "<enabled/><data id=\"EncryptionMethodWithXtsOsDropDown_Name\" value=\"7\"/>", true, null),
+            new("LocalUsersAndGroups", "Configure", Diagnostics.DescribeGroupConfiguration("LocalUsersAndGroups", "Configure",
+                "<GroupConfiguration><accessgroup desc=\"S-1-5-32-544\"><group action=\"U\" /><add member=\"S-1-12-1-3655296493-1187120100-2401813136-1528714871\"/>"
+                + "<add member=\"S-1-12-1-1186921468-1311707598-3826263997-2380512583\"/></accessgroup></GroupConfiguration>")!, true, null),
             new("Defender", "AllowRealtimeMonitoring", "1", true, null),
             new("Defender", "AllowCloudProtection", "1", true, null),
             new("Defender", "CloudBlockLevel", "2", false, "{0F2A9B11-0000-4000-8000-0000000000AA}"),

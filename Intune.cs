@@ -286,13 +286,62 @@ static partial class Diagnostics
                 if (name.Length == 0 || PolicyBookkeeping.Any(suffix => name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))) continue;
                 string? winner = current?.GetValueOrDefault(name + "_WinningProvider") as string;
                 bool wins = winner == null || SameId(winner, providerId);
-                settings.Add(new(area, name, FormatRegistryValue(value), wins, wins ? null : winner));
+                string text = DescribeGroupConfiguration(area, name, value) ?? FormatRegistryValue(value);
+                settings.Add(new(area, name, text, wins, wins ? null : winner));
             }
         }
         return settings;
     }
 
     static bool SameId(string a, string b) => string.Equals(a.Trim('{', '}', ' '), b.Trim('{', '}', ' '), StringComparison.OrdinalIgnoreCase);
+
+    // Local groups by well-known SID, as the LocalUsersAndGroups policy names them
+    static readonly Dictionary<string, string> LocalGroupNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["S-1-5-32-544"] = "Administrators", ["S-1-5-32-545"] = "Users", ["S-1-5-32-546"] = "Guests",
+        ["S-1-5-32-547"] = "Power Users", ["S-1-5-32-555"] = "Remote Desktop Users", ["S-1-5-32-562"] = "Distributed COM Users",
+        ["S-1-5-32-573"] = "Event Log Readers", ["S-1-5-32-578"] = "Hyper-V Administrators", ["S-1-5-32-580"] = "Remote Management Users",
+    };
+
+    /// <summary>
+    /// The LocalUsersAndGroups policy's XML in words, one group per line: "Administrators (S-1-5-32-544): adds A, B";
+    /// null for any other setting, or XML it can't read (shown as it is instead).
+    /// </summary>
+    internal static string? DescribeGroupConfiguration(string area, string name, object? value)
+    {
+        if (!area.Equals("LocalUsersAndGroups", StringComparison.OrdinalIgnoreCase) || !name.Equals("Configure", StringComparison.OrdinalIgnoreCase)
+            || value is not string xml)
+            return null;
+        try
+        {
+            // XmlReader prohibits DTDs by default, so the value can't pull in anything outside itself
+            using var reader = System.Xml.XmlReader.Create(new System.IO.StringReader(xml));
+            var root = System.Xml.Linq.XElement.Load(reader);
+            var lines = new List<string>();
+            foreach (var group in root.Elements().Where(e => e.Name.LocalName.Equals("accessgroup", StringComparison.OrdinalIgnoreCase)))
+            {
+                string desc = (string?)group.Attribute("desc") ?? "group";
+                string label = LocalGroupNames.TryGetValue(desc, out var known) ? $"{known} ({desc})" : desc;
+                string? action = group.Elements().FirstOrDefault(e => e.Name.LocalName == "group")?.Attribute("action")?.Value;
+                var add = Members(group, "add");
+                var remove = Members(group, "remove");
+                var parts = new List<string>();
+                if (add.Count > 0) parts.Add((action?.ToUpperInvariant() == "R" ? "sets the members to " : "adds ") + string.Join(", ", add));
+                else if (action?.ToUpperInvariant() == "R") parts.Add("removes every member");
+                if (remove.Count > 0) parts.Add("removes " + string.Join(", ", remove));
+                lines.Add($"{label}: {(parts.Count > 0 ? string.Join("; ", parts) : "no change")}");
+            }
+            return lines.Count > 0 ? string.Join("\n", lines) : null;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+    }
+
+    static List<string> Members(System.Xml.Linq.XElement group, string kind) =>
+        group.Elements().Where(e => e.Name.LocalName.Equals(kind, StringComparison.OrdinalIgnoreCase))
+            .Select(e => (string?)e.Attribute("member")).OfType<string>().Where(m => m.Length > 0).ToList();
 
     /// <summary>A registry value as one short line: numbers as they are, text with its whitespace collapsed and cut at 120 characters.</summary>
     internal static string FormatRegistryValue(object? value)

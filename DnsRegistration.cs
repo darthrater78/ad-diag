@@ -130,6 +130,14 @@ static partial class Diagnostics
             .ToList();
 
     // Routable addresses on a client's adapter that Windows will not put in DNS, as that adapter has registration off
+    /// <summary>
+    /// The adapters without the copies a filter driver adds: Npcap and some VPN and firewall filters show up as a second
+    /// interface named "&lt;adapter&gt;-&lt;filter&gt;-0000" with the same addresses, which isn't another adapter.
+    /// </summary>
+    internal static List<NetAdapter> DropFilterBindings(List<NetAdapter> adapters) =>
+        adapters.Where(a => !adapters.Any(b => !ReferenceEquals(a, b) && a.Name.StartsWith(b.Name + "-", StringComparison.OrdinalIgnoreCase)
+            && a.Addresses.Length > 0 && a.Addresses.ToHashSet().SetEquals(b.Addresses))).ToList();
+
     static IPAddress[] UnregisteredClientAddresses(List<NetAdapter> adapters, string? tag) =>
         UnregisteredClients(adapters, tag).SelectMany(a => a.Addresses).Where(a => IsRegistrable(a) && !IsCgnat(a)).Distinct().ToArray();
 
@@ -351,21 +359,22 @@ static partial class Diagnostics
     {
         var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
         var tunnelOnly = RegisteringAddresses(adapters).Where(IsCgnat).ToArray();
-        string list = string.Join(" · ", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"));
+        // One adapter per line
+        string list = string.Join("\n", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"));
         if (registering.Count == 0)
             return new(RegAdapters, Status.Warn, "No connected adapter has \"Register this connection's addresses in DNS\" turned on");
         if (tunnelOnly.Length > 0)
-            return new(RegAdapters, Status.Warn, $"{list} — {Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to");
+            return new(RegAdapters, Status.Warn, $"{list}\n{Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to");
         if (ztna == null)
             return new(RegAdapters, Status.Pass, list);
         if (UnregisteredClientAddresses(adapters, tag) is { Length: > 0 } unregistered)
         {
             string names = string.Join(", ", UnregisteredClients(adapters, tag).Select(a => a.Name));
-            return new(RegAdapters, Status.Pass, $"{list}. Not registered: {names} ({Join(unregistered)}), the client's own adapter, "
+            return new(RegAdapters, Status.Pass, $"{list}\nNot registered: {names} ({Join(unregistered)}), the client's own adapter, "
                 + "where registration is off; if servers reach this machine through the client, that is the address DNS should hold");
         }
         return new(RegAdapters, Status.Pass, list
-            + " — behind the ZTNA client this is the local network's address, which servers cannot use to reach this machine");
+            + "\nBehind the ZTNA client this is the local network's address, which servers cannot use to reach this machine");
     }
 
     // The three checks that need the zone's primary server: who it is, whether updates can reach it, what it holds

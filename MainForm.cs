@@ -1598,6 +1598,25 @@ class MainForm : Form
         RenderIntuneApps(s, e.ProviderName);
     }
 
+    // Indents the paragraphs from start to the end so wrapped text sits under the setting name; a value on its own
+    // lines (multiline) is indented as a block under the name instead
+    void HangUnderName(int start, bool multiline)
+    {
+        int name = TextRenderer.MeasureText("    ● ", _intuneBox.Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+        int firstEnd = _intuneBox.Text.IndexOf('\n', start);
+        _intuneBox.Select(start, Math.Max(0, (multiline ? firstEnd : _intuneBox.TextLength) - start));
+        _intuneBox.SelectionHangingIndent = name;
+        if (multiline && firstEnd >= 0)
+        {
+            _intuneBox.Select(firstEnd + 1, Math.Max(0, _intuneBox.TextLength - firstEnd - 1));
+            _intuneBox.SelectionIndent = name;
+            _intuneBox.SelectionHangingIndent = 0;
+        }
+        _intuneBox.Select(_intuneBox.TextLength, 0);
+        _intuneBox.SelectionIndent = 0;
+        _intuneBox.SelectionHangingIndent = 0;
+    }
+
     // The MSI apps the MDM pushed, as Settings > Access work or school > Info lists them under Applications
     void RenderIntuneApps(IntuneState s, string provider)
     {
@@ -1724,12 +1743,16 @@ class MainForm : Form
             AppendIntuneLine($"  ({area.Count()})\n", DimColor);
             foreach (var setting in area)
             {
+                // A value that wraps, or has lines of its own, lines up under the setting name, not the pane's edge
+                int start = _intuneBox.TextLength;
                 AppendIntuneLine("    ● ", setting.ProviderWins ? PassColor : WarnColor);
                 AppendIntuneLine(setting.Name + "  ", TextColor);
-                AppendIntuneLine(setting.Value, TextColor, mono: true);
+                bool multiline = setting.Value.Contains('\n');
+                AppendIntuneLine(multiline ? "\n" + setting.Value : setting.Value, TextColor, mono: true);
                 if (!setting.ProviderWins)
                     AppendIntuneLine($"  — another provider's value is in force ({setting.Winner})", DimColor);
                 AppendIntuneLine("\n", TextColor);
+                HangUnderName(start, multiline);
             }
         }
         AppendIntuneLine("\n\n", TextColor);
@@ -3731,7 +3754,8 @@ class MainForm : Form
             foreach (var test in group.Tests)
             {
                 char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', Status.Info => 'i', _ => 'o' };
-                sb.AppendLine($"  {icon} {test.Name,-26} {test.Detail}");
+                // A detail of several lines keeps its column
+                sb.AppendLine($"  {icon} {test.Name,-26} {test.Detail.Replace("\n", "\n" + new string(' ', 31))}");
             }
             if (group.Readiness is { } ready)
                 sb.AppendLine($"  = {"Readiness",-26} {ready.Text}" + (ready.ShowGuide ? $" Fixes: Guide tab, {group.Name}." : ""));
@@ -3875,7 +3899,7 @@ class MainForm : Form
             return (global.HostName, global.DomainName);
         }
 
-        public List<NetAdapter> Adapters() => NetworkInterface.GetAllNetworkInterfaces()
+        public List<NetAdapter> Adapters() => Diagnostics.DropFilterBindings(NetworkInterface.GetAllNetworkInterfaces()
             .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
             .Select(n =>
             {
@@ -3887,7 +3911,7 @@ class MainForm : Form
                     ip.UnicastAddresses.Any(u => u.Address.AddressFamily == AddressFamily.InterNetwork && u.PrefixLength == 32)
                         && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)),
                     ip.DnsSuffix ?? "", RegistersAdapterSuffix(n.Id));
-            }).ToList();
+            }).ToList());
 
         // "Use this connection's DNS suffix in DNS registration": Group Policy's setting if there is one, else the adapter's
         static bool RegistersAdapterSuffix(string id)

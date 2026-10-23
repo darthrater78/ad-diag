@@ -298,6 +298,22 @@ public class IntuneTests
         Assert.True(groups[1].Current.User);
     }
 
+    [Fact]
+    public void GroupConfiguration_ReadsAsWords()
+    {
+        // Shaped like the user's PC: Entra SIDs added to the local Administrators group
+        const string xml = """<GroupConfiguration><accessgroup desc = "S-1-5-32-544"><group action = "U" /><add member = "S-1-12-1-3655296493-1187120100-1"/><add member="S-1-12-1-2-3-4-5"/></accessgroup><accessgroup desc="S-1-5-32-555"><group action="R"/><add member="CONTOSO\helpdesk"/><remove member="S-1-12-1-9"/></accessgroup></GroupConfiguration>""";
+        Assert.Equal("Administrators (S-1-5-32-544): adds S-1-12-1-3655296493-1187120100-1, S-1-12-1-2-3-4-5\n"
+            + "Remote Desktop Users (S-1-5-32-555): sets the members to CONTOSO\\helpdesk; removes S-1-12-1-9",
+            Diagnostics.DescribeGroupConfiguration("LocalUsersAndGroups", "Configure", xml));
+
+        Assert.Null(Diagnostics.DescribeGroupConfiguration("Security", "Configure", xml));
+        Assert.Null(Diagnostics.DescribeGroupConfiguration("LocalUsersAndGroups", "Configure", "<GroupConfiguration><unclosed>"));
+        // A DTD is refused, so the value can't reach outside itself
+        Assert.Null(Diagnostics.DescribeGroupConfiguration("LocalUsersAndGroups", "Configure",
+            """<!DOCTYPE g [<!ENTITY x SYSTEM "file:///c:/windows/win.ini">]><GroupConfiguration><accessgroup desc="&x;"/></GroupConfiguration>"""));
+    }
+
     [Theory]
     [InlineData(70, "Pass")]
     [InlineData(60, "Fail")]
