@@ -166,12 +166,11 @@ class MainForm : Form
     {
         ConfigureWindow();
         string appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
-        bool elevated = false;
-        try { elevated = Probe.IsElevated(); } catch (Exception) { } // unknown: shown as not elevated
+        try { _elevated = Probe.IsElevated(); } catch (Exception) { } // unknown: shown as not elevated
         // Windows marks an elevated window this way (as Command Prompt does), and the header says it too
-        if (elevated) Text = "Administrator: " + Text;
+        if (_elevated) Text = "Administrator: " + Text;
         var layout = BuildLayout();
-        layout.Controls.Add(BuildHeader(appVersion, elevated), 0, 0);
+        layout.Controls.Add(BuildHeader(appVersion, _elevated), 0, 0);
         layout.Controls.Add(BuildConfigPanel(), 0, 1);
         layout.Controls.Add(BuildActionsPanel(), 0, 2);
         layout.Controls.Add(BuildSummaryPanel(), 0, 3);
@@ -189,7 +188,7 @@ class MainForm : Form
 
         ShowPreview();
         WireLifecycle();
-        AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
+        AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(_elevated ? "running as Administrator" : "not elevated")}");
         _ = DetectStartupAsync();
     }
 
@@ -2620,7 +2619,7 @@ class MainForm : Form
         foreach (var group in _renderedGroups!)
         {
             bool notRun = SelectedRun?.NotRun.Contains(group.Name) == true;
-            bool open = !notRun && IsGroupOpen(group);
+            bool open = IsGroupOpen(group);
             y = LayoutHeading(g, group, open, notRun, y, left, right);
             if (!open)
             {
@@ -2628,7 +2627,7 @@ class MainForm : Form
                 continue;
             }
             foreach (var test in group.Tests)
-                y = LayoutTest(g, group.Name, test, y, left, right, DetailWidth(width));
+                y = LayoutTest(g, group.Name, test, notRun, y, left, right, DetailWidth(width));
             if (group.Readiness is { } ready)
                 y = LayoutReadiness(g, group.Name, ready, y, left, right);
         }
@@ -2643,8 +2642,7 @@ class MainForm : Form
 
     // A group's heading: chevron and name, the group's verdict as a pill, its counts, and at the right edge a button
     // that runs the group on its own. The button stays in place while a run is going, faded and inactive. Left of it
-    // the heading is a button that opens and closes the group; one that hasn't run has nothing to open, so there it
-    // is plain text
+    // the heading is a button that opens and closes the group; one that hasn't run opens to the checks it will make
     int LayoutHeading(Graphics? g, TestGroup group, bool open, bool notRun, int y, int left, int right)
     {
         const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
@@ -2658,9 +2656,9 @@ class MainForm : Form
             int noteX = right - S(RunSlot) - S(10) - _noteColumn;
             TextRenderer.DrawText(g, note, GroupCountFont, new Point(noteX, y + S(5)), DimColor, oneLine);
             if (!notRun && GroupVerdict(group) is { } verdict) DrawGroupBadge(g, verdict, noteX - S(12), y);
-            if (!notRun) DrawChevron(g, left, y + S(8), open);
+            DrawChevron(g, left, y + S(8), open);
             TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), notRun ? DimColor : TextColor, oneLine);
-            bool needsAdmin = !notRun && group.Tests.Any(t => t.NeedsAdmin);
+            bool needsAdmin = group.Tests.Any(t => ShowsNeedsAdmin(t, notRun));
             if (needsAdmin)
             {
                 int nameRight = left + S(14) + TextRenderer.MeasureText(g, group.Name, GroupHeaderFont, Size.Empty, oneLine).Width;
@@ -2669,9 +2667,7 @@ class MainForm : Form
             }
 
             var bounds = new Rectangle(left - S(4), y, right - S(RunSlot) - S(8) - (left - S(4)), S(24));
-            _resultsCanvas.Rows.Add(notRun
-                ? new(group.Name, group.Name, "Not run", "", bounds)
-                : new(group.Name, group.Name, "", note, bounds, ResultsCanvas.Kind.Heading, open));
+            _resultsCanvas.Rows.Add(new(group.Name, group.Name, "", note, bounds, ResultsCanvas.Kind.Heading, open));
             _resultsCanvas.Headings.Add((group.Name, band));
             bool hover = !_running && _resultsCanvas.HoverGroup == group.Name && _resultsCanvas.HoverButton;
             DrawRunButton(g, button, notRun, hover);
@@ -2681,6 +2677,12 @@ class MainForm : Form
         }
         return y + S(26);
     }
+
+    // A check held back for want of Administrator, or, in a group that hasn't run on an app that isn't elevated, one
+    // that would be
+    bool ShowsNeedsAdmin(TestEntry test, bool notRun) =>
+        test.NeedsAdmin || notRun && !_elevated && Diagnostics.AdminChecks.Contains(test.Name);
+    readonly bool _elevated;
 
     // The group's worst result once every check has finished, the readiness line included; null while it runs
     static Status? GroupVerdict(TestGroup group)
@@ -2794,22 +2796,30 @@ class MainForm : Form
         g.SmoothingMode = smooth;
     }
 
-    // One check: mark and word, name, and the detail wrapped in its column
-    int LayoutTest(Graphics? g, string group, TestEntry test, int y, int left, int right, int detailW)
+    // One check: mark and word, name, and the detail wrapped in its column. In a group that hasn't run it is "Not
+    // run" by a text-dim ring, its detail saying only whether it needs Administrator
+    int LayoutTest(Graphics? g, string group, TestEntry test, bool notRun, int y, int left, int right, int detailW)
     {
+        bool needsAdmin = ShowsNeedsAdmin(test, notRun);
+        if (notRun) test = test with { Detail = needsAdmin ? "Needs Run as Administrator" : "" };
         var detailSize = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
         int rowHeight = Math.Max(S(20), detailSize.Height + S(4));
         if (g != null)
         {
-            var (word, color) = StatusLook(test);
+            var (word, color) = notRun ? ("Not run", DimColor) : StatusLook(test);
             g.DrawLine(RowLinePen, left, y, right, y);
-            DrawStatusMark(g, test, left, y + S(8));
+            if (notRun)
+            {
+                using var ring = new Pen(DimColor, S(2));
+                g.DrawEllipse(ring, left + 1, y + S(8) + 1, S(10) - 2, S(10) - 2);
+            }
+            else DrawStatusMark(g, test, left, y + S(8));
             TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(5)), color, TextFormatFlags.NoPrefix);
             // A check held back for want of Administrator has a shield after its name
-            int nameW = S(DetailX - NameX - 6) - (test.NeedsAdmin ? S(14) : 0);
+            int nameW = S(DetailX - NameX - 6) - (needsAdmin ? S(14) : 0);
             const TextFormatFlags nameFlags = TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
             TextRenderer.DrawText(g, test.Name, TestNameFont, new Rectangle(S(NameX), y + S(4), nameW, S(18)), TextColor, nameFlags);
-            if (test.NeedsAdmin)
+            if (needsAdmin)
             {
                 int drawn = Math.Min(nameW, TextRenderer.MeasureText(g, test.Name, TestNameFont, Size.Empty,
                     TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Width);
@@ -2874,9 +2884,10 @@ class MainForm : Form
     }
 
     // A group the user opened or closed stays that way; otherwise groups start closed, their heading carrying the
-    // verdict, or all open with "Expand all groups after a run"
+    // verdict, or all open with "Expand all groups after a run" (which leaves a group that hasn't run closed)
     bool IsGroupOpen(TestGroup group) =>
-        SelectedRun is { } run && run.Open.TryGetValue(group.Name, out bool open) ? open : _expandAll;
+        SelectedRun is { } run && run.Open.TryGetValue(group.Name, out bool open) ? open
+        : _expandAll && SelectedRun?.NotRun.Contains(group.Name) != true;
 
     void RerenderResults()
     {
@@ -3525,7 +3536,8 @@ class MainForm : Form
 
     /// <summary>
     /// Before any run: every section the profile runs, as a heading that hasn't run with its Run button, so what
-    /// will be checked shows before anything is. It is never a run of its own: running starts a real one.
+    /// will be checked shows before anything is; each opens to its checks, and those that need Administrator say
+    /// so. It is never a run of its own: running starts a real one.
     /// </summary>
     void ShowPreview()
     {
@@ -3533,7 +3545,6 @@ class MainForm : Form
         preview.NotRun.UnionWith(preview.Results.Select(g => g.Name));
         _preview = preview;
         RenderResults(preview.Results);
-        _resultsBar.Visible = false; // nothing to open or close yet
     }
 
     void ShowSelectedRun()
@@ -3689,7 +3700,7 @@ class MainForm : Form
                 new(Diagnostics.SsoEndpoints),
             ]),
             new(Diagnostics.CredentialsGroup, [
-                new(Diagnostics.HelloCheck), new(Diagnostics.TpmCheck),
+                new(Diagnostics.HelloCheck), new(Diagnostics.HelloTrustCheck), new(Diagnostics.SignInMethodsCheck), new(Diagnostics.TpmCheck),
                 new(Diagnostics.TicketEncryptionCheck), new(Diagnostics.SavedCredentialsCheck),
             ]),
             new(Diagnostics.IntuneGroup, [

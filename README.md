@@ -40,9 +40,9 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
    On the other profiles the app auto-detects the current domain (from `USERDNSDOMAIN`, `dsregcmd /status`, or the machine's DNS domain suffix) and pre-fills the **Domain** field. Enter target details:
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
-3. Before a run, **Results** lists every group the profile runs, each with its own **Run** button:
+3. Before a run, **Results** lists every group the profile runs, each with its own **Run** button. Open a group to see the checks it will make; when the app isn't running as Administrator, the groups with checks that need it say **Needs admin**:
 
-   ![Results before a run: every group of the profile, not run yet](docs/screenshots/before-run.png)
+   ![Results before a run: every group of the profile, not run yet, one opened to its checks](docs/screenshots/before-run.png)
 
    Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or click **Run again** at the right of its heading in Results (**Run** on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there, and the group opens to show them (or stays open) and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
 
@@ -108,7 +108,7 @@ Each check ends in one of five results:
 
 A group's heading shows the worst of its checks: **FAILED**, **WARNING** or **PASSED** (Info and Skipped don't lower it).
 
-**Run as Administrator:** a few checks read more as Administrator: the secure channel, the computer half of Group Policy, Intune's sync times and policy settings, and possibly the Hello policy and biometric enrollment. When the app isn't elevated and one of them was held back, its row has a shield after its name and its group's heading a **Needs admin** capsule (hover it for how to elevate). When the app is elevated, the title bar reads "Administrator: AD Diagnostics" and the header shows **Running as administrator**.
+**Run as Administrator:** a few checks read more as Administrator: the secure channel, the computer half of Group Policy, Intune's sync times and policy settings, and possibly the Hello policy and biometric enrollment. When the app isn't elevated and one of them was held back, its row has a shield after its name and its group's heading a **Needs admin** capsule (hover it for how to elevate). Before a run, an app that isn't elevated shows the capsule on every group with such a check, and opening the group shows which ones. When the app is elevated, the title bar reads "Administrator: AD Diagnostics" and the header shows **Running as administrator**.
 
 ### Profiles
 

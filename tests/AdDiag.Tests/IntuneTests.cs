@@ -109,6 +109,20 @@ public class IntuneTests
         Assert.Equal(Status.Skip, entry.Status);
         Assert.Equal("Not checked: needs Run as Administrator to read the sync times", entry.Detail);
         Assert.True(entry.NeedsAdmin);
+        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
+    }
+
+    [Fact]
+    public void PolicySettingsDenied_NeedsAdmin()
+    {
+        var probe = Enrolled();
+        probe.Denied.Add($@"SOFTWARE\Microsoft\PolicyManager\providers\{Id}\default\Device");
+
+        var entry = Entry(Diagnostics.TestIntune(probe, Now), "Device Policies");
+
+        Assert.Equal(Status.Skip, entry.Status);
+        Assert.True(entry.NeedsAdmin);
+        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Fact]
@@ -120,6 +134,8 @@ public class IntuneTests
         var entry = Assert.Single(Diagnostics.TestIntune(probe, Now).Tests);
 
         Assert.Equal(Status.Skip, entry.Status);
+        Assert.True(entry.NeedsAdmin);
+        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Fact]

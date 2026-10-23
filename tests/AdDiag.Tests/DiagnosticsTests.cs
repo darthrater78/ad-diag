@@ -228,6 +228,8 @@ public class DiagnosticsTests
         var group = Diagnostics.TestDomainMembership(Config(), probe);
         Assert.Equal(needsAdmin, group.Tests.Single(t => t.Name == "Secure Channel").NeedsAdmin);
         Assert.False(group.Tests.Single(t => t.Name == "Domain Joined").NeedsAdmin);
+        // Before a run, the app marks it from this list
+        Assert.All(group.Tests.Where(t => t.NeedsAdmin), t => Assert.Contains(t.Name, Diagnostics.AdminChecks));
     }
 
     [Fact]
@@ -236,6 +238,7 @@ public class DiagnosticsTests
         var probe = new FakeProbe { Rsop = $"SCOPE|Computer|DENIED\nSCOPE|User|OK|{DateTime.UtcNow.AddHours(-1):o}|HQ\nGPO|User|{{A}}|1|1|1|0|1|Drive Maps" };
         var group = Diagnostics.TestGroupPolicy(Config(), probe);
         Assert.All(group.Tests, t => Assert.True(t.NeedsAdmin));
+        Assert.All(group.Tests, t => Assert.Contains(t.Name, Diagnostics.AdminChecks));
         Assert.Equal(Status.Pass, StatusOf(group, "Applied GPOs"));
     }
 

@@ -98,6 +98,19 @@ public class CredentialsTests
     }
 
     [Fact]
+    public void HelloPolicy_Denied_NeedsAdmin()
+    {
+        var probe = Machine(Dsreg());
+        probe.Denied.Add(@"SOFTWARE\Policies\Microsoft\PassportForWork");
+
+        var entry = Entry(Run(probe), "Hello Trust");
+
+        Assert.Equal(Status.Skip, entry.Status);
+        Assert.True(entry.NeedsAdmin);
+        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
+    }
+
+    [Fact]
     public void Biometrics_Denied_NeedsAdmin()
     {
         var probe = Machine(Dsreg());
@@ -107,6 +120,7 @@ public class CredentialsTests
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.True(entry.NeedsAdmin);
+        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Theory]

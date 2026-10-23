@@ -91,6 +91,16 @@ record Readiness(Status Status, string Text, bool ShowGuide);
 // dependency so they can be unit tested (see tests/AdDiag.Tests).
 static partial class Diagnostics
 {
+    /// <summary>
+    /// The checks that can be held back for want of Administrator (each sets <see cref="TestEntry.NeedsAdmin"/> when
+    /// it is). Before a run, an app that isn't elevated marks them, so the need shows before anything runs.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AdminChecks = new HashSet<string>
+    {
+        "Secure Channel", "GP Last Refresh", "Applied GPOs", "Denied GPOs",
+        HelloTrustCheck, SignInMethodsCheck, MdmEnrollmentCheck, MdmSyncCheck, MdmPoliciesCheck,
+    };
+
     public static TestGroup TestDomainMembership(DiagConfig cfg, IProbe probe) => new("Domain Membership & Identity",
     [
         DomainJoinedCheck(cfg, probe), LoggedOnUserCheck(probe), SecureChannelCheck(cfg, probe),
