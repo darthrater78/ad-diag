@@ -160,7 +160,9 @@ Windows 11's own system values, so the app matches the OS around it.
 - 14px side gutter. Fixed 96-DPI pixel values in code go through `S()` so they scale with the display.
 - Results are a grid: status (mark + word) at 14px, test name at 100px, detail at 280px to the right edge. Rows are at least 24px with a 1px row line above each.
 - Each group heading carries its verdict pill and counts in a fixed column, and its Run button at the right edge: "9 checks · 1 warning".
-- A tab's own actions (Group Policy, Kerberos tickets, DNS registration, Log) sit in a 34px bar at the top of the tab, under the run strip, never at the bottom of the window.
+- The input row starts with the **Profile** picker, 255px; the Domain and DC fields share the rest two to three, so the DC label has room for the suffix box beside it. On the Entra joined profile the Domain and DC fields give way to a text-dim line saying the domain checks are hidden and how to show them.
+- Tabs sit left to right in a fixed order (Results, Guide, Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) and close up around one a profile hides.
+- A tab's own actions (Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) sit in a 34px bar at the top of the tab, under the run strip, never at the bottom of the window.
 - Groups collapse to their heading. After a run every group is closed, unless "Expand all groups after a run" is ticked; a group the user opens or closes stays that way for that run. The verdict pill and counts stay on a closed heading, so its state still reads.
 
 ## Elevation & Depth
@@ -188,6 +190,9 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 - **Guide sections:** every section starts folded to its title (bold, 10.5pt) after a ► or ▼ in text-dim from the monospace font; a click or Enter on the title toggles it, keeping it where it was on screen. Folded titles sit together as a list; an open section has a blank line before and after.
 - **Results bar:** above the results, on the panel: the "Expand all groups after a run" checkbox in text-dim on the left, "Expand all" and "Collapse all" links in primary on the right. Shown only when there are results.
 - **Ticket badge:** filled label in the Kerberos tickets pane; text uses on-primary.
+- **PRT card:** the first card in the Kerberos tickets pane on an Entra or hybrid joined PC, in the ticket card's frame. Its badge (PRT, PRT EXPIRED or NO PRT) is filled with the status colour of the Results row for the token; labels in text-dim, padded to one column; a value with a status (Status, an expired Expires, the TGT flags on an Entra joined PC) takes that status colour.
+- **Profile picker:** a flat drop-down list on surface under a text-dim "Profile" label, like the other inputs; the detected choice ends in "(detected)".
+- **Intune policies pane:** laid out like the Group Policy pane: a bold section title over a rule in border colour; labels in text-dim, values in text; each setting a ● in pass (the value in force) or warn (another provider's value is in force), its name in text and its value in the monospace font.
 - **Trace row** (DNS registration pane): the result row's three columns in a text pane, with the same mark shapes as characters (● ▲ ✕ –); a long detail wraps under the detail column.
 - **Picker** (ZTNA adapter): a flat drop-down list on surface with a text-dim label to its left, in the action bar after the buttons. Its list is as wide as its longest entry.
 - **Log line:** monospace, since every line is a system value. The time in text-dim (HH:mm:ss in Sections, with milliseconds in By time), then a 10-character kind column: a result's mark and status word in its status colour (● Passed, ▲ Warning, × Failed, i Info, – Skipped), or the line's source in text-dim. By time adds the line's section, by short name, in a text-dim column. A result's check name is bold and its detail follows in text; other messages in text, debug lines in text-dim without a DEBUG label. Wrapped text and raw tool output line up under the message, measured from the box itself. Raw: every line as saved, in text, no indents.

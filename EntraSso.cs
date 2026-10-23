@@ -23,7 +23,7 @@ static partial class Diagnostics
     public const string SsoJoin = "Join Type", SsoDeviceAuth = "Device Auth", SsoPrt = "Primary Refresh Token",
         SsoTicket = "Seamless SSO Ticket", SsoZone = "Intranet Zone", SsoLogon = "Automatic Logon",
         SsoStatusBar = "Status Bar Scripts", SsoCloudTgt = "Cloud Kerberos", SsoOnPremTgt = "On-premises Kerberos",
-        SsoSeamless = "Seamless SSO", SsoEndpoints = "Entra Endpoints";
+        SsoEndpoints = "Entra Endpoints";
 
     public const string SsoSpn = "HTTP/autologon.microsoftazuread-sso.com";
     public const string SsoUrl = "https://autologon.microsoftazuread-sso.com";
@@ -70,24 +70,31 @@ static partial class Diagnostics
             return new(EntraSsoGroup, tests, new(Status.Fail, "Not ready: this PC is not joined to Microsoft Entra ID or a domain.", true));
 
         bool seamless = kind is JoinKind.Hybrid or JoinKind.DomainOnly;
-        tests.Add(DeviceAuthCheck(ds, kind.Value));
         var prt = PrtCheck(ds, kind.Value, nowUtc);
-        tests.Add(prt);
         bool fallbackOnly = kind == JoinKind.Hybrid && prt.Status == Status.Pass;
-
-        if (seamless)
-        {
-            var sso = new List<TestEntry> { SeamlessTicketCheck(cfg, probe) };
-            sso.AddRange(BrowserZoneChecks(cfg, probe));
-            tests.AddRange(fallbackOnly ? sso.Select(AsFallback) : sso);
-        }
-        else
-        {
-            tests.AddRange(EntraKerberosChecks(ds));
-        }
-
+        tests.AddRange(SignInChecks(cfg, probe, ds, kind.Value, prt, fallbackOnly));
         tests.Add(EndpointsCheck(cfg, probe, seamless ? [LoginHost, AutologonHost] : [LoginHost]));
         return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless, fallbackOnly));
+    }
+
+    // The checks for how this PC signs in. One that doesn't apply to how it is joined isn't shown at all: a
+    // domain-joined PC has no device authentication or PRT, an Entra joined one no Seamless SSO
+    static IEnumerable<TestEntry> SignInChecks(DiagConfig cfg, IProbe probe, Dictionary<string, string> ds, JoinKind kind,
+        TestEntry prt, bool fallbackOnly)
+    {
+        if (kind != JoinKind.DomainOnly)
+        {
+            yield return DeviceAuthCheck(ds, kind);
+            yield return prt;
+        }
+        if (kind == JoinKind.EntraOnly)
+        {
+            foreach (var test in EntraKerberosChecks(ds)) yield return test;
+            yield break;
+        }
+        var sso = new List<TestEntry> { SeamlessTicketCheck(cfg, probe) };
+        sso.AddRange(BrowserZoneChecks(cfg, probe));
+        foreach (var test in fallbackOnly ? sso.Select(AsFallback) : sso) yield return test;
     }
 
     // A Seamless SSO problem on a PC that signs in with its PRT touches only the fallback, so it is a note
@@ -141,12 +148,72 @@ static partial class Diagnostics
         if (Parsers.DsregTime(ds, "AzureAdPrtUpdateTime") is not { } updated)
             return new(SsoPrt, Status.Pass, "AzureAdPrt: YES");
 
-        var age = nowUtc - updated;
-        if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+        var age = Age(updated, nowUtc);
         string when = $"renewed {updated.ToLocalTime():g} ({FormatTimeSpan(age)} ago)";
         return age <= PrtLifetime
             ? new(SsoPrt, Status.Pass, $"AzureAdPrt: YES, {when}")
             : new(SsoPrt, missing, $"AzureAdPrt: YES, but {when}; it has expired, since a token is valid for 14 days" + fallback);
+    }
+
+    /// <summary>
+    /// The profile that fits how this PC is joined, from <c>dsregcmd /status</c>. A PC joined to neither gets the
+    /// domain profile, which checks everything a domain needs and so shows what is missing.
+    /// </summary>
+    internal static JoinProfile DetectProfile(Dictionary<string, string> ds) => JoinCheck(ds).Kind switch
+    {
+        JoinKind.Hybrid => JoinProfile.Hybrid,
+        JoinKind.EntraOnly => JoinProfile.Entra,
+        _ => JoinProfile.Domain,
+    };
+
+    /// <summary>
+    /// The Primary Refresh Token card at the top of the Kerberos tickets tab, from <c>dsregcmd /status</c>; null when
+    /// the PC is not Entra or hybrid joined, so it has no PRT. The badge takes the Results row's status, so the two agree.
+    /// </summary>
+    internal static PrtCard? PrtCardFor(Dictionary<string, string> ds, DateTime nowUtc)
+    {
+        var (kind, _) = JoinCheck(ds);
+        if (kind is not (JoinKind.Hybrid or JoinKind.EntraOnly)) return null;
+
+        var prt = PrtCheck(ds, kind.Value, nowUtc);
+        bool? has = Parsers.DsregFlag(ds, "AzureAdPrt");
+        bool hybrid = kind == JoinKind.Hybrid;
+        string badge = prt.Status == Status.Pass ? "PRT" : has == true ? "PRT EXPIRED" : "NO PRT";
+        string caption = prt.Status == Status.Pass ? "Primary Refresh Token — Entra ID sign-in"
+            : hybrid ? "Primary Refresh Token — browsers fall back to Seamless SSO"
+            : "Primary Refresh Token — no single sign-on without it";
+
+        var rows = new List<PrtCardRow>
+        {
+            new("Join", hybrid ? "Microsoft Entra hybrid joined" : "Microsoft Entra joined"),
+        };
+        if (ds.TryGetValue("TenantName", out var tenant) && tenant.Length > 0)
+            rows.Add(new("Tenant", tenant));
+        rows.Add(new("Status", has switch { true => "YES", false => "NO", null => "not reported" }, prt.Status));
+
+        rows.AddRange(PrtTokenRows(ds, hybrid, nowUtc));
+        return new(badge, prt.Status, caption, rows);
+    }
+
+    // The token's times and authority, then its Kerberos ticket flags. An Entra joined PC needs both flags for
+    // Kerberos resources, so they take the Results colours; a hybrid joined PC gets its tickets from a domain
+    // controller, so there they are plain facts
+    static IEnumerable<PrtCardRow> PrtTokenRows(Dictionary<string, string> ds, bool hybrid, DateTime nowUtc)
+    {
+        if (Parsers.DsregTime(ds, "AzureAdPrtUpdateTime") is { } updated)
+            yield return new("Renewed", $"{updated.ToLocalTime():g} ({FormatTimeSpan(Age(updated, nowUtc))} ago)");
+        if (Parsers.DsregTime(ds, "AzureAdPrtExpiryTime") is { } expires)
+            yield return expires < nowUtc
+                ? new("Expires", $"{expires.ToLocalTime():g}, expired", hybrid ? Status.Warn : Status.Fail)
+                : new("Expires", $"{expires.ToLocalTime():g}");
+        if (ds.TryGetValue("AzureAdPrtAuthority", out var authority) && authority.Length > 0)
+            yield return new("Authority", authority);
+
+        foreach (var (field, label) in new[] { ("CloudTgt", "Cloud TGT"), ("OnPremTgt", "On-prem TGT") })
+        {
+            if (Parsers.DsregFlag(ds, field) is not { } flag) continue;
+            yield return new(label, flag ? "YES" : "NO", hybrid ? null : flag ? Status.Pass : Status.Warn);
+        }
     }
 
     static TestEntry SeamlessTicketCheck(DiagConfig cfg, IProbe probe)
@@ -214,7 +281,6 @@ static partial class Diagnostics
         TgtFlagCheck(ds, "OnPremTgt", SsoOnPremTgt,
             "a ticket for AD resources through cloud Kerberos trust",
             "no ticket for AD resources, so file shares, printers and other AD resources ask for a password"),
-        new(SsoSeamless, Status.Skip, "Not used on Microsoft Entra joined devices; sign-in uses the Primary Refresh Token"),
     ];
 
     static TestEntry TgtFlagCheck(Dictionary<string, string> ds, string field, string name, string yes, string no) =>
@@ -288,3 +354,8 @@ static partial class Diagnostics
         };
     }
 }
+
+/// <summary>One line of the PRT card; <c>Tone</c> colours the value with a status colour, null for plain text.</summary>
+record PrtCardRow(string Label, string Value, Status? Tone = null);
+/// <summary>The PRT card on the Kerberos tickets tab: its badge text and colour, the caption beside it, and its lines.</summary>
+record PrtCard(string Badge, Status BadgeStatus, string Caption, List<PrtCardRow> Rows);

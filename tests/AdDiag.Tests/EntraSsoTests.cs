@@ -274,9 +274,9 @@ public class EntraSsoTests
 
         var group = Run(probe);
 
+        // Seamless SSO doesn't apply to an Entra joined PC, so it has no row at all
         Assert.Equal(["Join Type", "Device Auth", "Primary Refresh Token", "Cloud Kerberos", "On-premises Kerberos",
-            "Seamless SSO", "Entra Endpoints"], group.Tests.Select(t => t.Name));
-        Assert.Equal(Status.Skip, Entry(group, "Seamless SSO").Status);
+            "Entra Endpoints"], group.Tests.Select(t => t.Name));
         Assert.Equal(Status.Warn, Entry(group, "On-premises Kerberos").Status);
         Assert.Equal("login.microsoftonline.com reachable on port 443", Entry(group, "Entra Endpoints").Detail);
         Assert.DoesNotContain(probe.ToolCalls, c => c.StartsWith("klist get"));
@@ -301,12 +301,11 @@ public class EntraSsoTests
     }
 
     [Fact]
-    public void DomainJoinedOnly_ChecksSeamlessSsoAndSkipsTheEntraDevice()
+    public void DomainJoinedOnly_ChecksSeamlessSsoAndShowsNoEntraDeviceRows()
     {
         var group = Run(Machine(Dsreg("NO", "YES")));
 
-        Assert.Equal(Status.Skip, Entry(group, "Device Auth").Status);
-        Assert.Equal(Status.Skip, Entry(group, "Primary Refresh Token").Status);
+        Assert.DoesNotContain(group.Tests, t => t.Name is "Device Auth" or "Primary Refresh Token");
         Assert.Equal(Status.Pass, Entry(group, "Seamless SSO Ticket").Status);
         Assert.Equal(new Readiness(Status.Pass, "Ready for Seamless SSO.", false), group.Readiness);
     }
@@ -367,4 +366,70 @@ public class EntraSsoTests
         Assert.Null(Parsers.TicketRealm(KlistGetSsoFailed, "HTTP/autologon.microsoftazuread-sso.com"));
         Assert.Equal("0xc000018b", Parsers.KlistGetError(KlistGetSsoFailed));
     }
+
+    // The PRT card on the Kerberos tickets tab
+    static PrtCard? Card(string dsreg) => Diagnostics.PrtCardFor(Parsers.ParseDsreg(dsreg), Now);
+    static PrtCardRow Row(PrtCard card, string label) => Assert.Single(card.Rows, r => r.Label == label);
+
+    [Fact]
+    public void PrtCard_Hybrid_ValidPrt_IsGreenAndTgtFlagsArePlain()
+    {
+        var card = Card(Dsreg("YES", "YES", onPrem: "NO", cloud: "NO"))!;
+
+        Assert.Equal("PRT", card.Badge);
+        Assert.Equal(Status.Pass, card.BadgeStatus);
+        Assert.Equal("Microsoft Entra hybrid joined", Row(card, "Join").Value);
+        Assert.Equal("Contoso", Row(card, "Tenant").Value);
+        Assert.Equal(new PrtCardRow("Status", "YES", Status.Pass), Row(card, "Status"));
+        Assert.Contains("45m ago", Row(card, "Renewed").Value);
+        Assert.StartsWith("https://login.microsoftonline.com/", Row(card, "Authority").Value);
+        Assert.Null(Row(card, "Cloud TGT").Tone);
+        Assert.Null(Row(card, "On-prem TGT").Tone);
+    }
+
+    [Fact]
+    public void PrtCard_Hybrid_NoPrt_IsAmber()
+    {
+        var card = Card(Dsreg("YES", "YES", prt: "NO"))!;
+
+        Assert.Equal("NO PRT", card.Badge);
+        Assert.Equal(Status.Warn, card.BadgeStatus);
+        Assert.Contains("Seamless SSO", card.Caption);
+    }
+
+    [Fact]
+    public void PrtCard_EntraJoined_ExpiredPrt_IsRed()
+    {
+        var card = Card(Dsreg("YES", "NO", prtTime: "2026-10-07 08:00:00.000 UTC"))!;
+
+        Assert.Equal("PRT EXPIRED", card.Badge);
+        Assert.Equal(Status.Fail, card.BadgeStatus);
+    }
+
+    [Fact]
+    public void PrtCard_EntraJoined_TgtFlagsTakeResultsColours()
+    {
+        var card = Card(Dsreg("YES", "NO", onPrem: "NO", cloud: "YES"))!;
+
+        Assert.Equal(new PrtCardRow("Cloud TGT", "YES", Status.Pass), Row(card, "Cloud TGT"));
+        Assert.Equal(new PrtCardRow("On-prem TGT", "NO", Status.Warn), Row(card, "On-prem TGT"));
+    }
+
+    [Theory]
+    [InlineData("2026-11-05 08:14:03.000 UTC", false)]
+    [InlineData("2026-10-21 08:14:03.000 UTC", true)]
+    public void PrtCard_ExpiryTime_IsMarkedWhenPast(string expiry, bool expired)
+    {
+        Status? tone = expired ? Status.Warn : null;
+        var card = Card(Dsreg("YES", "YES") + $"\n      AzureAdPrtExpiryTime : {expiry}\n")!;
+
+        var row = Row(card, "Expires");
+        Assert.Equal(tone, row.Tone);
+        Assert.Equal(tone != null, row.Value.EndsWith(", expired"));
+    }
+
+    [Theory]
+    [InlineData("NO", "YES")]
+    [InlineData("NO", "NO")]
+    public void PrtCard_NotEntraJoined_HasNoCard(string entra, string domain) => Assert.Null(Card(Dsreg(entra, domain)));
 }

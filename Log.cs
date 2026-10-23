@@ -375,6 +375,17 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
 
     static string From(IPAddress? server) => $"from {(server == null ? "the configured DNS servers" : server.ToString())}";
 
+    public string[]? RegistrySubKeys(string hklmPath) =>
+        Call("registry", $@"Subkeys of HKLM\{hklmPath}", () => inner.RegistrySubKeys(hklmPath), keys => keys == null ? "no such key" : $"{keys.Length} subkeys");
+
+    public Dictionary<string, object>? RegistryValues(string hklmPath) =>
+        Call("registry", $@"Values of HKLM\{hklmPath}", () => inner.RegistryValues(hklmPath), values => values == null ? "no such key" : $"{values.Count} values");
+
+    public int? ServiceState(string name) =>
+        Call("machine", $"Service {name}", () => inner.ServiceState(name), state => state == null ? "not installed" : $"state {state}");
+
+    public string? CurrentUserSid() => Call("machine", "Current user SID", inner.CurrentUserSid, sid => sid ?? "(unknown)");
+
     public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>
         Call("dns", $"SOA {name} {From(server)}", () => inner.QuerySoa(name, server, ct), soa => soa == null ? "no record" : $"zone {soa.Zone}, primary server {soa.PrimaryServer}");
 

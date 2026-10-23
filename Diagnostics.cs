@@ -51,7 +51,18 @@ interface IProbe
     /// for automatic logon and status bar updates by script, as the URL security manager that browsers ask reports them.
     /// </summary>
     UrlSecurity UrlSecurity(string url, CancellationToken ct);
+    /// <summary>The subkeys of an HKLM key (64-bit view); null if the key doesn't exist. Throws when access is denied.</summary>
+    string[]? RegistrySubKeys(string hklmPath);
+    /// <summary>The values of an HKLM key (64-bit view) by name; null if the key doesn't exist. Throws when access is denied.</summary>
+    Dictionary<string, object>? RegistryValues(string hklmPath);
+    /// <summary>A Windows service's state (1 stopped ... 4 running, as winsvc.h); null if it isn't installed.</summary>
+    int? ServiceState(string name);
+    /// <summary>The signed-in user's SID, under which PolicyManager keeps their settings; null if unknown.</summary>
+    string? CurrentUserSid();
 }
+
+/// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
+enum JoinProfile { Domain, Hybrid, Entra }
 
 /// <param name="Zone">0 Local machine, 1 Local intranet, 2 Trusted sites, 3 Internet, 4 Restricted sites.</param>
 /// <param name="Logon">URLACTION_CREDENTIALS_USE policy: 0 automatic logon, 0x10000 prompt, 0x20000 automatic in the intranet zone only, 0x30000 anonymous.</param>
@@ -568,6 +579,9 @@ static partial class Diagnostics
         GpScopeState.NoData => $"No Group Policy results recorded for the {scope.Name} scope (RSoP logging may be disabled)",
         _ => $"Could not read the {scope.Name} scope: {scope.Detail}",
     };
+
+    /// <summary>How long ago a UTC time was; zero for one in the future, as a clock a little ahead of the source gives.</summary>
+    internal static TimeSpan Age(DateTime utc, DateTime nowUtc) => nowUtc > utc ? nowUtc - utc : TimeSpan.Zero;
 
     public static string FormatTimeSpan(TimeSpan ts)
     {

@@ -104,6 +104,29 @@ public class DiagnosticsTests
         public Exception? UrlError;
 
         public UrlSecurity UrlSecurity(string url, CancellationToken ct) => UrlError != null ? throw UrlError : Url;
+
+        // HKLM, keyed by path (case-insensitive); a key listed in Denied throws as a standard user would see it
+        public Dictionary<string, Dictionary<string, object>> Registry = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> Denied = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, int> Services = new(StringComparer.OrdinalIgnoreCase);
+        public string? Sid = "S-1-12-1-1000";
+
+        public string[]? RegistrySubKeys(string hklmPath)
+        {
+            if (Denied.Contains(hklmPath)) throw new UnauthorizedAccessException($"Access to {hklmPath} is denied");
+            string prefix = hklmPath.TrimEnd('\\') + "\\";
+            var subkeys = Registry.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(k => k[prefix.Length..].Split('\\')[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return subkeys.Length > 0 || Registry.ContainsKey(hklmPath) ? subkeys : null;
+        }
+
+        public Dictionary<string, object>? RegistryValues(string hklmPath) =>
+            Denied.Contains(hklmPath) ? throw new UnauthorizedAccessException($"Access to {hklmPath} is denied")
+            : Registry.TryGetValue(hklmPath, out var values) ? values
+            : RegistrySubKeys(hklmPath) != null ? [] : null;
+
+        public int? ServiceState(string name) => Services.TryGetValue(name, out int state) ? state : null;
+        public string? CurrentUserSid() => Sid;
     }
 
     // A machine where everything works

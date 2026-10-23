@@ -104,10 +104,25 @@ class MainForm : Form
     readonly TextBox _txtDomain, _txtDc;
     readonly CheckBox _chkDcSuffix;
     readonly Button _btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, _btnTheme;
-    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog;
+    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune, _btnTabLog;
+    readonly ThemedButton[] _tabs;
+    // Intune policies tab
+    readonly Panel _intunePanel;
+    readonly RichTextBox _intuneBox;
+    readonly ThemedButton _btnIntuneSync;
+    readonly Label _lblIntuneNote;
+    bool _intuneRunning;
+    MdmEnrollment? _intuneEnrollment;
     readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
     readonly CheckBox _chkGpForce, _chkDebug;
     readonly ComboBox _cmbZtna;
+    // How the PC is joined decides which sections run and show; detected at start-up, the user can pick another
+    readonly ComboBox _cmbProfile;
+    readonly Label _lblProfileHint;
+    readonly List<Control> _domainControls = [];
+    JoinProfile _profile = JoinProfile.Domain;
+    JoinProfile? _detectedProfile;
+    const int ProfileWidth = 255;
     readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount, _lblWarnCaption, _lblInfoCount, _lblInfoCaption;
     readonly ResultsCanvas _resultsCanvas;
     readonly CheckBox _chkExpandAll;
@@ -204,11 +219,19 @@ class MainForm : Form
         // Config
         var configPanel = new Panel { Height = 50, Dock = DockStyle.Fill };
         configPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, configPanel.Height - 1, configPanel.Width, configPanel.Height - 1);
+        var lblProfile = new Label { Text = "Profile", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), Location = new Point(14, 2), AutoSize = true };
+        _cmbProfile = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 9f), Location = new Point(14, 20), Width = ProfileWidth, AccessibleName = "Profile: how this PC is joined" };
+        _cmbProfile.SelectionChangeCommitted += (s, e) => { _profilePicked = true; SetProfile((JoinProfile)_cmbProfile.SelectedIndex); };
+        _lblProfileHint = new Label { Text = "Domain checks are hidden on an Entra joined PC. Pick Hybrid joined or Domain joined to run them.", ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(ProfileWidth + 28, 24), Visible = false };
+        configPanel.Controls.AddRange([lblProfile, _cmbProfile, _lblProfileHint]);
+        FillProfileChoices();
+
         _txtDomain = MakeInput(configPanel, "Domain", 0, 0);
         _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0);
 
         _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
+        _domainControls.Add(_chkDcSuffix);
         configPanel.Resize += (s, e) =>
         {
             // Right-aligned over the DC field, clear of its label whatever the font or DPI
@@ -269,9 +292,12 @@ class MainForm : Form
         _btnTabTickets.Click += (s, e) => { SwitchTab("tickets"); RefreshTickets(); };
         _btnTabDns = new ThemedButton { Text = "DNS registration", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(426, 2) };
         _btnTabDns.Click += (s, e) => SwitchTab("dns");
-        _btnTabLog = new ThemedButton { Text = "Log", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(60, 26), Location = new Point(560, 2) };
+        _btnTabIntune = new ThemedButton { Text = "Intune policies", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(120, 26), Location = new Point(560, 2) };
+        _btnTabIntune.Click += (s, e) => { SwitchTab("intune"); RefreshIntuneTab(); };
+        _btnTabLog = new ThemedButton { Text = "Log", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(60, 26), Location = new Point(684, 2) };
         _btnTabLog.Click += (s, e) => SwitchTab("log");
-        tabBar.Controls.AddRange([_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabLog]);
+        _tabs = [_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune, _btnTabLog];
+        tabBar.Controls.AddRange(_tabs);
 
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new KeepScrollPanel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
@@ -371,6 +397,30 @@ class MainForm : Form
         _gpPanel.Controls.Add(gpBtnPanel);
         AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor);
 
+        // Intune policies tab
+        _intuneBox = new RichTextBox
+        {
+            ReadOnly = true,
+            BackColor = PanelColor,
+            ForeColor = TextColor,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.5f),
+            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+            DetectUrls = false, // policy values are text to read, not links
+        };
+        var btnIntuneRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(10, 3) };
+        btnIntuneRefresh.Click += (s, e) => RefreshIntuneTab();
+        _btnIntuneSync = new ThemedButton { Text = "Sync now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(90, 28), Location = new Point(100, 3), Enabled = false };
+        _btnIntuneSync.Click += BtnIntuneSync_Click;
+        _lblIntuneNote = new Label { Text = SyncNote, ForeColor = DimColor, BackColor = BgColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(200, 9) };
+        var intuneBtnPanel = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
+        intuneBtnPanel.Controls.AddRange([btnIntuneRefresh, _btnIntuneSync, _lblIntuneNote]);
+        _intunePanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
+        _intunePanel.Controls.Add(_intuneBox);
+        _intunePanel.Controls.Add(intuneBtnPanel);
+        AppendIntuneLine("Switch to this tab to load Intune details, or click Refresh.\n", DimColor);
+
         // Kerberos Tickets tab
         _ticketsBox = new RichTextBox
         {
@@ -381,6 +431,7 @@ class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font(MonoFamily, 9f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+            DetectUrls = false, // the PRT authority is a value to read, not a link
         };
         _btnPurgeTickets = new ThemedButton { Text = "Purge all tickets", BackColor = SurfaceColor, ForeColor = WarnColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(140, 28) };
         _btnPurgeTickets.Click += BtnPurgeTickets_Click;
@@ -412,13 +463,13 @@ class MainForm : Form
         // The tabs share one host under the Runs strip. Docked straight into the wrapper, a tab's place depended on
         // the wrapper's child order, which WinForms can change once the strip appears, leaving tabs under it
         var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
-        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel]);
+        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _intunePanel, _logPanel]);
         contentWrapper.Controls.Add(tabHost);
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
         layout.Controls.Add(contentWrapper, 0, 4);
 
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             ThemeScrollbars(scrolling);
 
         mainPanel.Controls.Add(layout);
@@ -430,10 +481,11 @@ class MainForm : Form
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
 
-        _placeholderText = "Enter target domain and run diagnostics";
+        _placeholderText = PlaceholderText;
 
         Load += (s, e) =>
         {
+            LayoutTabs();
             _resultsCanvas.Width = _resultsScrollPanel.ClientSize.Width;
             _resultsCanvas.Height = MeasureResultsHeight(_resultsCanvas.Width);
             _resultsCanvas.Invalidate();
@@ -455,7 +507,7 @@ class MainForm : Form
         bool elevated = false;
         try { elevated = Probe.IsElevated(); } catch { }
         AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
-        _ = DetectDomainAsync();
+        _ = DetectStartupAsync();
     }
 
     async Task DetectDomainAsync()
@@ -701,11 +753,20 @@ class MainForm : Form
     /// <summary>A 96-DPI pixel value scaled to the display's DPI.</summary>
     int S(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
 
+    // An input column's left edge and width, for a panel this wide; scale turns 96-DPI pixels into the display's
+    static (int X, int W) InputColumn(int panelWidth, int col, Func<int, int> scale)
+    {
+        int left = scale(14 + ProfileWidth + 14), gap = scale(16);
+        int room = panelWidth - left - scale(14) - gap;
+        int domainWidth = room * 2 / 5;
+        return col == 0 ? (left, domainWidth) : (left + domainWidth + gap, room - domainWidth);
+    }
+
     TextBox MakeInput(Panel parent, string label, int col, int row)
     {
-        int x = col == 0 ? 14 : parent.Width / 2 + 4;
+        // Two columns to the right of the profile picker; the DC's is wider, since its label shares the row with the suffix box
+        var (x, w) = InputColumn(parent.Width, col, px => px);
         int y = row == 0 ? 2 : 42;
-        int w = parent.Width / 2 - 24;
 
         var lbl = new Label
         {
@@ -724,11 +785,11 @@ class MainForm : Form
         };
 
         parent.Controls.AddRange([lbl, txt]);
+        _domainControls.AddRange([lbl, txt]);
 
         parent.Resize += (s, e) =>
         {
-            int newX = col == 0 ? S(14) : parent.ClientSize.Width / 2 + S(4);
-            int newW = parent.ClientSize.Width / 2 - S(24);
+            var (newX, newW) = InputColumn(parent.ClientSize.Width, col, S);
             lbl.Location = new Point(newX, lbl.Location.Y);
             txt.Location = new Point(newX, txt.Location.Y);
             txt.Width = newW;
@@ -747,7 +808,7 @@ class MainForm : Form
         SetRunning(false); // a cancelled run returns early and never ends itself
         _selectedRunIndex = -1;
         _renderedGroups = null;
-        _placeholderText = "Enter target domain and run diagnostics";
+        _placeholderText = PlaceholderText;
         _resultsBar.Visible = false;
         _resultsCanvas.Height = S(200);
         _resultsCanvas.Invalidate();
@@ -766,6 +827,8 @@ class MainForm : Form
 
         _txtDomain.Text = "";
         _txtDc.Text = "";
+        _profilePicked = false;
+        SetProfile(_detectedProfile ?? JoinProfile.Domain);
         BtnClear_Click(sender, e);
         _lblStatus.Text = "All fields reset";
     }
@@ -779,10 +842,11 @@ class MainForm : Form
         _gpPanel.Visible = tab == "gp";
         _ticketsPanel.Visible = tab == "tickets";
         _dnsPanel.Visible = tab == "dns";
+        _intunePanel.Visible = tab == "intune";
         _logPanel.Visible = tab == "log";
         if (tab == "log") RefreshLog(force: true);
 
-        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets"), (_btnTabDns, "dns"), (_btnTabLog, "log") })
+        foreach (var (btn, key) in new[] { (_btnTabResults, "results"), (_btnTabGuide, "guide"), (_btnTabGp, "gp"), (_btnTabTickets, "tickets"), (_btnTabDns, "dns"), (_btnTabIntune, "intune"), (_btnTabLog, "log") })
         {
             btn.Selected = tab == key;
         }
@@ -810,7 +874,7 @@ class MainForm : Form
         AppendGuide("Click a section to open or fold it.\n", GuideBodyFont, DimColor);
 
         bool previousOpen = true;
-        foreach (var (title, body) in GetGuideSections())
+        foreach (var (title, body) in GetGuideSections().Where(g => InProfile(g.Title, _profile)))
         {
             bool open = _guideOpen?.Contains(title) == true;
             if (open || previousOpen) AppendGuide("\n", GuideBodyFont, TextColor);
@@ -1046,6 +1110,17 @@ class MainForm : Form
                 "• Entra Endpoints — a direct TCP connection on port 443 to login.microsoftonline.com and, for Seamless SSO, autologon.microsoftazuread-sso.com; nothing is sent\n" +
                 "  Fix: Allow both through the firewall and proxy, and exclude them from TLS inspection. Behind a ZTNA client, check that its policy carries them. Through a proxy a warning here can be expected\n\n" +
                 "Microsoft's guides: 'Microsoft Entra seamless single sign-on: quickstart' and 'How SSO to on-premises resources works on Microsoft Entra joined devices' on learn.microsoft.com"),
+
+            (Diagnostics.IntuneGroup,
+                "Whether this PC is managed by Microsoft Intune (or another MDM), read from the registry keys the Windows MDM client keeps. It runs on every profile, since Intune works the same however the PC is joined. Whether Intune counts the PC as compliant is decided in the service and isn't stored on the PC, so it isn't checked. The Intune policies tab lists every setting Intune pushed.\n\n" +
+                "• MDM Enrollment — enrolled, and the account that enrolled the PC. Not enrolled is Info, and the other checks don't apply\n" +
+                "  Fix: Enroll from Settings > Accounts > Access work or school > Connect, or through automatic enrollment (Microsoft Entra ID > Mobility (MDM and WIP) > Microsoft Intune, MDM user scope). For an enrollment that isn't complete, read Event Viewer > Applications and Services Logs > Microsoft > Windows > DeviceManagement-Enterprise-Diagnostics-Provider > Admin\n\n" +
+                "• Last Sync — when the PC last synced with Intune. A PC that is on syncs about every 8 hours, so over a week, or a failed attempt since the last success, warns\n" +
+                "  Fix: Click Sync now on the Intune policies tab, or Sync in Settings > Accounts > Access work or school > Info. If it fails, read the DeviceManagement-Enterprise-Diagnostics-Provider log, and check that the PC reaches *.manage.microsoft.com without TLS inspection\n\n" +
+                "• Management Extension — the Intune Management Extension service, which installs Win32 apps and runs scripts and remediations. Not installed is Info: Intune adds it with the first such assignment\n" +
+                "  Fix: If it is stopped, start the 'Microsoft Intune Management Extension' service. If it won't stay running, read its logs in C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\n\n" +
+                "• Device Policies — how many settings Intune pushed to the device are in force; a setting another provider (another MDM, a provisioning package) sets instead is counted separately\n" +
+                "  Fix: None arriving: check the device's and user's group assignments in the Intune admin center, then sync"),
         };
 
         return s;
@@ -1210,6 +1285,283 @@ class MainForm : Form
         RefreshGpTab(keepExisting: true);
     }
 
+    // ── Profile ─────────────────────────────────────────────
+
+    bool _profilePicked; // the user chose a profile, so a late detection only marks its choice "(detected)"
+
+    static string ProfileName(JoinProfile profile) => profile switch
+    {
+        JoinProfile.Domain => "Domain joined",
+        JoinProfile.Hybrid => "Microsoft Entra hybrid joined",
+        _ => "Microsoft Entra joined",
+    };
+
+    string PlaceholderText => _profile == JoinProfile.Entra ? "Run diagnostics to check this PC" : "Enter target domain and run diagnostics";
+
+    void FillProfileChoices()
+    {
+        _cmbProfile.Items.Clear();
+        foreach (var profile in Enum.GetValues<JoinProfile>())
+            _cmbProfile.Items.Add(ProfileName(profile) + (profile == _detectedProfile ? " (detected)" : ""));
+        _cmbProfile.SelectedIndex = (int)_profile;
+    }
+
+    /// <summary>
+    /// Shows what the profile covers: an Entra joined PC has no domain, so the Domain and DC fields, the Group Policy
+    /// tab and the domain-only sections and Guide sections go. Runs already made keep their own sections.
+    /// </summary>
+    void SetProfile(JoinProfile profile, bool detected = false)
+    {
+        bool changed = profile != _profile;
+        _profile = profile;
+        if (detected) _detectedProfile = profile;
+        FillProfileChoices();
+
+        bool entra = profile == JoinProfile.Entra;
+        foreach (var control in _domainControls) control.Visible = !entra;
+        _lblProfileHint.Visible = entra;
+        _btnTabGp.Visible = !entra;
+        LayoutTabs();
+        if (entra && _gpPanel.Visible) SwitchTab("results");
+        PopulateGuide();
+        if (_renderedGroups == null)
+        {
+            _placeholderText = PlaceholderText;
+            _resultsCanvas.Invalidate();
+        }
+        if (changed || detected)
+            AppLog.Info("app", $"Profile: {ProfileName(profile)}{(detected ? " (detected)" : " (picked)")}");
+        if (!entra && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
+    }
+
+    // How the PC is joined decides the profile; the domain is filled in afterwards where the profile has one
+    async Task DetectStartupAsync()
+    {
+        try
+        {
+            var ds = await Task.Run(() => Parsers.ParseDsreg(Probe.RunTool("dsregcmd", "/status", 5000, default)));
+            if (IsDisposed) return;
+            var detected = Diagnostics.DetectProfile(ds);
+            if (_profilePicked)
+            {
+                _detectedProfile = detected;
+                FillProfileChoices();
+            }
+            else SetProfile(detected, detected: true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppLog.Info("app", $"Profile not detected: {ex.Message}; using {ProfileName(_profile)}");
+            if (!IsDisposed) await DetectDomainAsync();
+        }
+    }
+
+    // Tabs sit left to right in a fixed order, closing up around a hidden one
+    void LayoutTabs()
+    {
+        int x = S(10);
+        foreach (var tab in _tabs.Where(t => t.Visible))
+        {
+            tab.Left = x;
+            x += tab.Width + S(4);
+        }
+    }
+
+    // ── Intune policies tab ─────────────────────────────────
+
+    const string SyncNote = "Sync now asks first, then starts the same sync as Settings > Accounts > Access work or school > Sync";
+    static readonly Font IntuneBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    static readonly Font IntuneValueFont = new(MonoFamily, 8.5f);
+
+    void AppendIntuneLine(string text, Color color, bool bold = false, bool mono = false)
+    {
+        _intuneBox.SelectionStart = _intuneBox.TextLength;
+        _intuneBox.SelectionLength = 0;
+        _intuneBox.SelectionColor = color;
+        _intuneBox.SelectionBackColor = _intuneBox.BackColor;
+        _intuneBox.SelectionFont = bold ? IntuneBoldFont : mono ? IntuneValueFont : _intuneBox.Font;
+        _intuneBox.AppendText(text);
+    }
+
+    async void RefreshIntuneTab()
+    {
+        if (_intuneRunning) return;
+        _intuneRunning = true;
+        DiagLog.Block = new LogBlock($"Intune policies {Clock(DateTime.Now)}", "MDM enrollment and policy settings from the registry");
+        _intuneBox.Clear();
+        AppendIntuneLine("Loading Intune details...\n", DimColor);
+
+        (MdmEnrollment? Enrollment, IntuneState? State, string? Error) read;
+        try { read = await Task.Run(ReadIntuneDetails); }
+        finally { _intuneRunning = false; }
+        if (IsDisposed) return;
+
+        _intuneEnrollment = read.Enrollment;
+        _btnIntuneSync.Enabled = read.Enrollment != null && Diagnostics.SyncTaskPath(read.Enrollment) != null;
+        _intuneBox.Clear();
+        if (read.Error != null)
+            AppendIntuneLine($"  Intune details not read: {read.Error}\n", FailColor);
+        else if (read.State == null)
+        {
+            AppendIntuneLine("  Not enrolled in Intune or another MDM\n\n", TextColor, bold: true);
+            AppendIntuneLine("  This PC gets no Intune policies. To enroll it: Settings > Accounts > Access work or school > Connect,\n  or automatic enrollment through Microsoft Entra ID.\n", DimColor);
+        }
+        else RenderIntune(read.State);
+        _intuneBox.SelectionStart = 0;
+        _intuneBox.ScrollToCaret();
+    }
+
+    // The enrollment and what it pushed; never throws, so a failure becomes the reason shown in the tab
+    static (MdmEnrollment? Enrollment, IntuneState? State, string? Error) ReadIntuneDetails()
+    {
+        try
+        {
+            var enrollment = Diagnostics.ReadEnrollment(Probe);
+            return (enrollment, enrollment == null ? null : Diagnostics.ReadIntuneState(Probe, enrollment), null);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return (null, null, "needs Run as Administrator to read the enrollment");
+        }
+        catch (Exception ex)
+        {
+            return (null, null, ex.Message);
+        }
+    }
+
+    void IntuneSection(string title)
+    {
+        AppendIntuneLine($"  {title}\n", TextColor, bold: true);
+        AppendIntuneLine("  ────────────────────────────────────────\n\n", BorderColor);
+    }
+
+    void RenderIntune(IntuneState s)
+    {
+        RenderIntuneEnrollment(s);
+        if (s.PolicyError != null)
+        {
+            IntuneSection("Policy settings");
+            AppendIntuneLine($"  Not read: {s.PolicyError}\n", WarnColor);
+            return;
+        }
+        var e = s.Enrollment;
+        RenderIntuneScope("Device scope", s.Device, e.ProviderName);
+        RenderIntuneScope(e.Upn is { Length: > 0 } user ? $"User scope ({user})" : "User scope", s.User, e.ProviderName);
+    }
+
+    void RenderIntuneEnrollment(IntuneState s)
+    {
+        var e = s.Enrollment;
+        IntuneSection("Enrollment");
+        AppendIntuneLine("  MDM: ", DimColor);
+        AppendIntuneLine(e.ProviderName, TextColor, bold: true);
+        if (e.Upn is { Length: > 0 } upn)
+        {
+            AppendIntuneLine("  enrolled as ", DimColor);
+            AppendIntuneLine(upn, TextColor, mono: true);
+        }
+        AppendIntuneLine("\n", TextColor);
+        if (e.State != 1)
+            AppendIntuneLine($"  Enrollment not complete (EnrollmentState {e.State?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "not set"})\n", WarnColor);
+
+        RenderIntuneSync(s);
+        AppendIntuneLine("  Management Extension: ", DimColor);
+        var (text, color) = ExtensionLook(s);
+        AppendIntuneLine(text + "\n\n\n", color);
+    }
+
+    void RenderIntuneSync(IntuneState s)
+    {
+        AppendIntuneLine("  Last sync: ", DimColor);
+        if (s.SyncError != null)
+        {
+            AppendIntuneLine($"not read: {s.SyncError}\n", DimColor);
+            return;
+        }
+        if (s.LastSuccess is not { } success)
+        {
+            AppendIntuneLine("none recorded\n", DimColor);
+            return;
+        }
+        var age = Diagnostics.Age(success, DateTime.UtcNow);
+        AppendIntuneLine($"{success.ToLocalTime():g}", age.TotalDays > 7 ? WarnColor : TextColor, bold: true);
+        AppendIntuneLine($"  ({Diagnostics.FormatTimeSpan(age)} ago)", DimColor);
+        if (s.LastFailure is { } failure && failure > success)
+            AppendIntuneLine($"   Last attempt failed {failure.ToLocalTime():g}", WarnColor);
+        AppendIntuneLine("\n", TextColor);
+    }
+
+    static (string Text, Color Color) ExtensionLook(IntuneState s) => s.ExtensionError != null
+        ? ($"not read: {s.ExtensionError}", DimColor)
+        : s.ExtensionState switch
+        {
+            null => ("not installed", DimColor),
+            4 => ("running", PassColor),
+            1 => ("stopped", WarnColor),
+            var other => ($"state {other}", TextColor),
+        };
+
+    void RenderIntuneScope(string title, List<MdmSetting> settings, string provider)
+    {
+        IntuneSection(title);
+        if (settings.Count == 0)
+        {
+            AppendIntuneLine($"    None from {provider}\n\n\n", DimColor);
+            return;
+        }
+        var areas = settings.GroupBy(x => x.Area).ToList();
+        AppendIntuneLine($"  {settings.Count} setting{(settings.Count == 1 ? "" : "s")} in {areas.Count} area{(areas.Count == 1 ? "" : "s")} from {provider}\n", DimColor);
+        foreach (var area in areas)
+        {
+            AppendIntuneLine($"\n  {area.Key}", TextColor, bold: true);
+            AppendIntuneLine($"  ({area.Count()})\n", DimColor);
+            foreach (var setting in area)
+            {
+                AppendIntuneLine("    ● ", setting.ProviderWins ? PassColor : WarnColor);
+                AppendIntuneLine(setting.Name + "  ", TextColor);
+                AppendIntuneLine(setting.Value, TextColor, mono: true);
+                if (!setting.ProviderWins)
+                    AppendIntuneLine($"  — another provider's value is in force ({setting.Winner})", DimColor);
+                AppendIntuneLine("\n", TextColor);
+            }
+        }
+        AppendIntuneLine("\n\n", TextColor);
+    }
+
+    // Starts the MDM client's own sync task, the one behind Sync in Settings (script and its result: Intune.cs)
+    async void BtnIntuneSync_Click(object? sender, EventArgs e)
+    {
+        if (_intuneRunning || _intuneEnrollment is not { } enrollment || Diagnostics.SyncTaskPath(enrollment) is not { } task) return;
+        var confirm = MessageBox.Show(
+            $"This asks {enrollment.ProviderName} for new policies and apps now, the same as Sync in Settings > Accounts > Access work or school. "
+            + "Anything it receives applies as it arrives.\n\nContinue?",
+            "Sync with Intune", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        DiagLog.Block = new LogBlock($"Intune sync {Clock(DateTime.Now)}", "Start-ScheduledTask PushLaunch");
+        _btnIntuneSync.Enabled = false;
+        (bool Started, string Reason) result;
+        try { result = Diagnostics.ParseSyncOutput(await Task.Run(() => Probe.RunPowerShell(Diagnostics.SyncScript(task), 30000, default))); }
+        catch (Exception ex) { result = (false, ex.Message); }
+        finally { if (!IsDisposed) _btnIntuneSync.Enabled = true; }
+        if (IsDisposed) return;
+        ShowSyncResult(result.Started, result.Reason);
+    }
+
+    void ShowSyncResult(bool started, string reason)
+    {
+        AppLog.Info("intune", started ? "Sync started" : $"Sync not started: {reason}");
+        _lblIntuneNote.ForeColor = started ? TextColor : FailColor;
+        if (started)
+        {
+            _lblIntuneNote.Text = $"Sync started at {Clock(DateTime.Now)}. It takes a minute or two; click Refresh to see the new sync time.";
+            return;
+        }
+        bool elevated = false;
+        try { elevated = Probe.IsElevated(); } catch (Exception) { } // unknown: suggest elevating anyway
+        _lblIntuneNote.Text = $"Sync not started: {reason}{(elevated ? "" : " Run as Administrator, or use Sync in Settings.")}";
+    }
+
     // ── Kerberos Tickets tab ──────────────────────────────────
 
     void AppendTicketsLine(string text, Color color, bool bold = false, Color? backColor = null)
@@ -1225,11 +1577,13 @@ class MainForm : Form
     async void RefreshTickets()
     {
         if (_ticketsRunning) return;
-        DiagLog.Block = new LogBlock($"Kerberos tickets {Clock(DateTime.Now)}", "klist");
+        DiagLog.Block = new LogBlock($"Kerberos tickets {Clock(DateTime.Now)}", "dsregcmd /status, klist");
         _ticketsRunning = _ticketsLoaded = true;
         _showingExplainer = false;
         _ticketsBox.Clear();
         AppendTicketsLine("Loading tickets...\n", DimColor);
+        // The PRT card comes from dsregcmd; it runs beside klist, and a failure only leaves a note in its place
+        var prtTask = Task.Run(ReadPrtCard);
         string raw;
         try { raw = await Task.Run(() => Probe.RunTool("klist", "", 5000, default)); }
         catch (Exception ex)
@@ -1243,9 +1597,24 @@ class MainForm : Form
         }
         finally { _ticketsRunning = false; }
 
+        var prt = await prtTask;
         if (_showingExplainer || IsDisposed) return; // user opened the explainer while klist ran
         _ticketsBox.Clear();
 
+        if (prt.Card is { } card) RenderPrtCard(card);
+        else if (prt.Error is { } error) AppendTicketsLine($"Primary Refresh Token not checked: dsregcmd failed: {error}\n\n", DimColor);
+
+        RenderTicketList(raw);
+    }
+
+    static (PrtCard? Card, string? Error) ReadPrtCard()
+    {
+        try { return (Diagnostics.PrtCardFor(Parsers.ParseDsreg(Probe.RunTool("dsregcmd", "/status", 5000, default)), DateTime.UtcNow), null); }
+        catch (Exception ex) { return (null, ex.Message); }
+    }
+
+    void RenderTicketList(string raw)
+    {
         var (headers, tickets) = Parsers.ParseKlist(raw);
         if (headers.Count == 0 && tickets.Count == 0)
         {
@@ -1266,6 +1635,25 @@ class MainForm : Form
 
         if (tickets.Count == 0)
             AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
+    }
+
+    // Same frame as a ticket; the badge and any coloured value take the Results row's status colour
+    void RenderPrtCard(PrtCard card)
+    {
+        Color Tone(Status s) => StatusLook(new TestEntry("", s)).Color;
+        int width = card.Rows.Max(r => r.Label.Length) + 2;
+
+        AppendTicketsLine(" ┌─ ", BorderColor);
+        AppendTicketsLine($" {card.Badge} ", OnAccentColor, bold: true, backColor: Tone(card.BadgeStatus));
+        AppendTicketsLine($"  {card.Caption}\n", DimColor);
+        AppendTicketsLine(" │\n", BorderColor);
+        foreach (var row in card.Rows)
+        {
+            AppendTicketsLine(" │  ", BorderColor);
+            AppendTicketsLine($"{row.Label}:".PadRight(width), DimColor);
+            AppendTicketsLine(row.Value + "\n", row.Tone is { } t ? Tone(t) : TextColor, bold: row.Label == "Status");
+        }
+        AppendTicketsLine(" └──\n\n", BorderColor);
     }
 
     void RenderTicket(string server, Dictionary<string, string> fields, int index)
@@ -1409,6 +1797,16 @@ class MainForm : Form
         AppendTicketsLine(" RDP  ", OnAccentColor, bold: true, backColor: PassColor);
         AppendTicketsLine("  Remote Desktop\n", TextColor, bold: true);
         AppendTicketsLine("       Authenticates Remote Desktop (TERMSRV) connections.\n\n", DimColor);
+
+        AppendTicketsLine("PRIMARY REFRESH TOKEN\n\n", AccentColor, bold: true);
+        AppendTicketsLine(" PRT  ", OnAccentColor, bold: true, backColor: PassColor);
+        AppendTicketsLine("  Primary Refresh Token\n", TextColor, bold: true);
+        AppendTicketsLine("       Shown above the tickets on Entra and hybrid joined PCs. It is not a\n", DimColor);
+        AppendTicketsLine("       Kerberos ticket, so klist never lists it: it comes from dsregcmd /status.\n", DimColor);
+        AppendTicketsLine("       Edge, Chrome and Office use it to sign in to Microsoft Entra ID.\n", DimColor);
+        AppendTicketsLine("       It lasts 14 days, and Windows renews it at sign-in and unlock.\n", DimColor);
+        AppendTicketsLine("       Missing or expired on a hybrid joined PC, browsers fall back to\n", DimColor);
+        AppendTicketsLine("       Seamless SSO (amber); on an Entra joined PC it is red.\n\n", DimColor);
 
         AppendTicketsLine("ENCRYPTION\n\n", AccentColor, bold: true);
         AppendTicketsLine("  AES-256  ", PassColor);
@@ -2594,23 +2992,41 @@ class MainForm : Form
     // ── Events ──────────────────────────────────────────────
 
     // Every section of a run, in the order they show, and the check behind each. They don't depend on each other's
-    // results, so any one can run on its own
-    static readonly (string Name, string Short, Func<DiagConfig, IProbe, TestGroup> Test)[] Sections =
+    // results, so any one can run on its own. DomainOnly sections need the PC in a domain, so an Entra joined profile
+    // leaves them out entirely: not run, not shown, not logged
+    static readonly (string Name, string Short, Func<DiagConfig, IProbe, TestGroup> Test, bool DomainOnly)[] Sections =
     [
-        ("Domain Membership & Identity", "Membership", Diagnostics.TestDomainMembership),
-        ("DC Discovery & Connectivity", "DC Discovery", Diagnostics.TestDcConnectivity),
-        ("DNS for Active Directory", "DNS for AD", Diagnostics.TestDnsForAd),
-        ("SYSVOL & NETLOGON", "SYSVOL", Diagnostics.TestSysvolNetlogon),
-        ("Group Policy", "Group Policy", Diagnostics.TestGroupPolicy),
-        ("Trust Relationships", "Trusts", Diagnostics.TestTrusts),
-        ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime),
-        ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration),
-        (Diagnostics.EntraSsoGroup, "Seamless SSO", Diagnostics.TestEntraSso),
+        ("Domain Membership & Identity", "Membership", Diagnostics.TestDomainMembership, true),
+        ("DC Discovery & Connectivity", "DC Discovery", Diagnostics.TestDcConnectivity, true),
+        ("DNS for Active Directory", "DNS for AD", Diagnostics.TestDnsForAd, true),
+        ("SYSVOL & NETLOGON", "SYSVOL", Diagnostics.TestSysvolNetlogon, true),
+        ("Group Policy", "Group Policy", Diagnostics.TestGroupPolicy, true),
+        ("Trust Relationships", "Trusts", Diagnostics.TestTrusts, true),
+        ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime, true),
+        ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration, false),
+        (Diagnostics.EntraSsoGroup, "Seamless SSO", Diagnostics.TestEntraSso, false),
+        (Diagnostics.IntuneGroup, "Intune", Diagnostics.TestIntune, false),
     ];
+
+    /// <summary>Whether a section (or a Guide section of the same name) belongs to a profile.</summary>
+    static bool InProfile(string name, JoinProfile profile) =>
+        profile != JoinProfile.Entra || !Sections.Any(s => s.Name == name && s.DomainOnly);
+
+    // A heading from a run made for another profile can name a section this profile doesn't run
+    bool SectionInProfile(string name)
+    {
+        if (InProfile(name, _profile)) return true;
+        _lblStatus.Text = $"{name} isn't part of the {ProfileName(_profile)} profile";
+        return false;
+    }
+
+    /// <summary>The sections the chosen profile runs, in the order they show.</summary>
+    List<string> ProfileSections => Sections.Where(s => InProfile(s.Name, _profile)).Select(s => s.Name).ToList();
 
     /// <summary>The domain and DC from the fields, or null (with the reason in the status line) when they're invalid.</summary>
     (string Domain, string Dc)? ReadTarget()
     {
+        if (_profile == JoinProfile.Entra) return ("", ""); // nothing on this profile needs a domain
         string domain = _txtDomain.Text.Trim();
         string dc = _txtDc.Text.Trim();
         if (_chkDcSuffix.Checked && !string.IsNullOrEmpty(domain) && !dc.Contains('.'))
@@ -2629,12 +3045,16 @@ class MainForm : Form
     void SetRunning(bool running)
     {
         _running = running;
-        _btnRun.Enabled = _btnRunMenu.Enabled = !running;
+        _btnRun.Enabled = _btnRunMenu.Enabled = _cmbProfile.Enabled = !running;
         _btnExport.Enabled = _btnCopy.Enabled = !running && SelectedRun is { IsPending: false };
         _resultsCanvas.Invalidate(); // the Run links grey out
     }
 
     static string DcText(string dc) => dc.Length > 0 ? dc : "DC found automatically";
+
+    // What a run covered, for its log heading: an Entra joined run has no domain
+    static string TargetText(JoinProfile profile, string domain, string dc) =>
+        profile == JoinProfile.Entra ? ProfileName(profile) : $"{ProfileName(profile)} · {domain} · {DcText(dc)}";
 
     // A log heading's outcome: "32 passed · 0 failed · 3 warnings"
     static string Totals(IEnumerable<TestEntry> tests)
@@ -2649,7 +3069,9 @@ class MainForm : Form
     {
         _runCts?.Cancel();
         _runCts = new CancellationTokenSource();
-        AppLog.Info("run", $"Started{what}: domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
+        AppLog.Info("run", _profile == JoinProfile.Entra
+            ? $"Started{what}: {ProfileName(_profile)} profile"
+            : $"Started{what}: {ProfileName(_profile)} profile, domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
         SetRunning(true);
         _lblStatus.ForeColor = DimColor;
         SwitchTab("results");
@@ -2662,18 +3084,18 @@ class MainForm : Form
     {
         if (_running || ReadTarget() is not { } target) return;
         var (domain, dc) = target;
-        var block = DiagLog.Block = new LogBlock($"Run {Clock(DateTime.Now)}", $"{domain} · {DcText(dc)} · all sections");
+        var block = DiagLog.Block = new LogBlock($"Run {Clock(DateTime.Now)}", $"{TargetText(_profile, domain, dc)} · all sections");
         var cts = StartRun("", domain, dc);
         _summaryPanel.Visible = false;
         _lblStatus.Text = "Running diagnostics...";
 
-        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, BuildSkeleton());
+        var pendingRun = new DiagRun(DateTime.MinValue, domain, dc, BuildSkeleton(_profile)) { Profile = _profile };
         _runHistory.Insert(0, pendingRun);
         _selectedRunIndex = 0;
         RebuildHistoryBar();
 
         var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
-        bool finished = await RunSections(pendingRun, Sections.Select(s => s.Name).ToList(), config, cts,
+        bool finished = await RunSections(pendingRun, ProfileSections, config, cts,
             (done, total) => _lblStatus.Text = $"Running diagnostics... ({done}/{total})");
         if (!finished) return;
 
@@ -2705,18 +3127,18 @@ class MainForm : Form
     /// </summary>
     async void RunSection(string name)
     {
-        if (_running || ReadTarget() is not { } target) return;
+        if (_running || !SectionInProfile(name) || ReadTarget() is not { } target) return;
         var (domain, dc) = target;
-        var block = DiagLog.Block = new LogBlock($"{name} {Clock(DateTime.Now)}", $"{domain} · {DcText(dc)} · run on its own");
+        var block = DiagLog.Block = new LogBlock($"{name} {Clock(DateTime.Now)}", $"{TargetText(_profile, domain, dc)} · run on its own");
         var cts = StartRun($" {name}", domain, dc);
         _lblStatus.Text = $"Running {name}...";
 
-        var run = SelectedRun is { IsPending: false } shown && shown.Domain == domain && shown.Dc == dc ? shown : null;
+        var run = SelectedRun is { IsPending: false } shown && shown.Profile == _profile && shown.Domain == domain && shown.Dc == dc ? shown : null;
         bool newRun = run == null;
         if (run == null)
         {
-            run = new DiagRun(DateTime.Now, domain, dc, BuildSkeleton());
-            run.NotRun.UnionWith(Sections.Select(s => s.Name).Where(n => n != name));
+            run = new DiagRun(DateTime.Now, domain, dc, BuildSkeleton(_profile)) { Profile = _profile };
+            run.NotRun.UnionWith(ProfileSections.Where(n => n != name));
             _runHistory.Insert(0, run);
             if (_runHistory.Count > 5) _runHistory.RemoveAt(_runHistory.Count - 1);
             _selectedRunIndex = 0;
@@ -2745,7 +3167,7 @@ class MainForm : Form
     async Task<bool> RunSections(DiagRun run, List<string> names, DiagConfig config, CancellationTokenSource cts,
         Action<int, int>? progress = null)
     {
-        var skeleton = BuildSkeleton();
+        var skeleton = BuildSkeleton(run.Profile);
         foreach (string name in names)
         {
             int i = run.Results.FindIndex(g => g.Name == name);
@@ -2811,7 +3233,7 @@ class MainForm : Form
         var menu = new ContextMenuStrip { Renderer = new MenuRenderer(), ShowImageMargin = false, Font = new Font("Segoe UI", 9f), BackColor = SurfaceColor };
         menu.Items.Add("Run all sections", null, (s, e) => RunAll());
         menu.Items.Add(new ToolStripSeparator());
-        foreach (var (name, _, _) in Sections)
+        foreach (string name in ProfileSections)
             menu.Items.Add(name.Replace("&", "&&"), null, (s, e) => RunSection(name)); // a lone & would underline the next letter
         menu.Closed += (s, e) => BeginInvoke(menu.Dispose);
         menu.Show(_btnRun, new Point(0, _btnRun.Height));
@@ -2982,8 +3404,12 @@ class MainForm : Form
         sb.AppendLine("===================================================");
         sb.AppendLine();
         sb.AppendLine("Configuration:");
-        sb.AppendLine($"  Domain:  {run.Domain}");
-        sb.AppendLine($"  DC Host: {run.Dc}");
+        sb.AppendLine($"  Profile: {ProfileName(run.Profile)}");
+        if (run.Profile != JoinProfile.Entra)
+        {
+            sb.AppendLine($"  Domain:  {run.Domain}");
+            sb.AppendLine($"  DC Host: {run.Dc}");
+        }
         sb.AppendLine();
 
         foreach (var group in run.Results)
@@ -3031,7 +3457,7 @@ class MainForm : Form
 
         using var dlg = new SaveFileDialog
         {
-            FileName = $"ad-diag-{Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"ad-diag-{(run.Domain.Length > 0 ? Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_") : "entra")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Text files (*.txt)|*.txt",
             DefaultExt = ".txt"
         };
@@ -3052,7 +3478,7 @@ class MainForm : Form
 
     // ── Test skeleton ───────────────────────────────────────
 
-    static List<TestGroup> BuildSkeleton()
+    static List<TestGroup> BuildSkeleton(JoinProfile profile)
     {
         var groups = new List<TestGroup>
         {
@@ -3088,13 +3514,19 @@ class MainForm : Form
                 new("Zone Primary Server"), new("Update Path (Port 53)"), new("Registered Record"),
                 new("Registration Errors"),
             ]),
-            new(Diagnostics.EntraSsoGroup, [
-                new(Diagnostics.SsoJoin), new(Diagnostics.SsoDeviceAuth), new(Diagnostics.SsoPrt),
-                new(Diagnostics.SsoTicket), new(Diagnostics.SsoZone), new(Diagnostics.SsoLogon),
-                new(Diagnostics.SsoStatusBar), new(Diagnostics.SsoEndpoints),
+            new(Diagnostics.EntraSsoGroup, [new(Diagnostics.SsoJoin),
+                .. profile == JoinProfile.Domain ? Array.Empty<TestEntry>() : [new(Diagnostics.SsoDeviceAuth), new(Diagnostics.SsoPrt)],
+                .. profile == JoinProfile.Entra
+                    ? [new(Diagnostics.SsoCloudTgt), new(Diagnostics.SsoOnPremTgt)]
+                    : new TestEntry[] { new(Diagnostics.SsoTicket), new(Diagnostics.SsoZone), new(Diagnostics.SsoLogon), new(Diagnostics.SsoStatusBar) },
+                new(Diagnostics.SsoEndpoints),
+            ]),
+            new(Diagnostics.IntuneGroup, [
+                new(Diagnostics.MdmEnrollmentCheck), new(Diagnostics.MdmSyncCheck),
+                new(Diagnostics.MdmExtensionCheck), new(Diagnostics.MdmPoliciesCheck),
             ]),
         };
-        return groups;
+        return groups.Where(g => InProfile(g.Name, profile)).ToList();
     }
 
     // ── What the diagnostics (Diagnostics.cs) ask of this machine ──
@@ -3181,6 +3613,79 @@ class MainForm : Form
 
         public UrlSecurity UrlSecurity(string url, CancellationToken ct) =>
             Runner.RunWithTimeout(() => QueryUrlSecurity(url), UrlSecurityTimeoutMs, $"Internet settings for {url}", ct);
+
+        // Read only, from the 64-bit view, where the MDM client keeps its keys
+        static RegistryKey? OpenHklm(string path)
+        {
+            using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            return hklm.OpenSubKey(path, writable: false);
+        }
+
+        public string[]? RegistrySubKeys(string hklmPath)
+        {
+            using var key = OpenHklm(hklmPath);
+            return key?.GetSubKeyNames();
+        }
+
+        public Dictionary<string, object>? RegistryValues(string hklmPath)
+        {
+            using var key = OpenHklm(hklmPath);
+            if (key == null) return null;
+            var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in key.GetValueNames())
+                if (key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is { } value)
+                    values[name] = value;
+            return values;
+        }
+
+        public int? ServiceState(string name) => QueryServiceState(name);
+
+        public string? CurrentUserSid()
+        {
+            using var id = WindowsIdentity.GetCurrent();
+            return id.User?.Value;
+        }
+    }
+
+    const uint ScManagerConnect = 0x0001, ServiceQueryStatus = 0x0004;
+    const int ErrorServiceDoesNotExist = 1060;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ServiceStatus
+    {
+        public uint ServiceType, CurrentState, ControlsAccepted, Win32ExitCode, ServiceSpecificExitCode, CheckPoint, WaitHint;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr OpenSCManagerW(string? machine, string? database, uint access);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr OpenServiceW(IntPtr manager, string name, uint access);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CloseServiceHandle(IntPtr handle);
+
+    /// <summary>A service's state from the service manager (query rights only, which any user has); null if it isn't installed.</summary>
+    static int? QueryServiceState(string name)
+    {
+        IntPtr manager = OpenSCManagerW(null, null, ScManagerConnect);
+        if (manager == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            IntPtr service = OpenServiceW(manager, name, ServiceQueryStatus);
+            if (service == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                return error == ErrorServiceDoesNotExist ? null : throw new System.ComponentModel.Win32Exception(error);
+            }
+            try
+            {
+                if (!QueryServiceStatus(service, out var status)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                return (int)status.CurrentState;
+            }
+            finally { CloseServiceHandle(service); }
+        }
+        finally { CloseServiceHandle(manager); }
     }
 
     const int UrlSecurityTimeoutMs = 5000;
@@ -3558,4 +4063,6 @@ record DiagRun(DateTime Timestamp, string Domain, string Dc, List<TestGroup> Res
     public HashSet<string> NotRun { get; init; } = [];
     /// <summary>When a section last ran on its own, after the run it belongs to, by name.</summary>
     public Dictionary<string, DateTime> RanAt { get; init; } = [];
+    /// <summary>The profile the run was made for, which decided its sections.</summary>
+    public JoinProfile Profile { get; init; }
 }

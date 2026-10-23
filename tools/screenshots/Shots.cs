@@ -93,6 +93,7 @@ static class Shots
         FrontFill(Get<Panel>(form, "_ticketsPanel"));
         var tb = Get<RichTextBox>(form, "_ticketsBox");
         tb.Clear();
+        Call(form, "RenderPrtCard", Diagnostics.PrtCardFor(Parsers.ParseDsreg(MockDsreg()), DateTime.UtcNow)!);
         var (headers, tickets) = Parsers.ParseKlist(MockKlist());
         foreach (var h in headers)
         {
@@ -132,9 +133,38 @@ static class Shots
         Pump(500);
         Capture(form, outDir, "log.png");
 
+        // An Entra joined laptop: its profile hides the domain fields and sections, and the Intune policies tab
+        Call(form, "SetProfile", JoinProfile.Entra, false);
+        var entraHistory = Get<List<DiagRun>>(form, "_runHistory");
+        var entraRun = new DiagRun(DateTime.Now, "", "", MockEntraResults(DateTime.Now)) { Profile = JoinProfile.Entra };
+        entraRun.Open[Diagnostics.EntraSsoGroup] = true;
+        entraRun.Open[Diagnostics.IntuneGroup] = true;
+        entraHistory.Insert(0, entraRun);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "SwitchTab", "results");
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Capture(form, outDir, "results-entra.png");
+
+        Call(form, "SwitchTab", "intune");
+        FrontFill(Get<Panel>(form, "_intunePanel"));
+        var intune = Get<RichTextBox>(form, "_intuneBox");
+        intune.Clear();
+        Call(form, "AppendIntuneLine", "\n", Theme("TextColor"), false, false);
+        Call(form, "RenderIntune", MockIntune(DateTime.UtcNow));
+        Get<Control>(form, "_btnIntuneSync").Enabled = true;
+        intune.SelectionStart = 0; intune.ScrollToCaret();
+        Pump(500);
+        Capture(form, outDir, "intune-policies.png");
+
+        // Back to the hybrid PC for the rest
+        Call(form, "SetProfile", JoinProfile.Hybrid, false);
+        entraHistory.Remove(entraRun);
+
         // Last, since the menu stays open: a run started from one section, and the Run button's drop-down
         var history = Get<List<DiagRun>>(form, "_runHistory");
-        var single = new DiagRun(DateTime.Now, "contoso.com", "DC01.contoso.com", MockResults(DateTime.Now, clockWarn: true));
+        var single = new DiagRun(DateTime.Now, "contoso.com", "DC01.contoso.com", MockResults(DateTime.Now, clockWarn: true)) { Profile = JoinProfile.Hybrid };
         single.NotRun.UnionWith(single.Results.Select(g => g.Name).Where(n => n != "Kerberos & Time Sync"));
         history.Insert(0, single);
         Set(form, "_selectedRunIndex", 0);
@@ -233,14 +263,16 @@ static class Shots
 
     static void Populate(MainForm form)
     {
+        Set(form, "_profilePicked", true);
+        Call(form, "SetProfile", JoinProfile.Hybrid, true);
         Get<TextBox>(form, "_txtDomain").Text = "contoso.com";
         Get<TextBox>(form, "_txtDc").Text = "DC01";
 
         var history = Get<List<DiagRun>>(form, "_runHistory");
         var now = DateTime.Now;
-        history.Insert(0, new DiagRun(now.AddMinutes(-42), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
-        history.Insert(0, new DiagRun(now.AddMinutes(-17), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
-        var latest = new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false));
+        history.Insert(0, new DiagRun(now.AddMinutes(-42), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)) { Profile = JoinProfile.Hybrid });
+        history.Insert(0, new DiagRun(now.AddMinutes(-17), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)) { Profile = JoinProfile.Hybrid });
+        var latest = new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false)) { Profile = JoinProfile.Hybrid };
         latest.RanAt[Diagnostics.EntraSsoGroup] = now.AddSeconds(-4); // run again on its own
         history.Insert(0, latest);
         Set(form, "_selectedRunIndex", 0);
@@ -329,7 +361,67 @@ static class Shots
                 new("Status Bar Scripts", Status.Skip, "Depends on the Intranet Zone check"),
                 new("Entra Endpoints", Status.Pass, "login.microsoftonline.com and autologon.microsoftazuread-sso.com reachable on port 443"),
             ], new Readiness(Status.Fail, "Not ready for Seamless SSO.", true)),
+            new(Diagnostics.IntuneGroup,
+            [
+                new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),
+                new("Last Sync", Status.Pass, $"Last successful sync {now.AddMinutes(-28):g} (28m ago)"),
+                new("Management Extension", Status.Pass, "Intune Management Extension service running"),
+                new("Device Policies", Status.Pass, "38 settings from Microsoft Intune in 9 areas (BitLocker, Defender, DeviceLock, ...)"),
+            ]),
         ];
+    }
+
+    // An Entra joined laptop: only the sections that apply to it
+    static List<TestGroup> MockEntraResults(DateTime now) =>
+    [
+        new("Dynamic DNS Registration",
+        [
+            new("Registration Name", Status.Pass, "LT-0417"),
+            new("ZTNA / VPN Client", Status.Info, "Zscaler Client Connector adapter detected (Zscaler Network Adapter 1.0.2.0)"),
+            new("Registering Adapters", Status.Pass, "Wi-Fi: 192.168.1.44"),
+            new("Zone Primary Server", Status.Pass, "home.arpa -> router.home.arpa (192.168.1.1), answered by 192.168.1.1 (DNS server of Wi-Fi)"),
+            new("Update Path (Port 53)", Status.Pass, "router.home.arpa (192.168.1.1) reachable over TCP"),
+            new("Registered Record", Status.Warn, "router.home.arpa has no A or AAAA record for LT-0417.home.arpa"),
+            new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
+        ]),
+        new(Diagnostics.EntraSsoGroup,
+        [
+            new("Join Type", Status.Pass, "Microsoft Entra joined (AzureAdJoined: YES, DomainJoined: NO), tenant Contoso"),
+            new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
+            new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, renewed {now.AddHours(-3):g} (3h 0m ago)"),
+            new("Cloud Kerberos", Status.Pass, "CloudTgt: YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources"),
+            new("On-premises Kerberos", Status.Pass, "OnPremTgt: YES, a ticket for AD resources through cloud Kerberos trust"),
+            new("Entra Endpoints", Status.Pass, "login.microsoftonline.com reachable on port 443"),
+        ], new Readiness(Status.Pass, "Ready for single sign-on.", false)),
+        new(Diagnostics.IntuneGroup,
+        [
+            new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),
+            new("Last Sync", Status.Pass, $"Last successful sync {now.AddMinutes(-28):g} (28m ago)"),
+            new("Management Extension", Status.Info, "Not installed; Intune adds it with the first Win32 app, script or remediation"),
+            new("Device Policies", Status.Pass, "6 settings from Microsoft Intune in 3 areas (BitLocker, Defender, Update); 1 set by another provider instead"),
+        ]),
+    ];
+
+    // What the Intune policies tab shows for the same laptop
+    static IntuneState MockIntune(DateTime nowUtc)
+    {
+        var enrollment = new MdmEnrollment("5A1B2C3D-0000-4000-8000-000000000042", "MS DM Server", 1, "jdoe@contoso.com");
+        List<MdmSetting> device =
+        [
+            new("BitLocker", "RequireDeviceEncryption", "1", true, null),
+            new("BitLocker", "EncryptionMethodByDriveType", "<enabled/><data id=\"EncryptionMethodWithXtsOsDropDown_Name\" value=\"7\"/>", true, null),
+            new("Defender", "AllowRealtimeMonitoring", "1", true, null),
+            new("Defender", "AllowCloudProtection", "1", true, null),
+            new("Defender", "CloudBlockLevel", "2", false, "{0F2A9B11-0000-4000-8000-0000000000AA}"),
+            new("Update", "ActiveHoursStart", "8", true, null),
+            new("Update", "DeferQualityUpdatesPeriodInDays", "3", true, null),
+        ];
+        List<MdmSetting> user =
+        [
+            new("Edge", "HomepageLocation", "https://intranet.contoso.com", true, null),
+            new("OneDrive", "KFMSilentOptIn", "72f988bf-0000-4000-8000-000000000001", true, null),
+        ];
+        return new(enrollment, nowUtc.AddMinutes(-28), null, null, null, null, device, user, null);
     }
 
     static string MockRsop()
@@ -356,6 +448,23 @@ static class Shots
             G("User", "{8A4B2D33-0003-4C8F-8D2E-3A7C9F5B2003}", 3, "1|1|0|1", "Desktop Wallpaper"),
             G("User", "{8A4B2D33-0004-4C8F-8D2E-3A7C9F5B2004}", 0, "0|1|0|1", "Legacy Printer Deployment"),
         ]);
+    }
+
+    // A hybrid joined PC whose Primary Refresh Token was renewed an hour ago
+    static string MockDsreg()
+    {
+        string Utc(TimeSpan offset) => (DateTime.UtcNow + offset).ToString("yyyy-MM-dd HH:mm:ss.000 'UTC'", CultureInfo.InvariantCulture);
+        return $"""
+                     AzureAdJoined : YES
+                      DomainJoined : YES
+                        TenantName : Contoso
+                        AzureAdPrt : YES
+              AzureAdPrtUpdateTime : {Utc(TimeSpan.FromHours(-1))}
+              AzureAdPrtExpiryTime : {Utc(TimeSpan.FromDays(14) - TimeSpan.FromHours(1))}
+               AzureAdPrtAuthority : https://login.microsoftonline.com/72f988bf-0000-4000-8000-000000000001
+                         OnPremTgt : NO
+                          CloudTgt : NO
+            """;
     }
 
     static string MockKlist()

@@ -23,6 +23,7 @@
     <Compile Include="../../Diagnostics.cs" />
     <Compile Include="../../DnsRegistration.cs" />
     <Compile Include="../../EntraSso.cs" />
+    <Compile Include="../../Intune.cs" />
     <Compile Include="../../Log.cs" />
   </ItemGroup>
 </Project>
