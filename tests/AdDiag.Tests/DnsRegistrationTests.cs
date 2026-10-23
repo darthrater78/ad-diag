@@ -583,6 +583,52 @@ public class DnsRegistrationTests
         Assert.EndsWith("refused the update request.", result.Events[0].Message);
     }
 
+    [Fact]
+    public void DnsClientEvent_OneFieldPerLine_AdapterNamed()
+    {
+        var probe = Healthy();
+        probe.NetAdapters[0] = probe.NetAdapters[0] with { Name = "IOT", Id = "{a0412fa8-7a7f-4fe1-98f3-b0fc91480be0}" };
+        probe.DnsEvents = () => Samples.DnsClientEventsWithData;
+        string detail = DetailOf(Run(probe), "Registration Errors");
+        string[] lines = detail.Split('\n');
+        Assert.StartsWith("1 in the last 24 hours; latest: event 8017 at ", lines[0]);
+        Assert.Equal([
+            "The system failed to register host (A or AAAA) resource records for network adapter with settings:",
+            "Adapter: IOT ({A0412FA8-7A7F-4FE1-98F3-B0FC91480BE0})",
+            "Host name: PROX-ONPREM",
+            "DNS suffix: scrivtech.com",
+            "DNS servers: 172.31.254.252",
+            "Sent update to: 173.245.59.63:53",
+            "Addresses: 172.31.254.20",
+            "Error code: 9004 (the server does not take dynamic updates)",
+            "Either the DNS server does not support the DNS dynamic update protocol or the authoritative zone for the specified DNS domain name does not accept dynamic updates.",
+        ], lines[1..]);
+    }
+
+    [Fact]
+    public void DnsClientEvent_WithoutDataOrInAnotherOrder_KeepsTheMessage()
+    {
+        var probe = Healthy();
+        probe.DnsEvents = () => Samples.DnsClientEventsRefused; // no DATA lines
+        Assert.EndsWith("refused the update request.", DetailOf(Run(probe), "Registration Errors"));
+        Assert.DoesNotContain("\n", DetailOf(Run(probe), "Registration Errors"));
+
+        // Values not in the (translated) message: the message as it is
+        probe.DnsEvents = () => "EVENTS|1\nEVT|8017|2026-10-23T18:56:00Z|Le système n'a pas pu inscrire\nDATA|AdapterName|{X1}\nDATA|HostName|PC9";
+        Assert.EndsWith("— Le système n'a pas pu inscrire", DetailOf(Run(probe), "Registration Errors"));
+    }
+
+    [Fact]
+    public void DnsClientEvent_TranslatedMessage_SplitsOnTheValues()
+    {
+        // French puts a space before each colon; the split still lands on the values
+        var probe = Healthy();
+        probe.DnsEvents = () => "EVENTS|1\nEVT|8017|2026-10-23T18:56:00Z|Échec de l'inscription avec les paramètres : Nom de la carte : {X1} Nom d'hôte : PC9 Le serveur a refusé.\n"
+            + "DATA|AdapterName|{X1}\nDATA|HostName|PC9";
+        string[] lines = DetailOf(Run(probe), "Registration Errors").Split('\n');
+        Assert.Equal(["Échec de l'inscription avec les paramètres :", "Adapter: {X1}", "Host name: PC9", "Le serveur a refusé."], lines[1..]);
+    }
+
     [Theory]
     [InlineData("EVENTS|0\r\n", null)]
     [InlineData("ERROR|The RPC server is unavailable", "The RPC server is unavailable")]

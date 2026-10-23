@@ -14,9 +14,10 @@ namespace AdDiag;
 /// <param name="Virtual">A software adapter with no hardware behind it, which is what a ZTNA or VPN client installs.</param>
 /// <param name="PointToPoint">Holds an IPv4 /32 address and has no default gateway, the usual shape of a client's adapter.</param>
 /// <param name="DnsSuffix">The connection-specific DNS suffix, set by hand or by DHCP.</param>
+/// <param name="Id">The adapter's GUID, "{…}", which DNS Client events name it by.</param>
 /// <param name="RegistersSuffix">"Use this connection's DNS suffix in DNS registration" is on, so Windows also registers host.DnsSuffix.</param>
 record NetAdapter(string Name, string Description, bool Tunnel, bool RegistersInDns, IPAddress[] Addresses, IPAddress[] DnsServers,
-    bool Virtual = false, bool PointToPoint = false, string DnsSuffix = "", bool RegistersSuffix = false);
+    bool Virtual = false, bool PointToPoint = false, string DnsSuffix = "", bool RegistersSuffix = false, string Id = "");
 record SoaRecord(string Zone, string PrimaryServer);
 
 // Dynamic DNS registration: whether this machine's own host record can reach, and is right on, the DNS server
@@ -278,6 +279,10 @@ static partial class Diagnostics
             "EVENTS|$($events.Count)"
             foreach ($e in $events) {
                 "EVT|$($e.Id)|" + $e.TimeCreated.ToUniversalTime().ToString('o') + '|' + ("$($e.Message)" -replace '\s+', ' ')
+                # The named fields, whose names (unlike the message) are not translated
+                foreach ($d in @(([xml]$e.ToXml()).Event.EventData.Data)) {
+                    if ($d -is [System.Xml.XmlElement]) { "DATA|$($d.GetAttribute('Name'))|" + ("$($d.InnerText)" -replace '\s+', ' ') }
+                }
             }
         } catch {
             "ERROR|" + ($_.Exception.Message -replace '\s+', ' ')
@@ -291,8 +296,83 @@ static partial class Diagnostics
     static string Shorten(string text, int max) => text.Length <= max ? text : text[..max].TrimEnd() + "…";
 
     // Not cut short: Windows puts the reason (refused, timed out, not authoritative...) at the end of a long message
-    static string DescribeEvent(DnsClientEvent e) =>
-        $"event {e.Id} at {e.TimeUtc.ToLocalTime():g}" + (e.Message.Length > 0 ? $" — {Shorten(e.Message, 1500)}" : "");
+    static string DescribeEvent(DnsClientEvent e, List<NetAdapter>? adapters = null)
+    {
+        string head = $"event {e.Id} at {e.TimeUtc.ToLocalTime():g}";
+        if (EventLayout(e, adapters) is { } laid) return $"{head}\n{laid}";
+        return head + (e.Message.Length > 0 ? $" — {Shorten(e.Message, 1500)}" : "");
+    }
+
+    /// <summary>
+    /// The event as lines: the message's opening, one line per data field, then the message's reason. The message is
+    /// translated, so it is split where the fields' values appear in it, which are the same in every language. Null
+    /// (use the message as it is) when the event has no named fields or their values are not found in order.
+    /// </summary>
+    static string? EventLayout(DnsClientEvent e, List<NetAdapter>? adapters)
+    {
+        var fields = (e.Data ?? []).Where(d => d.Value.Length > 0).ToList();
+        if (fields.Count == 0 || fields.Any(d => d.Name.Length == 0)) return null;
+
+        // Each value's place in the message, in order; a value missing from it (often the error code) is skipped
+        int first = -1, end = 0;
+        foreach (var (_, value) in fields)
+        {
+            if (value.Length < 2) continue;
+            int at = e.Message.IndexOf(value, end, StringComparison.Ordinal);
+            if (at < 0) continue;
+            if (first < 0) first = at;
+            end = at + value.Length;
+        }
+        if (first < 0) return null;
+
+        // The opening ends at the colon before the first field's label ("...with settings: Adapter Name : {GUID}")
+        string lead = e.Message[..first];
+        int labelColon = lead.LastIndexOf(':');
+        int openingColon = labelColon > 0 ? lead.LastIndexOf(':', labelColon - 1) : -1;
+        string opening = openingColon > 0 ? lead[..(openingColon + 1)].Trim() : "";
+        string reason = e.Message[end..].Trim();
+
+        var lines = new List<string>();
+        if (opening.Length > 0) lines.Add(opening);
+        lines.AddRange(fields.Select(d => $"{FieldLabel(d.Name)}: {FieldValue(d.Name, d.Value, adapters)}"));
+        if (reason.Length > 0) lines.Add(Shorten(reason, 1000));
+        return string.Join("\n", lines);
+    }
+
+    // English labels for the DNS Client's field names (AdapterName, HostName, DnsServerList, ...); others are spaced out
+    static string FieldLabel(string name)
+    {
+        string n = name.ToLowerInvariant();
+        if (n.Contains("adapter") && !n.Contains("suffix") && !n.Contains("domain")) return "Adapter";
+        if (n.Contains("host")) return "Host name";
+        if (n.Contains("suffix") || n.Contains("domain")) return "DNS suffix";
+        if (n.Contains("sent") || n.Contains("update")) return "Sent update to";
+        if (n.Contains("server")) return "DNS servers";
+        if (n.Contains("ip") || n.Contains("address")) return "Addresses";
+        if (n.Contains("error") || n.Contains("status")) return "Error code";
+        return Regex.Replace(name, "(?<=[a-z])(?=[A-Z])", " ");
+    }
+
+    // The adapter's GUID with its name in front, and an error code with what it means
+    static string FieldValue(string name, string value, List<NetAdapter>? adapters)
+    {
+        string label = FieldLabel(name);
+        if (label == "Adapter" && adapters?.FirstOrDefault(a => a.Id.Length > 0 && a.Id.Equals(value, StringComparison.OrdinalIgnoreCase)) is { } a)
+            return $"{a.Name} ({value})";
+        if (label == "Error code" && int.TryParse(value, out int code) && DnsErrors.TryGetValue(code, out string? meaning))
+            return $"{value} ({meaning})";
+        return value;
+    }
+
+    // The DNS_ERROR_RCODE_* codes an update comes back with, and the timeout
+    static readonly Dictionary<int, string> DnsErrors = new()
+    {
+        [1460] = "timed out", [9001] = "the server could not read the update", [9002] = "server failure",
+        [9003] = "name does not exist", [9004] = "the server does not take dynamic updates", [9005] = "refused",
+        [9006] = "a name that should not exist does", [9007] = "a record that should not exist does",
+        [9008] = "a record that should exist does not", [9009] = "the server is not authoritative for the zone",
+        [9010] = "the name is not in the zone", [9017] = "bad signature", [9018] = "bad key", [9019] = "bad time stamp",
+    };
 
     public static TestGroup TestDnsRegistration(DiagConfig cfg, IProbe probe)
     {
@@ -312,7 +392,7 @@ static partial class Diagnostics
             foreach (string name in new[] { RegZone, RegPath, RegRecord })
                 tests.Add(new(name, Status.Skip, "No registration name"));
         }
-        var errors = CheckErrors(probe, cfg.Cancel);
+        var errors = CheckErrors(probe, adapters, cfg.Cancel);
         tests.Add(fqdn == null && errors.Status == Status.Pass
             ? errors with { Detail = errors.Detail + " (with no name, Windows attempts no registration)" } : errors);
         return new("Dynamic DNS Registration", tests);
@@ -469,7 +549,7 @@ static partial class Diagnostics
         }
     }
 
-    static TestEntry CheckErrors(IProbe probe, CancellationToken ct)
+    static TestEntry CheckErrors(IProbe probe, List<NetAdapter> adapters, CancellationToken ct)
     {
         try
         {
@@ -478,7 +558,7 @@ static partial class Diagnostics
                 return new(RegErrors, Status.Skip, $"Not checked: could not read the System event log: {events.Error}");
             if (events.Events.Count == 0)
                 return new(RegErrors, Status.Pass, "No DNS Client registration errors in the last 24 hours");
-            return new(RegErrors, Status.Warn, $"{events.Events.Count} in the last 24 hours; latest: {DescribeEvent(events.Events[0])}");
+            return new(RegErrors, Status.Warn, $"{events.Events.Count} in the last 24 hours; latest: {DescribeEvent(events.Events[0], adapters)}");
         }
         catch (Exception ex)
         {
@@ -568,7 +648,7 @@ static partial class Diagnostics
 
         report(new(RegWait, Status.Skip, $"Watching the server and the DNS Client event log for up to {attempts * pollMs / 1000}s"));
         var (after, events) = WatchRegistration(probe, startedUtc, () => ReadRecord(probe, reg, target, ct), before, attempts, pollMs, ct);
-        Status verdict = ReportOutcome(before, after, events, report);
+        Status verdict = ReportOutcome(before, after, events, reg.Adapters, report);
 
         if (verdict != Status.Pass && reg.Ztna != null)
             report(new(RegZtna, Status.Info, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and "
@@ -653,10 +733,10 @@ static partial class Diagnostics
 
     // Reports the failure events and the record as it ended up; returns the verdict they add up to
     static Status ReportOutcome((Status Status, string Detail) before, (Status Status, string Detail) after, DnsClientEvents events,
-        Action<TestEntry> report)
+        List<NetAdapter> adapters, Action<TestEntry> report)
     {
         foreach (var e in events.Events.AsEnumerable().Reverse())
-            report(new("DNS Client Event", Status.Fail, DescribeEvent(e)));
+            report(new("DNS Client Event", Status.Fail, DescribeEvent(e, adapters)));
         if (events.Error != null)
             report(new("DNS Client Event", Status.Skip, $"Not checked: could not read the System event log: {events.Error}"));
 

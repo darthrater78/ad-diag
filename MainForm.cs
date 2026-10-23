@@ -1174,7 +1174,7 @@ class MainForm : Form
                 "  Fix: Allow TCP and UDP 53 to the primary server through the firewall or the ZTNA access policy\n\n" +
                 "• Registered Record — the A/AAAA records the primary server holds for this machine, compared with the addresses it has now\n" +
                 "  Fix: A stale or missing record means registration isn't arriving. Use Register now on the DNS registration tab (as Administrator) and read the trace. 'Refused' usually means the record is owned by another account or the zone doesn't allow updates\n\n" +
-                "• Registration Errors — DNS Client warnings (event IDs in the 8000s) in the System log in the last 24 hours; Windows logs one for each failed registration and nothing on success\n" +
+                "• Registration Errors — DNS Client warnings (event IDs in the 8000s) in the System log in the last 24 hours; Windows logs one for each failed registration and nothing on success. The latest is shown one setting per line (adapter, host name, suffix, DNS servers, the server the update went to, addresses, error code), followed by Windows' reason\n" +
                 "  Fix: The event text gives the server that was sent the update and the reason (refused, timed out, not authoritative)"),
 
             ("Trust Relationships",
@@ -3910,7 +3910,7 @@ class MainForm : Form
                     IsSoftwareAdapter(n.Id),
                     ip.UnicastAddresses.Any(u => u.Address.AddressFamily == AddressFamily.InterNetwork && u.PrefixLength == 32)
                         && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)),
-                    ip.DnsSuffix ?? "", RegistersAdapterSuffix(n.Id));
+                    ip.DnsSuffix ?? "", RegistersAdapterSuffix(n.Id), n.Id);
             }).ToList());
 
         // "Use this connection's DNS suffix in DNS registration": Group Policy's setting if there is one, else the adapter's

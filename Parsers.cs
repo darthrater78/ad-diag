@@ -159,7 +159,8 @@ static class Parsers
 
     /// <summary>
     /// Parses the DNS Client event query's output: "EVENTS|&lt;count&gt;" followed by one
-    /// "EVT|&lt;id&gt;|&lt;ISO 8601 UTC&gt;|&lt;message&gt;" per event, or "ERROR|&lt;message&gt;". Output with neither
+    /// "EVT|&lt;id&gt;|&lt;ISO 8601 UTC&gt;|&lt;message&gt;" per event, each followed by its "DATA|&lt;name&gt;|&lt;value&gt;" fields,
+    /// or "ERROR|&lt;message&gt;". Output with neither
     /// (e.g. PowerShell failing to start the script) is also an error.
     /// </summary>
     public static DnsClientEvents ParseDnsClientEvents(string output)
@@ -175,7 +176,9 @@ static class Parsers
                 counted = true;
             else if (parts.Length >= 4 && parts[0] == "EVT" && int.TryParse(parts[1], out int id)
                 && DateTime.TryParse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var time))
-                events.Add(new(id, time.ToUniversalTime(), string.Join("|", parts[3..]).Trim()));
+                events.Add(new(id, time.ToUniversalTime(), string.Join("|", parts[3..]).Trim(), []));
+            else if (parts.Length >= 3 && parts[0] == "DATA" && events.Count > 0)
+                events[^1].Data!.Add((parts[1].Trim(), string.Join("|", parts[2..]).Trim()));
         }
         if (counted) return new(events, null);
         string first = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
@@ -399,5 +402,7 @@ record GpScope(string Name, GpScopeState State, string Detail, DateTime? LastApp
     List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);
 record KlistOutput(List<string> Headers, List<KlistTicket> Tickets);
-record DnsClientEvent(int Id, DateTime TimeUtc, string Message);
+/// <param name="Data">The event's named data fields (EventData), in order. Their names come from the event's manifest, so
+/// unlike the message they are the same in every language.</param>
+record DnsClientEvent(int Id, DateTime TimeUtc, string Message, List<(string Name, string Value)>? Data = null);
 record DnsClientEvents(List<DnsClientEvent> Events, string? Error);

@@ -267,4 +267,17 @@ static class Samples
         EVT|8015|2026-10-05T12:02:14.0000000Z|The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings: Adapter Name : {3F2A} Host Name : PC042 Primary Domain Suffix : contoso.com DNS server list : 10.20.0.11 Sent update to server : 10.20.0.11 IP Address(es) : 10.20.4.18 The reason the system could not register these RRs was because the DNS server contacted refused the update request.
         EVT|8018|2026-10-05T12:02:13.0000000Z|The system failed to register pointer (PTR) resource records (RRs) for network adapter with settings: Adapter Name : {3F2A}
         """;
+
+    // The user's PROX-ONPREM event, with its named data fields (the field names are assumed from the DNS Client manifest)
+    public const string DnsClientEventsWithData = """
+        EVENTS|1
+        EVT|8017|2026-10-23T18:56:00.0000000Z|The system failed to register host (A or AAAA) resource records for network adapter with settings: Adapter Name : {A0412FA8-7A7F-4FE1-98F3-B0FC91480BE0} Host Name : PROX-ONPREM Primary Domain Suffix : scrivtech.com DNS server list : 172.31.254.252 Sent update to server : 173.245.59.63:53 IP Address(es) : 172.31.254.20 Either the DNS server does not support the DNS dynamic update protocol or the authoritative zone for the specified DNS domain name does not accept dynamic updates.
+        DATA|AdapterName|{A0412FA8-7A7F-4FE1-98F3-B0FC91480BE0}
+        DATA|HostName|PROX-ONPREM
+        DATA|AdapterSuffixName|scrivtech.com
+        DATA|DnsServerList|172.31.254.252
+        DATA|Sentupdatetoserver|173.245.59.63:53
+        DATA|Ipaddress|172.31.254.20
+        DATA|ErrorCode|9004
+        """;
 }
