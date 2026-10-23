@@ -167,6 +167,10 @@ Windows 11's own system values, so the app matches the OS around it.
 - A tab's own actions (Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) sit in a 34px bar at the top of the tab, under the run strip, never at the bottom of the window.
 - Groups collapse to their heading. After a run every group is closed, unless "Expand all groups after a run" is ticked; a group the user opens or closes stays that way for that run, and a group run on its own opens (or stays open) to show its new results. The verdict pill and counts stay on a closed heading, so its state still reads.
 
+## Icon
+
+A primary blue folder (the share) with "AD" in white, drawn as shapes, and a magnifier badge at the lower right whose white lens holds a pass-green check: AD, file shares, diagnosed. The badge has a white outline so it holds on a dark title bar. 32 px and up use `docs/logo/ad-diag.svg`; 16 and 24 px use `docs/logo/ad-diag-small.svg`, the folder and a larger check badge without the letters, which can't be read that small. `app.ico` holds PNGs rendered from them at 16, 24, 32, 48 and 256 px.
+
 ## Window
 
 The window's 1px outer border is primary (#005fb8, dark #4cc2ff), set through DWM on Windows 11 and following the theme switch; earlier Windows keeps its own.

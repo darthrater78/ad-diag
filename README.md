@@ -1,4 +1,4 @@
-# AD Diagnostics
+# <img src="docs/logo/ad-diag.svg" width="40" alt=""> AD Diagnostics
 
 Standalone Windows diagnostic tool that checks the health of a domain-joined machine's relationship with Active Directory, and tests the path from the PC to a file share over SMB. Single-exe, no install required.
 
@@ -440,6 +440,10 @@ Newest first. Each version's section is its GitHub release notes: the release wo
 #### New
 - **SMB connection test**: a **Test** switch at the top picks Active Directory or SMB. Type a file server, and a share if you like, and the test follows the path to it (name, port 445, Kerberos, sign-in, share), lights each step as it passes, and says where it stopped and how to fix it. Each profile gets its own checks; brought over from smb-diag, with fixes to its SMBv1, guest logon, signing and Kerberos-or-NTLM checks.
 - Every SMB test is in the Log, step by step, with Debug detail.
+
+#### Look
+- A new icon: a blue folder with AD on it and a magnifier holding a check, with a simpler folder and check at 16 and 24 px.
+- The window's border is the app's blue.
 
 #### Results
 - Result details are set in Segoe UI, like the rest of the window, instead of a monospace font.
