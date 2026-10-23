@@ -97,16 +97,25 @@ static partial class Diagnostics
     {
         if (s.PolicyError is { } error)
             return new(MdmPoliciesCheck, Status.Skip, $"Not checked: {error}") { NeedsAdmin = true };
+        string apps = AppsSummary(s);
+        var failed = s.Apps.Where(a => MsiStatus(a.Status).Look == Status.Fail).ToList();
+        string failures = failed.Count == 0 ? ""
+            : $"; failed: {string.Join(", ", failed.Select(a => $"{a.Name ?? a.ProductCode} ({MsiStatus(a.Status).Text.ToLowerInvariant()})"))}";
         var won = s.Device.Where(p => p.ProviderWins).ToList();
         if (s.Device.Count == 0)
-            return new(MdmPoliciesCheck, Status.Info, "No device settings from Intune yet");
+            return new(MdmPoliciesCheck, failed.Count > 0 ? Status.Warn : Status.Info, $"No device settings from Intune yet{apps}{failures}");
 
         var areas = won.Select(p => p.Area).Distinct().ToList();
         string list = areas.Count == 0 ? "" : $" ({string.Join(", ", areas.Take(3))}{(areas.Count > 3 ? ", ..." : "")})";
         int lost = s.Device.Count - won.Count;
         string overridden = lost > 0 ? $"; {lost} set by another provider instead" : "";
-        return new(MdmPoliciesCheck, Status.Pass, $"{won.Count} setting{(won.Count == 1 ? "" : "s")} from {s.Enrollment.ProviderName} in {areas.Count} area{(areas.Count == 1 ? "" : "s")}{list}{overridden}");
+        return new(MdmPoliciesCheck, failed.Count > 0 ? Status.Warn : Status.Pass,
+            $"{won.Count} setting{(won.Count == 1 ? "" : "s")} from {s.Enrollment.ProviderName} in {areas.Count} area{(areas.Count == 1 ? "" : "s")}{list}{overridden}{apps}{failures}");
     }
+
+    // The MSI apps, as Settings counts them beside the policy areas; empty when there are none or they weren't read
+    static string AppsSummary(IntuneState s) =>
+        s.AppsError != null ? "; apps not read" : s.Apps.Count == 0 ? "" : $"; {s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")}";
 
     /// <summary>
     /// The MDM enrollment Windows keeps under HKLM\SOFTWARE\Microsoft\Enrollments, preferring a completed Intune one;

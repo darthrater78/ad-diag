@@ -187,7 +187,7 @@ public class DnsRegistrationTests
         probe.NetAdapters.Add(new("Acme Access", "Acme Access Virtual Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [], Virtual: true));
         var group = Run(probe);
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
-        Assert.Contains("the client's own address (172.16.50.3) is not registered", DetailOf(group, "Registering Adapters"));
+        Assert.Contains("Not registered: Acme Access (172.16.50.3), the client's own adapter", DetailOf(group, "Registering Adapters"));
     }
 
     [Fact]

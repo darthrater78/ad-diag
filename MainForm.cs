@@ -109,6 +109,9 @@ class MainForm : Form
     // Intune policies tab
     Panel _intunePanel = null!;
     RichTextBox _intuneBox = null!;
+    readonly List<(int Start, int End, string Key)> _intuneHeadings = []; // where each folding section's title sits
+    readonly HashSet<string> _intuneOpen = [];          // the sections the reader opened; all start folded
+    IntuneState? _intuneState;                          // what the tab shows, redrawn when a section folds
     ThemedButton _btnIntuneSync = null!;
     Label _lblIntuneNote = null!;
     bool _intuneRunning, _intuneLoaded;
@@ -524,6 +527,20 @@ class MainForm : Form
             Font = new Font("Segoe UI", 9.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
             DetectUrls = false, // policy values are text to read, not links
+        };
+        _intuneBox.MouseClick += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Left && IntuneHeadingAt(_intuneBox.GetCharIndexFromPosition(e.Location)) is { } key) ToggleIntuneSection(key);
+        };
+        _intuneBox.MouseMove += (s, e) =>
+            _intuneBox.Cursor = IntuneHeadingAt(_intuneBox.GetCharIndexFromPosition(e.Location)) != null ? Cursors.Hand : Cursors.IBeam;
+        _intuneBox.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode is Keys.Enter or Keys.Space && IntuneHeadingAt(_intuneBox.SelectionStart) is { } key)
+            {
+                ToggleIntuneSection(key);
+                e.Handled = e.SuppressKeyPress = true;
+            }
         };
         var btnIntuneRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(10, 3) };
         btnIntuneRefresh.Click += (s, e) => RefreshIntuneTab();
@@ -1227,7 +1244,7 @@ class MainForm : Form
                 "  Fix: Click Sync now on the Intune policies tab, or Sync in Settings > Accounts > Access work or school > Info. If it fails, read the DeviceManagement-Enterprise-Diagnostics-Provider log, and check that the PC reaches *.manage.microsoft.com without TLS inspection\n\n" +
                 "• Management Extension — the Intune Management Extension service, which installs Win32 apps and runs scripts and remediations. Not installed is Info: Intune adds it with the first such assignment\n" +
                 "  Fix: If it is stopped, start the 'Microsoft Intune Management Extension' service. If it won't stay running, read its logs in C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\n\n" +
-                "• Device Policies — how many settings Intune pushed to the device are in force; a setting another provider (another MDM, a provisioning package) sets instead is counted separately\n" +
+                "• Device Policies — how many settings Intune pushed to the device are in force, and how many MSI apps it pushed; a setting another provider (another MDM, a provisioning package) sets instead is counted separately, and an app that failed to download or install warns\n" +
                 "  Fix: None arriving: check the device's and user's group assignments in the Intune admin center, then sync"),
         };
 
@@ -1480,6 +1497,8 @@ class MainForm : Form
         _intuneRunning = _intuneLoaded = true;
         DiagLog.Block = new LogBlock($"Intune policies {Clock(DateTime.Now)}", "MDM enrollment and policy settings from the registry");
         _intuneBox.Clear();
+        _intuneHeadings.Clear();
+        _intuneState = null;
         AppendIntuneLine("Loading Intune details...\n", DimColor);
 
         (MdmEnrollment? Enrollment, IntuneState? State, string? Error) read;
@@ -1526,8 +1545,41 @@ class MainForm : Form
         AppendIntuneLine("  ────────────────────────────────────────\n\n", BorderColor);
     }
 
+    // A section that folds to its title and summary, chevron down when open and right when folded; true when open
+    bool IntuneFoldSection(string key, string title, string summary)
+    {
+        bool open = _intuneOpen.Contains(key);
+        int start = _intuneBox.TextLength;
+        AppendIntuneLine("  ", TextColor);
+        AppendIntuneLine(open ? "\u25BC " : "\u25BA ", DimColor, mono: true);
+        AppendIntuneLine(title, TextColor, bold: true);
+        AppendIntuneLine($"   {summary}", DimColor);
+        _intuneHeadings.Add((start, _intuneBox.TextLength, key));
+        AppendIntuneLine(open ? "\n  ────────────────────────────────────────\n\n" : "\n\n", open ? BorderColor : TextColor);
+        return open;
+    }
+
+    string? IntuneHeadingAt(int charIndex) =>
+        _intuneHeadings.FirstOrDefault(h => charIndex >= h.Start && charIndex <= h.End).Key;
+
+    // Folds or opens a section and keeps its title where it was on screen
+    void ToggleIntuneSection(string key)
+    {
+        if (_intuneState is not { } state) return;
+        if (!_intuneOpen.Remove(key)) _intuneOpen.Add(key);
+        int top = _intuneBox.GetLineFromCharIndex(_intuneBox.GetCharIndexFromPosition(new Point(1, 1)));
+        _intuneBox.Clear();
+        RenderIntune(state);
+        _intuneBox.SelectionStart = _intuneHeadings.FirstOrDefault(h => h.Key == key).Start;
+        _intuneBox.SelectionLength = 0;
+        int now = _intuneBox.GetLineFromCharIndex(_intuneBox.GetCharIndexFromPosition(new Point(1, 1)));
+        if (top != now) SendMessage(_intuneBox.Handle, EmLineScroll, IntPtr.Zero, top - now);
+    }
+
     void RenderIntune(IntuneState s)
     {
+        _intuneState = s;
+        _intuneHeadings.Clear();
         RenderIntuneEnrollment(s);
         var e = s.Enrollment;
         if (s.PolicyError != null)
@@ -1537,8 +1589,8 @@ class MainForm : Form
         }
         else
         {
-            RenderIntuneScope("Device scope", s.Device, e.ProviderName);
-            RenderIntuneScope(e.Upn is { Length: > 0 } user ? $"User scope ({user})" : "User scope", s.User, e.ProviderName);
+            RenderIntuneScope("device", "Device scope", s.Device, e.ProviderName);
+            RenderIntuneScope("user", e.Upn is { Length: > 0 } user ? $"User scope ({user})" : "User scope", s.User, e.ProviderName);
         }
         RenderIntuneApps(s, e.ProviderName);
     }
@@ -1546,18 +1598,17 @@ class MainForm : Form
     // The MSI apps the MDM pushed, as Settings > Access work or school > Info lists them under Applications
     void RenderIntuneApps(IntuneState s, string provider)
     {
-        IntuneSection("Applications");
         if (s.AppsError != null)
         {
+            IntuneSection("Applications");
             AppendIntuneLine($"  Not read: {s.AppsError}\n", WarnColor);
             return;
         }
-        if (s.Apps.Count == 0)
-        {
-            AppendIntuneLine($"    No MSI apps from {provider}\n", DimColor);
-            return;
-        }
-        AppendIntuneLine($"  {s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")} from {provider}\n\n", DimColor);
+        int failed = s.Apps.Count(a => Diagnostics.MsiStatus(a.Status).Look == Status.Fail);
+        string summary = s.Apps.Count == 0 ? $"no MSI apps from {provider}"
+            : $"{s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")}{(failed > 0 ? $", {failed} failed" : "")}";
+        if (!IntuneFoldSection("apps", "Applications", summary) || s.Apps.Count == 0) return;
+        AppendIntuneLine($"  From {provider}\n\n", DimColor);
         foreach (var app in s.Apps)
         {
             var (text, look) = Diagnostics.MsiStatus(app.Status);
@@ -1632,16 +1683,13 @@ class MainForm : Form
             var other => ($"state {other}", TextColor),
         };
 
-    void RenderIntuneScope(string title, List<MdmSetting> settings, string provider)
+    void RenderIntuneScope(string key, string title, List<MdmSetting> settings, string provider)
     {
-        IntuneSection(title);
-        if (settings.Count == 0)
-        {
-            AppendIntuneLine($"    None from {provider}\n\n\n", DimColor);
-            return;
-        }
         var areas = settings.GroupBy(x => x.Area).ToList();
-        AppendIntuneLine($"  {settings.Count} setting{(settings.Count == 1 ? "" : "s")} in {areas.Count} area{(areas.Count == 1 ? "" : "s")} from {provider}\n", DimColor);
+        string summary = settings.Count == 0 ? $"none from {provider}"
+            : $"{settings.Count} setting{(settings.Count == 1 ? "" : "s")} in {areas.Count} area{(areas.Count == 1 ? "" : "s")}";
+        if (!IntuneFoldSection(key, title, summary) || settings.Count == 0) return;
+        AppendIntuneLine($"  From {provider}\n", DimColor);
         foreach (var area in areas)
         {
             AppendIntuneLine($"\n  {area.Key}", TextColor, bold: true);

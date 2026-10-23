@@ -165,6 +165,7 @@ static class Shots
         var intune = Get<RichTextBox>(form, "_intuneBox");
         intune.Clear();
         Call(form, "AppendIntuneLine", "\n", Theme("TextColor"), false, false);
+        Get<HashSet<string>>(form, "_intuneOpen").Add("device"); // one section open, the others folded
         Call(form, "RenderIntune", MockIntune(DateTime.UtcNow));
         Get<Control>(form, "_btnIntuneSync").Enabled = true;
         intune.SelectionStart = 0; intune.ScrollToCaret();

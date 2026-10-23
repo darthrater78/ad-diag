@@ -252,7 +252,7 @@ Whether this PC is managed by Microsoft Intune (or another MDM), on every profil
 - **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown. Only an enrollment with an MDM server counts: Windows' own entries there (Local, Deploy and Cloud Authority) and the ConfigMgr bridge are on PCs that aren't in Intune too
 - **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns; a failed attempt since the last success is a note (the next sync retries it)
 - **Management Extension** — the Intune Management Extension service, which installs Win32 apps and runs scripts; stopped warns, not installed is Info (Intune adds it with the first such assignment)
-- **Device Policies** — how many settings Intune pushed to the device are in force, and how many another provider sets instead
+- **Device Policies** — how many settings Intune pushed to the device are in force, how many another provider sets instead, and how many MSI apps Intune pushed (the Applications Settings lists). An app whose download or install failed warns, naming it
 
 Reading the sync times or policy settings may need Run as Administrator; without it those checks show as not checked.
 
@@ -308,7 +308,7 @@ Every step is also written to the log.
 
 ![Intune policies tab with the enrollment, device and user settings](docs/screenshots/intune-policies.png)
 
-Every setting and MSI app Intune pushed, read from the MDM client's `PolicyManager` and `EnterpriseDesktopAppManagement` keys:
+Every setting and MSI app Intune pushed, read from the MDM client's `PolicyManager` and `EnterpriseDesktopAppManagement` keys. **Device scope**, **User scope** and **Applications** start folded to their title and count; click one (or press Enter) to open it:
 
 - **Enrollment** — the MDM and the account that enrolled the PC, the last successful sync (and a failed attempt since), and the Management Extension's state
 - **Device scope** and **User scope** — each setting by area, with its value. A green dot is the value in force; an amber dot is a setting another provider (another MDM, a provisioning package) sets instead, with that provider's id

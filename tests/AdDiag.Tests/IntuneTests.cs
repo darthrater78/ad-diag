@@ -245,6 +245,14 @@ public class IntuneTests
         Assert.Null(state.PolicyError);
     }
 
+    [Fact]
+    public void Policies_CountTheAppsAndWarnOnAFailedInstall()
+    {
+        var policies = Entry(Diagnostics.TestIntune(WithApps(), Now, TimeZoneInfo.Utc), "Device Policies");
+        Assert.Equal("Warn", policies.Status.ToString());
+        Assert.EndsWith("; 3 MSI apps; failed: Contoso VPN Client (install failed)", policies.Detail);
+    }
+
     [Theory]
     [InlineData(70, "Pass")]
     [InlineData(60, "Fail")]
