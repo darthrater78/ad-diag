@@ -409,6 +409,7 @@ static class Shots
             new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, renewed {now.AddHours(-3):g} (3h 0m ago)"),
             new("Cloud Kerberos", Status.Pass, "CloudTgt: YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources"),
             new("On-premises Kerberos", Status.Pass, "OnPremTgt: YES, a ticket for AD resources through cloud Kerberos trust"),
+            new("Cloud Trust Groups", Status.Pass, "No group membership blocks cloud Kerberos trust for this account"),
             new("Cloud Kerberos Key", Status.Pass, $"krbtgt_AzureAD key last set {now.AddDays(-41):d} (41d ago)"),
             new("Entra Endpoints", Status.Pass, "login.microsoftonline.com reachable on port 443"),
         ], new Readiness(Status.Pass, "Ready for single sign-on.", false)),

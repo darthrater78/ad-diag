@@ -77,13 +77,14 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s), share access (20s) and reading the Internet settings (5s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
-- **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `tbs`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
+- **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `secur32`, `tbs`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
 - **Links open unelevated.** The GitHub and Release Notes links accept only `https` URLs and open through `explorer.exe`, so the browser runs at the desktop's integrity level, never with the app's admin token.
 
 ### Changes
 
 Newest first. Dates are when the change was made; unreleased changes ship in the next version.
 
+- **2026-10-23 (unreleased):** the Cloud Trust Groups check reads the signed-in user's own groups and the Entra Kerberos server object's password replication policy from AD; the domain and UPN put into the query must first match strict patterns that allow no quotes or LDAP filter characters.
 - **2026-10-23 (unreleased):** the key rollover checks read three accounts' `pwdLastSet` from AD with a fixed query; the only thing put into it is the domain, and only once it is a plain DNS name.
 - **2026-10-23 (unreleased):** the Credentials & Windows Hello group reads the Hello policy and the user's biometric enrollment from the registry read-only, the TPM's version from TPM Base Services (which any user may ask), and only the target names of saved credentials from `cmdkey /list`, never their passwords.
 - **2026-10-23 (unreleased):** the Intune group and tab read the MDM client's registry keys read-only, and query one service's state with query rights only; the one new action that changes something, **Sync now**, asks first and starts Windows' own sync task, its path built only from the enrollment's GUID. The Kerberos tickets and Intune panes no longer turn URLs into links, so a policy value can't become something to click.
@@ -214,6 +215,7 @@ Microsoft Entra joined PCs (no Seamless SSO, so its rows aren't shown):
 
 - **Cloud Kerberos** — `CloudTgt`: a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources
 - **On-premises Kerberos** — `OnPremTgt`: a ticket for AD resources through cloud Kerberos trust. Without it the verdict is "Ready for cloud apps, not for on-premises resources"
+- **Cloud Trust Groups** — whether the signed-in user is in a group the Microsoft Entra Kerberos server object's password replication policy denies (by default Domain Admins, Enterprise Admins, Schema Admins, Administrators and the other privileged groups), or in none it allows; such an account gets no on-premises tickets through cloud Kerberos trust, and the verdict is the same as above. Read from AD: the user's own `tokenGroups` and the `AzureADKerberos` object's `msDS-NeverRevealGroup` and `msDS-RevealOnDemandGroup`
 
 Both:
 
@@ -347,7 +349,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
 | `w32tm /stripchart` | Clock skew measurement | 5s |
 | `w32tm /query /source` | Time source | 5s |
-| `powershell` (DirectorySearcher) | Computer password age from AD; key ages of `AZUREADSSOACC`, `krbtgt_AzureAD` and `krbtgt` | 15s / 20s |
+| `powershell` (DirectorySearcher) | Computer password age from AD; key ages of `AZUREADSSOACC`, `krbtgt_AzureAD` and `krbtgt`; the user's groups against the Entra Kerberos server object's policy | 15s / 20s / 25s |
 | `powershell` (Get-CimInstance, `root\rsop`) | Group Policy results (diagnostics + tab) | 25s |
 | `powershell` (Get-WinEvent, System log) | DNS Client registration failures (diagnostics + DNS registration tab) | 15s |
 | `ipconfig /registerdns` | Register in DNS (DNS registration tab) | 20s |

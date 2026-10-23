@@ -276,7 +276,7 @@ public class EntraSsoTests
 
         // Seamless SSO doesn't apply to an Entra joined PC, so it has no row at all
         Assert.Equal(["Join Type", "Device Auth", "Primary Refresh Token", "Cloud Kerberos", "On-premises Kerberos",
-            "Entra Endpoints"], group.Tests.Select(t => t.Name));
+            "Cloud Trust Groups", "Entra Endpoints"], group.Tests.Select(t => t.Name));
         Assert.Equal(Status.Warn, Entry(group, "On-premises Kerberos").Status);
         Assert.Equal("login.microsoftonline.com reachable on port 443", Entry(group, "Entra Endpoints").Detail);
         Assert.DoesNotContain(probe.ToolCalls, c => c.StartsWith("klist get"));

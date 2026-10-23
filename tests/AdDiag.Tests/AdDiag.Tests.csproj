@@ -17,6 +17,7 @@
     <Compile Include="../../Intune.cs" Link="Intune.cs" />
     <Compile Include="../../Credentials.cs" Link="Credentials.cs" />
     <Compile Include="../../KdcKeys.cs" Link="KdcKeys.cs" />
+    <Compile Include="../../CloudTrust.cs" Link="CloudTrust.cs" />
     <Compile Include="../../Log.cs" Link="Log.cs" />
   </ItemGroup>
 

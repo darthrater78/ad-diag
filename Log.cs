@@ -390,6 +390,8 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
 
     public string? CurrentUserSid() => Call("machine", "Current user SID", inner.CurrentUserSid, sid => sid ?? "(unknown)");
 
+    public string? CurrentUserUpn() => Call("machine", "Current user UPN", inner.CurrentUserUpn, upn => upn ?? "(none)");
+
     public int? TpmVersion() => Call("machine", "TPM", inner.TpmVersion, v => v == null ? "none" : $"version {v}");
 
     public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>

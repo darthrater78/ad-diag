@@ -61,6 +61,8 @@ interface IProbe
     string? CurrentUserSid();
     /// <summary>The TPM's major version (1 for 1.2, 2 for 2.0) from TPM Base Services; null if there is no TPM.</summary>
     int? TpmVersion();
+    /// <summary>The signed-in user's UPN (user@domain), for Entra and domain accounts alike; null if Windows has none.</summary>
+    string? CurrentUserUpn();
 }
 
 /// <summary>How the PC is joined, which decides what the app checks and shows.</summary>

@@ -1198,6 +1198,8 @@ class MainForm : Form
                 "  Fix: Needs Windows 10 21H2 or later with current updates. Sign out and in\n\n" +
                 "• On-premises Kerberos — Entra joined PCs: OnPremTgt YES, a ticket for AD issued through cloud Kerberos trust. Without it, file shares and printers ask for a password\n" +
                 "  Fix: The user must be synchronized from AD: in the Microsoft Entra admin center, Users > the user > On-premises sync enabled must be Yes. Once per domain, a Domain Admin who is also a Hybrid Identity Administrator creates the Microsoft Entra Kerberos server object: 'Install-Module AzureADHybridAuthenticationManagement', then 'Set-AzureADKerberosServer -Domain <domain> -UserPrincipalName <admin UPN>'. Then sign out and in on this PC\n\n" +
+                "• Cloud Trust Groups — Entra joined PCs: whether the signed-in user is in a group the Microsoft Entra Kerberos server object's password replication policy denies (by default Domain Admins, Enterprise Admins, Schema Admins, Administrators and the other privileged groups), or in none it allows. Such an account gets no on-premises tickets through cloud Kerberos trust. Read from AD: the user's own groups and the AzureADKerberos object's policy\n" +
+                "  Fix: Use a separate, non-privileged account for everyday sign-in, and a privileged one only where it is needed. Don't take privileged groups off the denied list: that lets a compromised Entra ID hand out tickets for them\n\n" +
                 "• Seamless SSO Key — when the AZUREADSSOACC account's Kerberos decryption key was last set, read from AD (domain and hybrid joined PCs). Microsoft says to roll it over at least every 30 days; older warns\n" +
                 "  Fix: On the Microsoft Entra Connect server, as a Hybrid Identity Administrator and a domain admin: Import-Module .\\AzureADSSO.psd1, New-AzureADSSOAuthenticationContext, then Update-AzureADSSOForest -OnPremCredentials (Get-Credential)\n\n" +
                 "• Cloud Kerberos Key — when the krbtgt_AzureAD key of the Microsoft Entra Kerberos server object was last set (PCs that get on-premises tickets through cloud Kerberos trust). Older than 180 days warns\n" +
@@ -3809,6 +3811,8 @@ class MainForm : Form
 
         public int? TpmVersion() => QueryTpmVersion();
 
+        public string? CurrentUserUpn() => QueryUserUpn();
+
         public string? CurrentUserSid()
         {
             using var id = WindowsIdentity.GetCurrent();
@@ -3826,6 +3830,24 @@ class MainForm : Form
     static extern uint Tbsi_GetDeviceInfo(uint size, out TbsDeviceInfo info);
 
     const uint TbsSuccess = 0, TbsTpmNotFound = 0x8028400F;
+
+    [DllImport("secur32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool GetUserNameExW(int nameFormat, System.Text.StringBuilder? name, ref uint size);
+
+    const int NameUserPrincipal = 8, ErrorMoreData = 234, ErrorNoneMapped = 1332;
+
+    /// <summary>The signed-in user's UPN from the security subsystem; null when the account has none.</summary>
+    static string? QueryUserUpn()
+    {
+        uint size = 256;
+        var name = new System.Text.StringBuilder((int)size);
+        if (GetUserNameExW(NameUserPrincipal, name, ref size)) return name.ToString();
+        int error = Marshal.GetLastWin32Error();
+        if (error == ErrorNoneMapped) return null;
+        if (error != ErrorMoreData) throw new System.ComponentModel.Win32Exception(error);
+        name = new System.Text.StringBuilder((int)size);
+        return GetUserNameExW(NameUserPrincipal, name, ref size) ? name.ToString() : throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
 
     /// <summary>The TPM's major version from TPM Base Services, which any user may ask; null if there is none.</summary>
     static int? QueryTpmVersion()

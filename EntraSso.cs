@@ -90,7 +90,9 @@ static partial class Diagnostics
         var keys = SsoKeyChecks(cfg, probe, ds, kind, nowUtc);
         if (kind == JoinKind.EntraOnly)
         {
-            foreach (var test in EntraKerberosChecks(ds).Concat(keys)) yield return test;
+            foreach (var test in EntraKerberosChecks(ds)) yield return test;
+            yield return CloudTrustGroupsEntry(cfg, probe);
+            foreach (var test in keys) yield return test;
             yield break;
         }
         var sso = new List<TestEntry> { SeamlessTicketCheck(cfg, probe) };
@@ -357,7 +359,8 @@ static partial class Diagnostics
                 _ => new(worst, "Ready for Seamless SSO.", false),
             };
 
-        bool onPremOnly = counted.Where(t => t.Status == Status.Warn).All(t => t.Name == SsoOnPremTgt);
+        // Only on-premises access is missing: no on-premises ticket, or a group that keeps cloud Kerberos trust from giving one
+        bool onPremOnly = counted.Where(t => t.Status == Status.Warn).All(t => t.Name is SsoOnPremTgt or CloudTrustGroupsCheck);
         return worst switch
         {
             Status.Fail => new(worst, "Not ready for single sign-on.", true),

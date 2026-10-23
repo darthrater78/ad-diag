@@ -58,6 +58,7 @@ public class DiagnosticsTests
                 return DnsEvents();
             }
             if (script.Contains("KEY|")) return KeyAges;
+            if (script.Contains("DENY")) return CloudTrust;
             return script.Contains("pwdLastSet") ? PasswordAge : Rsop;
         }
 
@@ -131,6 +132,9 @@ public class DiagnosticsTests
         public int? ServiceState(string name) => Services.TryGetValue(name, out int state) ? state : null;
         public string? CurrentUserSid() => Sid;
         public int? Tpm = 2;
+        public string? Upn = "jdoe@contoso.com";
+        public string? CurrentUserUpn() => Upn;
+        public string CloudTrust = "USER|S-1-5-21-1-2-3-1105\nGROUP|S-1-5-21-1-2-3-513\nDENY|S-1-5-21-1-2-3-512|Domain Admins\nALLOW|S-1-5-21-1-2-3-513|Domain Users";
         public int? TpmVersion() => Tpm;
     }
 
