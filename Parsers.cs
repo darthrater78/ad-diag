@@ -159,7 +159,8 @@ static class Parsers
 
     /// <summary>
     /// Parses the DNS Client event query's output: "EVENTS|&lt;count&gt;" followed by one
-    /// "EVT|&lt;id&gt;|&lt;ISO 8601 UTC&gt;|&lt;message&gt;" per event, or "ERROR|&lt;message&gt;". Output with neither
+    /// "EVT|&lt;id&gt;|&lt;ISO 8601 UTC&gt;|&lt;message&gt;" per event, each followed by its "DATA|&lt;name&gt;|&lt;value&gt;" fields,
+    /// or "ERROR|&lt;message&gt;". Output with neither
     /// (e.g. PowerShell failing to start the script) is also an error.
     /// </summary>
     public static DnsClientEvents ParseDnsClientEvents(string output)
@@ -175,7 +176,9 @@ static class Parsers
                 counted = true;
             else if (parts.Length >= 4 && parts[0] == "EVT" && int.TryParse(parts[1], out int id)
                 && DateTime.TryParse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var time))
-                events.Add(new(id, time.ToUniversalTime(), string.Join("|", parts[3..]).Trim()));
+                events.Add(new(id, time.ToUniversalTime(), string.Join("|", parts[3..]).Trim(), []));
+            else if (parts.Length >= 3 && parts[0] == "DATA" && events.Count > 0)
+                events[^1].Data!.Add((parts[1].Trim(), string.Join("|", parts[2..]).Trim()));
         }
         if (counted) return new(events, null);
         string first = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
@@ -196,46 +199,51 @@ static class Parsers
     public static List<GpScope> ParseRsop(string output)
     {
         var scopes = new List<GpScope>();
-        var links = new List<(string Scope, string Id, int Order, string Name, string Reason)>();
-
+        var links = new List<GpLink>();
         foreach (var rawLine in output.Split('\n'))
         {
             var parts = rawLine.TrimEnd('\r').Split('|');
             if (parts.Length >= 3 && parts[0] == "SCOPE")
-            {
-                var (state, detail) = parts[2] switch
-                {
-                    "OK" => (GpScopeState.Ok, ""),
-                    "DENIED" => (GpScopeState.AccessDenied, ""),
-                    "NODATA" => (GpScopeState.NoData, ""),
-                    _ => (GpScopeState.Error, string.Join("|", parts[3..]).Trim()),
-                };
-                DateTime? lastApplied = state == GpScopeState.Ok && parts.Length > 3
-                    && DateTime.TryParse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
-                    ? t.ToUniversalTime() : null;
-                string site = state == GpScopeState.Ok && parts.Length > 4 ? string.Join("|", parts[4..]).Trim() : "";
-                scopes.Add(new(parts[1], state, detail, lastApplied, site, [], []));
-            }
+                scopes.Add(ParseRsopScope(parts));
             else if (parts.Length >= 9 && parts[0] == "GPO" && int.TryParse(parts[3], out int order))
             {
                 bool Flag(int i) => parts[i].Trim() == "1";
-                links.Add((parts[1], parts[2], order, string.Join("|", parts[8..]).Trim(),
+                links.Add(new(parts[1], parts[2], order, string.Join("|", parts[8..]).Trim(),
                     GpDeniedReason(Flag(4), Flag(5), Flag(6), Flag(7))));
             }
         }
-
         foreach (var scope in scopes)
-        {
-            var mine = links.Where(l => l.Scope == scope.Name).ToList();
-            // Highest appliedOrder wins, so list it first (as gpresult does). A GPO linked more than once
-            // shows up once: as applied if any of its links applied.
-            var applied = mine.Where(l => l.Order > 0).OrderByDescending(l => l.Order).DistinctBy(l => l.Id).ToList();
-            scope.Applied.AddRange(applied.Select(l => l.Name));
-            scope.Denied.AddRange(mine.Where(l => l.Order <= 0 && !applied.Any(a => a.Id == l.Id))
-                .DistinctBy(l => l.Id).Select(l => (l.Name, l.Reason)));
-        }
-
+            AddScopeGpos(scope, links.Where(l => l.Scope == scope.Name).ToList());
         return scopes;
+    }
+
+    record GpLink(string Scope, string Id, int Order, string Name, string Reason);
+
+    static GpScope ParseRsopScope(string[] parts)
+    {
+        var (state, detail) = parts[2] switch
+        {
+            "OK" => (GpScopeState.Ok, ""),
+            "DENIED" => (GpScopeState.AccessDenied, ""),
+            "NODATA" => (GpScopeState.NoData, ""),
+            _ => (GpScopeState.Error, string.Join("|", parts[3..]).Trim()),
+        };
+        DateTime? lastApplied = state == GpScopeState.Ok && parts.Length > 3
+            && DateTime.TryParse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
+            ? t.ToUniversalTime() : null;
+        string site = state == GpScopeState.Ok && parts.Length > 4 ? string.Join("|", parts[4..]).Trim() : "";
+        return new(parts[1], state, detail, lastApplied, site, [], []);
+    }
+
+    // Highest appliedOrder wins, so it is listed first (as gpresult does). A GPO linked more than once shows up
+    // once: as applied if any of its links applied
+    static void AddScopeGpos(GpScope scope, List<GpLink> mine)
+    {
+        var applied = mine.Where(l => l.Order > 0).OrderByDescending(l => l.Order).DistinctBy(l => l.Id).ToList();
+        var appliedIds = applied.Select(a => a.Id).ToHashSet();
+        scope.Applied.AddRange(applied.Select(l => l.Name));
+        scope.Denied.AddRange(mine.Where(l => l.Order <= 0 && !appliedIds.Contains(l.Id))
+            .DistinctBy(l => l.Id).Select(l => (l.Name, l.Reason)));
     }
 
     /// <summary>Why an unapplied GPO was filtered out, using gpresult's wording.</summary>
@@ -277,65 +285,111 @@ static class Parsers
     public static KlistOutput ParseKlist(string raw)
     {
         var headers = new List<string>();
-        var tickets = new List<KlistTicket>();
-
-        string? currentServer = null;
-        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        int fieldIndex = 0;
+        var reader = new KlistTicketReader();
         bool inTicket = false;
-
-        void ParseField(string text)
-        {
-            if (SplitKlistField(text) is not { } field) return;
-            var (label, value) = field;
-
-            string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
-                ?? (fieldIndex < KlistFieldOrder.Length ? KlistFieldOrder[fieldIndex] : label);
-            fieldIndex++;
-
-            if (key == "Server")
-                currentServer = value;
-            else
-                fields[key] = value;
-        }
-
-        void Flush()
-        {
-            if (currentServer != null)
-                tickets.Add(new(currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
-            currentServer = null;
-            fields.Clear();
-            fieldIndex = 0;
-        }
-
         foreach (string rawLine in raw.Split('\n'))
         {
             string line = rawLine.TrimEnd('\r');
             if (string.IsNullOrWhiteSpace(line)) continue;
 
             string trimmedLine = line.TrimStart();
-            if (Regex.IsMatch(trimmedLine, @"^#\d+>"))
+            if (TicketMarker.IsMatch(trimmedLine))
             {
-                Flush();
+                reader.Flush();
                 inTicket = true;
-
                 // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
                 string rest = trimmedLine[(trimmedLine.IndexOf('>') + 1)..].Trim();
-                if (rest.Length > 0) ParseField(rest);
+                if (rest.Length > 0) reader.Field(rest);
                 continue;
             }
 
             // Lines before the first ticket are headers ("Current LogonId is ...", "Cached Tickets: (n)")
-            if (inTicket) ParseField(line);
+            if (inTicket) reader.Field(line);
             else headers.Add(line.Trim());
         }
-        Flush();
+        reader.Flush();
 
         // A failed klist (e.g. "klist failed with 0xc000005f ... (no credentials)") has no cache to show
-        if (tickets.Count == 0 && KlistError(raw) != null)
+        if (reader.Tickets.Count == 0 && KlistError(raw) != null)
             headers.Clear();
+        return new(headers, reader.Tickets);
+    }
 
-        return new(headers, tickets);
+    static readonly Regex TicketMarker = new(@"^#\d+>");
+
+    // Collects one ticket's fields at a time, keyed by their English label or, when translated, their position
+    sealed class KlistTicketReader
+    {
+        public readonly List<KlistTicket> Tickets = [];
+        readonly Dictionary<string, string> _fields = new(StringComparer.OrdinalIgnoreCase);
+        string? _server;
+        int _index;
+
+        public void Field(string text)
+        {
+            if (SplitKlistField(text) is not { } field) return;
+            var (label, value) = field;
+            string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
+                ?? (_index < KlistFieldOrder.Length ? KlistFieldOrder[_index] : label);
+            _index++;
+            if (key == "Server") _server = value;
+            else _fields[key] = value;
+        }
+
+        public void Flush()
+        {
+            if (_server != null)
+                Tickets.Add(new(_server, new Dictionary<string, string>(_fields, StringComparer.OrdinalIgnoreCase)));
+            _server = null;
+            _fields.Clear();
+            _index = 0;
+        }
+    }
+
+    static readonly Regex DsregLinePattern = new(@"^\s*([A-Za-z][A-Za-z0-9 ]*?)\s+:\s?(.*?)\s*$", RegexOptions.Multiline);
+
+    /// <summary>
+    /// The "Name : value" fields of <c>dsregcmd /status</c>, keyed by name (case-insensitive). dsregcmd prints its
+    /// field names in English on every display language; a name that appears twice keeps its first value.
+    /// </summary>
+    public static Dictionary<string, string> ParseDsreg(string output)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in DsregLinePattern.Matches(output))
+            fields.TryAdd(m.Groups[1].Value.Trim(), m.Groups[2].Value.Trim());
+        return fields;
+    }
+
+    /// <summary>A dsregcmd YES/NO field: true for YES, false for NO, null when absent or anything else.</summary>
+    public static bool? DsregFlag(Dictionary<string, string> fields, string name) =>
+        fields.TryGetValue(name, out var v) ? v.Equals("YES", StringComparison.OrdinalIgnoreCase) ? true
+            : v.Equals("NO", StringComparison.OrdinalIgnoreCase) ? false : null : null;
+
+    /// <summary>A dsregcmd time such as "2026-10-22 08:14:03.000 UTC", as UTC; null if absent or unreadable.</summary>
+    public static DateTime? DsregTime(Dictionary<string, string> fields, string name)
+    {
+        if (!fields.TryGetValue(name, out var v)) return null;
+        var m = Regex.Match(v, @"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})");
+        return m.Success && DateTime.TryParseExact(m.Groups[1].Value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc) ? utc : null;
+    }
+
+    /// <summary>
+    /// The realm a <c>klist get &lt;spn&gt;</c> obtained a ticket from, read from the cached ticket's "spn @ REALM"
+    /// line (language-neutral); null when no ticket for the SPN is listed.
+    /// </summary>
+    public static string? TicketRealm(string klistOutput, string spn)
+    {
+        var m = Regex.Match(klistOutput, $@"{Regex.Escape(spn)}\s*@\s*([A-Za-z0-9.\-]+)", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+    }
+
+    /// <summary>The error code a failed <c>klist get</c> printed (NTSTATUS first, then any other hex code); null if none.</summary>
+    public static string? KlistGetError(string output)
+    {
+        if (KlistError(output) is { } status) return status;
+        var m = Regex.Match(output, @"\b0x[0-9a-f]{2,8}\b", RegexOptions.IgnoreCase);
+        return m.Success ? m.Value.ToLowerInvariant() : null;
     }
 }
 
@@ -348,5 +402,7 @@ record GpScope(string Name, GpScopeState State, string Detail, DateTime? LastApp
     List<string> Applied, List<(string Name, string Reason)> Denied);
 record KlistTicket(string Server, Dictionary<string, string> Fields);
 record KlistOutput(List<string> Headers, List<KlistTicket> Tickets);
-record DnsClientEvent(int Id, DateTime TimeUtc, string Message);
+/// <param name="Data">The event's named data fields (EventData), in order. Their names come from the event's manifest, so
+/// unlike the message they are the same in every language.</param>
+record DnsClientEvent(int Id, DateTime TimeUtc, string Message, List<(string Name, string Value)>? Data = null);
 record DnsClientEvents(List<DnsClientEvent> Events, string? Error);

@@ -46,62 +46,107 @@ interface IProbe
     /// </summary>
     IPAddress[] QueryAddresses(string name, IPAddress? server, CancellationToken ct);
     bool IsElevated();
+    /// <summary>
+    /// How this user's Windows Internet settings treat <paramref name="url"/>: its security zone and the policies
+    /// for automatic logon and status bar updates by script, as the URL security manager that browsers ask reports them.
+    /// </summary>
+    UrlSecurity UrlSecurity(string url, CancellationToken ct);
+    /// <summary>The subkeys of an HKLM key (64-bit view); null if the key doesn't exist. Throws when access is denied.</summary>
+    string[]? RegistrySubKeys(string hklmPath);
+    /// <summary>The values of an HKLM key (64-bit view) by name; null if the key doesn't exist. Throws when access is denied.</summary>
+    Dictionary<string, object>? RegistryValues(string hklmPath);
+    /// <summary>A Windows service's state (1 stopped ... 4 running, as winsvc.h); null if it isn't installed.</summary>
+    int? ServiceState(string name);
+    /// <summary>The signed-in user's SID, under which PolicyManager keeps their settings; null if unknown.</summary>
+    string? CurrentUserSid();
+    /// <summary>The TPM's major version (1 for 1.2, 2 for 2.0) from TPM Base Services; null if there is no TPM.</summary>
+    int? TpmVersion();
+    /// <summary>The signed-in user's UPN (user@domain), for Entra and domain accounts alike; null if Windows has none.</summary>
+    string? CurrentUserUpn();
 }
+
+/// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
+enum JoinProfile { Domain, Hybrid, Entra }
+
+/// <param name="Zone">0 Local machine, 1 Local intranet, 2 Trusted sites, 3 Internet, 4 Restricted sites.</param>
+/// <param name="Logon">URLACTION_CREDENTIALS_USE policy: 0 automatic logon, 0x10000 prompt, 0x20000 automatic in the intranet zone only, 0x30000 anonymous.</param>
+/// <param name="StatusBar">"Allow status bar updates via script" policy: 0 allowed, 1 prompt, 3 disallowed.</param>
+record UrlSecurity(int Zone, int Logon, int StatusBar);
 
 /// <param name="ZtnaAdapter">
 /// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
 /// </param>
 record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
-enum Status { Pass, Fail, Warn, Skip }
-record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
-record TestGroup(string Name, List<TestEntry> Tests);
+enum Status { Pass, Fail, Warn, Skip, Info }
+record TestEntry(string Name, Status Status = Status.Skip, string Detail = "")
+{
+    /// <summary>The check was held back because the app isn't running as Administrator; the UI calls it out.</summary>
+    public bool NeedsAdmin { get; init; }
+}
+record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
+/// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>
+record Readiness(Status Status, string Text, bool ShowGuide);
 
 // The test groups (the eighth, dynamic DNS registration, is in DnsRegistration.cs). Kept free of any WinForms
 // dependency so they can be unit tested (see tests/AdDiag.Tests).
 static partial class Diagnostics
 {
-    public static TestGroup TestDomainMembership(DiagConfig cfg, IProbe probe)
+    /// <summary>
+    /// The checks a standard user is always denied, as seen on a real PC: before a run, an app that isn't elevated
+    /// marks them, so the need shows before anything runs. Others that may be denied (Hello policy, biometrics,
+    /// Intune) set <see cref="TestEntry.NeedsAdmin"/> only when a run finds they were.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AdminChecks = new HashSet<string>
     {
-        var tests = new List<TestEntry>();
-        string? dsreg = null;
+        "Secure Channel", "GP Last Refresh", "Applied GPOs", "Denied GPOs",
+    };
 
+    public static TestGroup TestDomainMembership(DiagConfig cfg, IProbe probe) => new("Domain Membership & Identity",
+    [
+        DomainJoinedCheck(cfg, probe), LoggedOnUserCheck(probe), SecureChannelCheck(cfg, probe),
+        SiteCheck(cfg, probe), PasswordAgeCheck(cfg, probe),
+    ]);
+
+    static TestEntry DomainJoinedCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
-            dsreg = probe.RunTool("dsregcmd", "/status", 15000, cfg.Cancel);
+            string dsreg = probe.RunTool("dsregcmd", "/status", 15000, cfg.Cancel);
             var m = Regex.Match(dsreg, @"DomainJoined\s*:\s*(\S+)");
             bool domJoined = m.Success && m.Groups[1].Value == "YES";
-            tests.Add(new("Domain Joined",
+            return new("Domain Joined",
                 domJoined ? Status.Pass : Status.Fail,
-                m.Success ? $"DomainJoined: {m.Groups[1].Value}" : "Could not determine"));
+                m.Success ? $"DomainJoined: {m.Groups[1].Value}" : "Could not determine");
         }
         catch (Exception ex)
         {
-            tests.Add(new("Domain Joined", Status.Fail, $"dsregcmd error: {ex.Message}"));
+            return new("Domain Joined", Status.Fail, $"dsregcmd error: {ex.Message}");
         }
+    }
 
+    static TestEntry LoggedOnUserCheck(IProbe probe)
+    {
+        try { return new("Logged-on User", Status.Pass, probe.CurrentUser()); }
+        catch (Exception ex) { return new("Logged-on User", Status.Fail, $"Cannot get identity: {ex.Message}"); }
+    }
+
+    static TestEntry SecureChannelCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
-            tests.Add(new("Logged-on User", Status.Pass, probe.CurrentUser()));
+            var sc = Parsers.ParseScVerify(probe.RunTool("nltest", $"/sc_verify:{cfg.Domain}", 10000, cfg.Cancel));
+            return sc.AccessDenied
+                ? new("Secure Channel", Status.Skip, "Not checked: needs Run as Administrator") { NeedsAdmin = true }
+                : new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail);
         }
         catch (Exception ex)
         {
-            tests.Add(new("Logged-on User", Status.Fail, $"Cannot get identity: {ex.Message}"));
+            return new("Secure Channel", Status.Skip, $"Not checked: nltest failed: {ex.Message}");
         }
+    }
 
-        try
-        {
-            string scVerify = probe.RunTool("nltest", $"/sc_verify:{cfg.Domain}", 10000, cfg.Cancel);
-            var sc = Parsers.ParseScVerify(scVerify);
-            if (sc.AccessDenied)
-                tests.Add(new("Secure Channel", Status.Warn, "Requires elevation (Run as Administrator)"));
-            else
-                tests.Add(new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("Secure Channel", Status.Warn, $"nltest failed: {ex.Message}"));
-        }
-
+    static TestEntry SiteCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
             string dsGetSite = probe.RunTool("nltest", "/dsgetsite", 5000, cfg.Cancel);
@@ -109,75 +154,79 @@ static partial class Diagnostics
             string site = Parsers.ParseSite(dsGetSite) ?? "";
             string noSite = "No site returned" + (siteError != null ? $" ({siteError})" : "")
                 + " - subnet may not be registered in AD Sites and Services";
-            tests.Add(new("Site Assignment",
+            return new("Site Assignment",
                 !string.IsNullOrEmpty(site) ? Status.Pass : Status.Warn,
-                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite));
+                !string.IsNullOrEmpty(site) ? $"Site: {site}" : noSite);
         }
         catch (Exception ex)
         {
-            tests.Add(new("Site Assignment", Status.Warn, $"nltest failed: {ex.Message}"));
+            return new("Site Assignment", Status.Skip, $"Not checked: nltest failed: {ex.Message}");
         }
+    }
 
+    static TestEntry PasswordAgeCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
-            var result = Parsers.ParsePasswordAgeQuery(probe.RunPowerShell(PasswordAgeScript, 15000, cfg.Cancel));
-            string where = result.Domain == null ? ""
-                : result.Domain.Equals(cfg.Domain, StringComparison.OrdinalIgnoreCase) ? ""
-                : $" (account is in {result.Domain}, not the target domain)";
-            if (result.Error != null)
-            {
-                tests.Add(new("Computer Password Age", Status.Warn, $"Could not query AD: {result.Error}"));
-            }
-            else if (result.LastSetUtc is not { } lastSetUtc)
-            {
-                tests.Add(new("Computer Password Age", Status.Skip, $"Computer object not found in {result.Domain}"));
-            }
-            else if (lastSetUtc.Year < 1700)
-            {
-                // pwdLastSet = 0 converts to 1601-01-01
-                tests.Add(new("Computer Password Age", Status.Warn, $"pwdLastSet is 0 — the computer account password was reset or never set{where}"));
-            }
-            else
-            {
-                var lastChanged = lastSetUtc.ToLocalTime();
-                var age = DateTime.Now - lastChanged;
-                tests.Add(new("Computer Password Age",
-                    age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
-                    $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "") + where));
-            }
+            return PasswordAgeEntry(Parsers.ParsePasswordAgeQuery(probe.RunPowerShell(PasswordAgeScript, 15000, cfg.Cancel)), cfg.Domain);
         }
         catch (Exception ex)
         {
-            tests.Add(new("Computer Password Age", Status.Warn, $"AD query failed: {ex.Message}"));
+            return new("Computer Password Age", Status.Skip, $"Not checked: AD query failed: {ex.Message}");
         }
+    }
 
-        return new("Domain Membership & Identity", tests);
+    static TestEntry PasswordAgeEntry(PasswordAgeResult result, string targetDomain)
+    {
+        string where = result.Domain == null ? ""
+            : result.Domain.Equals(targetDomain, StringComparison.OrdinalIgnoreCase) ? ""
+            : $" (account is in {result.Domain}, not the target domain)";
+        if (result.Error != null)
+            return new("Computer Password Age", Status.Skip, $"Not checked: could not query AD: {result.Error}");
+        if (result.LastSetUtc is not { } lastSetUtc)
+            return new("Computer Password Age", Status.Skip, $"Computer object not found in {result.Domain}");
+        // pwdLastSet = 0 converts to 1601-01-01
+        if (lastSetUtc.Year < 1700)
+            return new("Computer Password Age", Status.Warn, $"pwdLastSet is 0 — the computer account password was reset or never set{where}");
+
+        var lastChanged = lastSetUtc.ToLocalTime();
+        var age = DateTime.Now - lastChanged;
+        return new("Computer Password Age",
+            age.TotalDays < 45 ? Status.Pass : age.TotalDays < 90 ? Status.Warn : Status.Fail,
+            $"Last changed: {lastChanged:g} ({(int)age.TotalDays}d ago)" + (age.TotalDays >= 45 ? " — may indicate broken auto-rotation" : "") + where);
     }
 
     public static TestGroup TestDcConnectivity(DiagConfig cfg, IProbe probe)
     {
-        var tests = new List<TestEntry>();
-        string? dcHost = null;
+        var (locate, dcHost) = LocateDcCheck(cfg, probe);
+        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : (dcHost ?? cfg.Domain);
+        return new("DC Discovery & Connectivity", [locate, .. PortChecks(cfg, probe, kdc)]);
+    }
 
+    static (TestEntry Entry, string? DcHost) LocateDcCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
-            string dsGetDc = probe.RunTool("nltest", $"/dsgetdc:{cfg.Domain}", 8000, cfg.Cancel);
-            dcHost = Parsers.ParseDcLocator(dsGetDc);
-            if (dcHost != null)
-            {
-                tests.Add(new("Locate DC", Status.Pass, $"Found {dcHost}"));
-            }
-            else
-            {
-                tests.Add(new("Locate DC", Status.Fail, "Could not locate a domain controller"));
-            }
+            string? dcHost = Parsers.ParseDcLocator(probe.RunTool("nltest", $"/dsgetdc:{cfg.Domain}", 8000, cfg.Cancel));
+            return dcHost != null
+                ? (new("Locate DC", Status.Pass, $"Found {dcHost}"), dcHost)
+                : (new("Locate DC", Status.Fail, "Could not locate a domain controller"), null);
         }
         catch (Exception ex)
         {
-            tests.Add(new("Locate DC", Status.Fail, $"nltest error: {ex.Message}"));
+            return (new("Locate DC", Status.Fail, $"nltest error: {ex.Message}"), null);
         }
+    }
 
-        string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : (dcHost ?? cfg.Domain);
+    static readonly (string Name, int Port)[] DcPorts =
+    [
+        ("Port 389 (LDAP)", 389), ("Port 636 (LDAPS)", 636), ("Port 88 (Kerberos)", 88), ("Port 445 (SMB)", 445),
+        ("Port 135 (RPC)", 135), ("Port 464 (Kpasswd)", 464), ("Port 53 (DNS)", 53), ("Port 3268 (Global Catalog)", 3268),
+    ];
+
+    // The ports probed in parallel at the DC's first address, IPv4 preferred
+    static IEnumerable<TestEntry> PortChecks(DiagConfig cfg, IProbe probe, string kdc)
+    {
         IPAddress? kdcIp = null;
         try
         {
@@ -186,78 +235,71 @@ static partial class Diagnostics
                 .FirstOrDefault();
         }
         catch { }
+        if (kdcIp == null)
+            return DcPorts.Select(p => new TestEntry(p.Name, Status.Skip, $"Cannot resolve {kdc}"));
 
-        var ports = new (string Name, int Port)[]
-        {
-            ("Port 389 (LDAP)", 389), ("Port 636 (LDAPS)", 636), ("Port 88 (Kerberos)", 88), ("Port 445 (SMB)", 445),
-            ("Port 135 (RPC)", 135), ("Port 464 (Kpasswd)", 464), ("Port 53 (DNS)", 53), ("Port 3268 (Global Catalog)", 3268),
-        };
-        bool[] reachable = kdcIp == null ? new bool[ports.Length]
-            : Task.WhenAll(ports.Select(p => probe.TcpConnect(kdcIp, p.Port, cfg.Cancel))).GetAwaiter().GetResult();
-
-        foreach (var ((name, port), open) in ports.Zip(reachable))
-        {
-            bool required = port is 389 or 88 or 445;
-            if (kdcIp == null)
-                tests.Add(new(name, Status.Skip, $"Cannot resolve {kdc}"));
-            else
-                tests.Add(new(name,
-                    open ? Status.Pass : (required ? Status.Fail : Status.Warn),
-                    open ? $"Reachable at {kdc} ({kdcIp})" : $"Unreachable at {kdc} ({kdcIp})"));
-        }
-
-        return new("DC Discovery & Connectivity", tests);
+        bool[] reachable = Task.WhenAll(DcPorts.Select(p => probe.TcpConnect(kdcIp, p.Port, cfg.Cancel))).GetAwaiter().GetResult();
+        return DcPorts.Zip(reachable, (p, open) => PortEntry(p.Name, p.Port, open, kdc, kdcIp));
     }
 
-    public static TestGroup TestDnsForAd(DiagConfig cfg, IProbe probe)
+    // Sign-in needs LDAP, Kerberos and SMB; RPC and Kpasswd matter for Group Policy and password changes.
+    // LDAPS, the Global Catalog port and DNS on the DC are often closed on purpose, so a closed one is a note
+    static TestEntry PortEntry(string name, int port, bool open, string kdc, IPAddress kdcIp)
     {
-        var tests = new List<TestEntry>
-        {
-            LookupSrv(probe, $"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true, cfg.Cancel),
-            LookupSrv(probe, $"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true, cfg.Cancel),
-            LookupSrv(probe, $"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false, cfg.Cancel),
-        };
+        bool required = port is 389 or 88 or 445;
+        bool optional = port is 636 or 3268 or 53;
+        return new(name,
+            open ? Status.Pass : required ? Status.Fail : optional ? Status.Info : Status.Warn,
+            open ? $"Reachable at {kdc} ({kdcIp})"
+            : $"Unreachable at {kdc} ({kdcIp})" + (optional ? "; optional, often closed on purpose, and not needed to sign in" : ""));
+    }
 
+    public static TestGroup TestDnsForAd(DiagConfig cfg, IProbe probe) => new("DNS for Active Directory",
+    [
+        LookupSrv(probe, $"_ldap._tcp.{cfg.Domain}", "_ldap._tcp SRV", required: true, cfg.Cancel),
+        LookupSrv(probe, $"_kerberos._tcp.{cfg.Domain}", "_kerberos._tcp SRV", required: true, cfg.Cancel),
+        LookupSrv(probe, $"_gc._tcp.{cfg.Domain}", "_gc._tcp SRV", required: false, cfg.Cancel),
+        DcAddressCheck(cfg, probe),
+        SuffixListCheck(cfg, probe),
+    ]);
+
+    static TestEntry DcAddressCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
             string host = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
             var addrs = probe.Resolve(host, cfg.Cancel);
-            tests.Add(new("DC A Record",
+            return new("DC A Record",
                 addrs.Length > 0 ? Status.Pass : Status.Fail,
-                addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}"));
+                addrs.Length > 0 ? $"{host} -> {string.Join(", ", addrs.Select(a => a.ToString()))}" : $"Cannot resolve {host}");
         }
         catch (Exception ex)
         {
-            tests.Add(new("DC A Record", Status.Fail, $"Resolution failed: {ex.Message}"));
+            return new("DC A Record", Status.Fail, $"Resolution failed: {ex.Message}");
         }
+    }
 
+    static TestEntry SuffixListCheck(DiagConfig cfg, IProbe probe)
+    {
+        List<string> suffixes;
         try
         {
             var (searchList, domain) = probe.DnsSuffixConfig();
-            var suffixes = new List<string>();
-            if (!string.IsNullOrWhiteSpace(searchList))
-                suffixes.AddRange(searchList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0));
-            else if (!string.IsNullOrWhiteSpace(domain))
-                suffixes.Add(domain);
-
-            if (suffixes.Count > 0)
-            {
-                bool hasDomain = suffixes.Any(s => s.Contains(cfg.Domain, StringComparison.OrdinalIgnoreCase));
-                tests.Add(new("DNS Suffix Search List",
-                    hasDomain ? Status.Pass : Status.Warn,
-                    string.Join(", ", suffixes) + (hasDomain ? "" : $" — target domain {cfg.Domain} not in suffix list")));
-            }
-            else
-            {
-                tests.Add(new("DNS Suffix Search List", Status.Warn, "No DNS suffix configured"));
-            }
+            suffixes = !string.IsNullOrWhiteSpace(searchList)
+                ? searchList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList()
+                : !string.IsNullOrWhiteSpace(domain) ? [domain] : [];
         }
         catch (Exception ex)
         {
-            tests.Add(new("DNS Suffix Search List", Status.Warn, $"Registry read failed: {ex.Message}"));
+            return new("DNS Suffix Search List", Status.Skip, $"Not checked: registry read failed: {ex.Message}");
         }
+        if (suffixes.Count == 0)
+            return new("DNS Suffix Search List", Status.Warn, "No DNS suffix configured");
 
-        return new("DNS for Active Directory", tests);
+        bool hasDomain = suffixes.Any(s => s.Contains(cfg.Domain, StringComparison.OrdinalIgnoreCase));
+        return new("DNS Suffix Search List",
+            hasDomain ? Status.Pass : Status.Warn,
+            string.Join(", ", suffixes) + (hasDomain ? "" : $" — target domain {cfg.Domain} not in suffix list"));
     }
 
     static TestEntry LookupSrv(IProbe probe, string record, string testName, bool required, CancellationToken ct)
@@ -280,113 +322,117 @@ static partial class Diagnostics
 
     public static TestGroup TestSysvolNetlogon(DiagConfig cfg, IProbe probe)
     {
-        var tests = new List<TestEntry>();
+        string? unreachable = SmbUnreachable(cfg, probe);
+        return new("SYSVOL & NETLOGON",
+        [
+            ShareCheck(cfg, probe, "SYSVOL", "SYSVOL Access", unreachable),
+            ShareCheck(cfg, probe, "NETLOGON", "NETLOGON Access", unreachable),
+        ]);
+    }
 
-        // Opening a share on a domain that doesn't answer blocks for 30s or more inside Windows, where nothing
-        // can cancel it, and the app can't exit while a thread is stuck there. So prove SMB answers first.
-        string? unreachable = null;
+    // Opening a share on a domain that doesn't answer blocks for 30s or more inside Windows, where nothing
+    // can cancel it, and the app can't exit while a thread is stuck there. So prove SMB answers first: null when it does
+    static string? SmbUnreachable(DiagConfig cfg, IProbe probe)
+    {
         try
         {
             var addrs = probe.Resolve(cfg.Domain, cfg.Cancel);
             if (addrs.Length == 0)
-                unreachable = $"cannot resolve {cfg.Domain}";
-            else if (!Task.WhenAll(addrs.Take(8).Select(a => probe.TcpConnect(a, 445, cfg.Cancel))).GetAwaiter().GetResult().Any(open => open))
-                unreachable = $"no domain controller for {cfg.Domain} answers on port 445 (SMB)";
+                return $"cannot resolve {cfg.Domain}";
+            if (!Task.WhenAll(addrs.Take(8).Select(a => probe.TcpConnect(a, 445, cfg.Cancel))).GetAwaiter().GetResult().Any(open => open))
+                return $"no domain controller for {cfg.Domain} answers on port 445 (SMB)";
+            return null;
         }
         catch (Exception ex)
         {
-            unreachable = ex.Message;
+            return ex.Message;
         }
+    }
 
-        void TestShare(string shareName, string testName)
+    static TestEntry ShareCheck(DiagConfig cfg, IProbe probe, string shareName, string testName, string? unreachable)
+    {
+        string path = $@"\\{cfg.Domain}\{shareName}";
+        if (unreachable != null)
+            return new(testName, Status.Fail, $"{path} not accessible — {unreachable}");
+        try
         {
-            string path = $@"\\{cfg.Domain}\{shareName}";
-            if (unreachable != null)
-            {
-                tests.Add(new(testName, Status.Fail, $"{path} not accessible — {unreachable}"));
-                return;
-            }
-            try
-            {
-                int? entries = probe.ShareEntries(path, cfg.Cancel);
-                if (entries != null)
-                    tests.Add(new(testName, Status.Pass, $"{path} accessible ({entries} entries)"));
-                else
-                    tests.Add(new(testName, Status.Fail, $"{path} not accessible"));
-            }
-            catch (UnauthorizedAccessException)
-            {
-                tests.Add(new(testName, Status.Warn, $"{path} exists but access denied — check permissions"));
-            }
-            catch (Exception ex)
-            {
-                tests.Add(new(testName, Status.Fail, $"{path} — {ex.Message}"));
-            }
+            int? entries = probe.ShareEntries(path, cfg.Cancel);
+            return entries != null
+                ? new(testName, Status.Pass, $"{path} accessible ({entries} entries)")
+                : new(testName, Status.Fail, $"{path} not accessible");
         }
-
-        TestShare("SYSVOL", "SYSVOL Access");
-        TestShare("NETLOGON", "NETLOGON Access");
-
-        return new("SYSVOL & NETLOGON", tests);
+        catch (UnauthorizedAccessException)
+        {
+            return new(testName, Status.Warn, $"{path} exists but access denied — check permissions");
+        }
+        catch (Exception ex)
+        {
+            return new(testName, Status.Fail, $"{path} — {ex.Message}");
+        }
     }
 
     public static TestGroup TestGroupPolicy(DiagConfig cfg, IProbe probe)
     {
-        var tests = new List<TestEntry>();
-
-        try
+        List<GpScope> scopes;
+        try { scopes = QueryRsop(probe, out _, cfg.Cancel); }
+        catch (Exception ex)
         {
-            var scopes = QueryRsop(probe, out _, cfg.Cancel);
-            var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
-            var user = scopes.FirstOrDefault(s => s.Name == "User");
-            var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
+            return new("Group Policy",
+            [
+                new("GP Last Refresh", Status.Fail, $"Group Policy query error: {ex.Message}"),
+                new("Applied GPOs", Status.Skip, "Group Policy results unavailable"),
+                new("Denied GPOs", Status.Skip, "Group Policy results unavailable"),
+            ]);
+        }
+        return new("Group Policy", GpChecks(scopes));
+    }
 
-            if (primary == null)
-            {
-                string why = scopes.Count == 0 ? "Could not read Group Policy results"
-                    : string.Join("; ", scopes.Select(GpScopeUnavailable));
-                tests.Add(new("GP Last Refresh", Status.Warn, why));
-                tests.Add(new("Applied GPOs", Status.Skip, "No scope data available"));
-                tests.Add(new("Denied GPOs", Status.Skip, "No scope data available"));
-                return new("Group Policy", tests);
-            }
+    // The computer scope's results, or the user's when the computer's can't be read
+    static List<TestEntry> GpChecks(List<GpScope> scopes)
+    {
+        var computer = scopes.FirstOrDefault(s => s.Name == "Computer");
+        var user = scopes.FirstOrDefault(s => s.Name == "User");
+        var primary = computer?.State == GpScopeState.Ok ? computer : user?.State == GpScopeState.Ok ? user : null;
+        if (primary == null)
+        {
+            string why = scopes.Count == 0 ? "Could not read Group Policy results"
+                : string.Join("; ", scopes.Select(GpScopeUnavailable));
+            bool denied = scopes.Any(s => s.State == GpScopeState.AccessDenied);
+            return
+            [
+                new("GP Last Refresh", Status.Skip, $"Not checked: {why}") { NeedsAdmin = denied },
+                new("Applied GPOs", Status.Skip, "No scope data available") { NeedsAdmin = denied },
+                new("Denied GPOs", Status.Skip, "No scope data available") { NeedsAdmin = denied },
+            ];
+        }
 
-            string scopeLabel = primary.Name;
-            string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
-
-            if (primary.LastAppliedUtc is { } lastUtc)
-            {
-                var lastTime = lastUtc.ToLocalTime();
-                var age = DateTime.Now - lastTime;
-                tests.Add(new("GP Last Refresh",
-                    age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
-                    $"{scopeLabel}: {lastTime:g} ({FormatTimeSpan(age)} ago){elevationNote}"));
-            }
-            else
-            {
-                tests.Add(new("GP Last Refresh", Status.Warn,
-                    $"Could not determine last refresh time{elevationNote}"));
-            }
-
-            int appliedCount = primary.Applied.Count;
-            tests.Add(new("Applied GPOs",
+        string scopeLabel = primary.Name;
+        string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
+        int appliedCount = primary.Applied.Count;
+        // Only the user scope could be read: every row stands in for the computer's, which needs Administrator
+        bool computerDenied = elevationNote.Length > 0;
+        return
+        [
+            GpRefreshEntry(primary, elevationNote) with { NeedsAdmin = computerDenied },
+            new("Applied GPOs",
                 appliedCount > 0 ? Status.Pass : Status.Warn,
                 appliedCount > 0
                     ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
-                    : $"{scopeLabel}: No applied GPOs found{elevationNote}"));
+                    : $"{scopeLabel}: No applied GPOs found{elevationNote}") { NeedsAdmin = computerDenied },
+            new("Denied GPOs", Status.Pass,
+                $"{scopeLabel}: {primary.Denied.Count} GPO(s) filtered out (informational){elevationNote}") { NeedsAdmin = computerDenied },
+        ];
+    }
 
-            int deniedCount = primary.Denied.Count;
-            tests.Add(new("Denied GPOs", Status.Pass,
-                $"{scopeLabel}: {deniedCount} GPO(s) filtered out (informational){elevationNote}"));
-        }
-        catch (Exception ex)
-        {
-            tests.Add(new("GP Last Refresh", Status.Fail, $"Group Policy query error: {ex.Message}"));
-            tests.Add(new("Applied GPOs", Status.Skip, "Group Policy results unavailable"));
-            tests.Add(new("Denied GPOs", Status.Skip, "Group Policy results unavailable"));
-        }
-
-        return new("Group Policy", tests);
+    static TestEntry GpRefreshEntry(GpScope scope, string elevationNote)
+    {
+        if (scope.LastAppliedUtc is not { } lastUtc)
+            return new("GP Last Refresh", Status.Skip, $"Not checked: could not determine the last refresh time{elevationNote}");
+        var lastTime = lastUtc.ToLocalTime();
+        var age = DateTime.Now - lastTime;
+        return new("GP Last Refresh",
+            age.TotalHours < 24 ? Status.Pass : age.TotalDays < 7 ? Status.Warn : Status.Fail,
+            $"{scope.Name}: {lastTime:g} ({FormatTimeSpan(age)} ago){elevationNote}");
     }
 
     public static TestGroup TestTrusts(DiagConfig cfg, IProbe probe)
@@ -408,72 +454,70 @@ static partial class Diagnostics
         }
         catch (Exception ex)
         {
-            tests.Add(new("Domain Trusts", Status.Warn, $"nltest failed: {ex.Message}"));
+            tests.Add(new("Domain Trusts", Status.Skip, $"Not checked: nltest failed: {ex.Message}"));
         }
 
         return new("Trust Relationships", tests);
     }
 
-    public static TestGroup TestKerberosAndTime(DiagConfig cfg, IProbe probe)
-    {
-        var tests = new List<TestEntry>();
-        string realm = cfg.Domain.ToUpperInvariant();
+    public static TestGroup TestKerberosAndTime(DiagConfig cfg, IProbe probe) => new("Kerberos & Time Sync",
+        [TgtCheck(cfg, probe), ClockSkewCheck(cfg, probe), TimeSourceCheck(cfg, probe),
+            .. KeyAgeChecks(probe, cfg.Domain, DateTime.UtcNow, [KrbtgtKey], cfg.Cancel)]);
 
+    static TestEntry TgtCheck(DiagConfig cfg, IProbe probe)
+    {
+        string realm = cfg.Domain.ToUpperInvariant();
         try
         {
             // The cache alone is unreliable: other tests running in parallel may populate it, and an
             // elevated session starts with its own empty cache. So if no TGT is cached, request one.
             string klist = probe.RunTool("klist", "", 5000, cfg.Cancel);
             if (Parsers.HasTgt(klist, realm))
-            {
-                tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} cached"));
-            }
-            else
-            {
-                string get = probe.RunTool("klist", $"get krbtgt/{realm}", 10000, cfg.Cancel);
-                if (Parsers.HasTgt(get, realm))
-                    tests.Add(new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)"));
-                else
-                    tests.Add(new("TGT Present", Status.Fail,
-                        $"Could not obtain a TGT for {realm}" + (Parsers.KlistError(get) is { } err ? $" ({err})" : "") + " - no KDC contact"));
-            }
+                return new("TGT Present", Status.Pass, $"krbtgt/{realm} cached");
+
+            string get = probe.RunTool("klist", $"get krbtgt/{realm}", 10000, cfg.Cancel);
+            return Parsers.HasTgt(get, realm)
+                ? new("TGT Present", Status.Pass, $"krbtgt/{realm} obtained from KDC (was not cached)")
+                : new("TGT Present", Status.Fail,
+                    $"Could not obtain a TGT for {realm}" + (Parsers.KlistError(get) is { } err ? $" ({err})" : "") + " - no KDC contact");
         }
         catch (Exception ex)
         {
-            tests.Add(new("TGT Present", Status.Fail, $"klist error: {ex.Message}"));
+            return new("TGT Present", Status.Fail, $"klist error: {ex.Message}");
         }
+    }
 
+    static TestEntry ClockSkewCheck(DiagConfig cfg, IProbe probe)
+    {
         string kdc = !string.IsNullOrEmpty(cfg.Dc) ? cfg.Dc : cfg.Domain;
         try
         {
             string w32 = probe.RunTool("w32tm", $"/stripchart /computer:{kdc} /samples:1 /dataonly", 5000, cfg.Cancel);
-            if (Parsers.ParseStripchartSkew(w32) is { } skew)
-            {
-                tests.Add(new("Clock Skew",
-                    skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
-                    $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : "")));
-            }
-            else
-                tests.Add(new("Clock Skew", Status.Warn, "Cannot measure (DC unreachable?)"));
+            if (Parsers.ParseStripchartSkew(w32) is not { } skew)
+                return new("Clock Skew", Status.Skip, "Not checked: could not measure (DC unreachable?)");
+            return new("Clock Skew",
+                skew < 60 ? Status.Pass : skew < 300 ? Status.Warn : Status.Fail,
+                $"{skew:F2}s drift from {kdc}" + (skew >= 300 ? " - exceeds Kerberos 5min tolerance" : ""));
         }
-        catch (Exception ex) { tests.Add(new("Clock Skew", Status.Warn, $"w32tm failed: {ex.Message}")); }
+        catch (Exception ex) { return new("Clock Skew", Status.Skip, $"Not checked: w32tm failed: {ex.Message}"); }
+    }
 
+    static TestEntry TimeSourceCheck(DiagConfig cfg, IProbe probe)
+    {
         try
         {
             string w32source = probe.RunTool("w32tm", "/query /source", 5000, cfg.Cancel);
             if (Parsers.ParseTimeSource(w32source) is not { } source)
                 throw new InvalidOperationException(w32source.Trim());
             bool fromDomain = Parsers.IsDomainTimeSource(source, cfg.Domain, host => probe.Resolve(host, cfg.Cancel));
-            tests.Add(new("Time Source",
+            return new("Time Source",
                 fromDomain ? Status.Pass : Status.Warn,
-                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy")));
+                source + (fromDomain ? "" : $" - not a {cfg.Domain} DC; not syncing from domain hierarchy"));
         }
         catch (Exception ex)
         {
-            tests.Add(new("Time Source", Status.Warn, $"w32tm failed: {ex.Message}"));
+            return new("Time Source", Status.Skip, $"Not checked: w32tm failed: {ex.Message}");
         }
-
-        return new("Kerberos & Time Sync", tests);
     }
 
     // The computer account lives in the computer's domain, which isn't necessarily the logged-on user's
@@ -552,6 +596,9 @@ static partial class Diagnostics
         GpScopeState.NoData => $"No Group Policy results recorded for the {scope.Name} scope (RSoP logging may be disabled)",
         _ => $"Could not read the {scope.Name} scope: {scope.Detail}",
     };
+
+    /// <summary>How long ago a UTC time was; zero for one in the future, as a clock a little ahead of the source gives.</summary>
+    internal static TimeSpan Age(DateTime utc, DateTime nowUtc) => nowUtc > utc ? nowUtc - utc : TimeSpan.Zero;
 
     public static string FormatTimeSpan(TimeSpan ts)
     {

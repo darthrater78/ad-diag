@@ -58,6 +58,127 @@ public class DnsRegistrationTests
         Assert.Empty(probe.SoaCalls);
     }
 
+    // The PC from the report: no primary suffix, IOT has nscriven.net and registers, Island has scrivtech.com and doesn't
+    static List<NetAdapter> SuffixedAdapters(bool useSuffix) =>
+    [
+        new("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net", RegistersSuffix: useSuffix),
+        new("Island Private Access", "Wintun Userspace Tunnel", false, false, [IPAddress.Parse("172.16.50.5")], [], DnsSuffix: "scrivtech.com", RegistersSuffix: true),
+    ];
+
+    [Fact]
+    public void NoPrimarySuffix_NamesTheAdapterSuffixesUsedOnlyForLookups()
+    {
+        var probe = Healthy();
+        probe.Identity = ("PROX-ENTRA", "");
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange(SuffixedAdapters(useSuffix: false));
+        var group = Run(probe);
+        Assert.Equal(Status.Warn, StatusOf(group, "Registration Name"));
+        string detail = DetailOf(group, "Registration Name");
+        Assert.StartsWith("Nothing is registered: PROX-ENTRA has no primary DNS suffix", detail);
+        Assert.Contains("\nIOT: nscriven.net — \"Use this connection's DNS suffix in DNS registration\" is off", detail);
+        Assert.Contains("\nIsland Private Access: scrivtech.com — \"Register this connection's addresses in DNS\" is off", detail);
+        // Nothing is registered, so the adapter list is not a pass
+        Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
+        Assert.Equal($"No registration name. Once there is one, these addresses are registered:\nIOT: {ClientIp}", DetailOf(group, "Registering Adapters"));
+        Assert.EndsWith("(with no name, Windows attempts no registration)", DetailOf(group, "Registration Errors"));
+    }
+
+    [Fact]
+    public void UsersPc_ClientAndLanBothRegister_NoContradictions()
+    {
+        // The report's screenshot: both adapters register addresses, neither registers its suffix, and Island has an
+        // address-less second interface that used to print "Island adapter" twice
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+            [IPAddress.Parse("3fff::"), IPAddress.Parse("172.16.50.5")], [IPAddress.Parse("127.73.83.76")], PointToPoint: true, DnsSuffix: "scrivtech.com");
+        var filter = new NetAdapter("Island Private Access-WFP Native MAC Layer LightWeight Filter-0000", "Island Private Access", false, false, [], []);
+        var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net");
+        var probe = Healthy();
+        probe.Identity = ("PROX-ENTRA", "");
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([island, filter, iot]);
+        var group = Run(probe);
+
+        Assert.Equal(Status.Info, StatusOf(group, "ZTNA / VPN Client"));
+        Assert.Equal("Island adapter (3fff::, 172.16.50.5); DNS answered by its local proxy (127.73.83.76)", DetailOf(group, "ZTNA / VPN Client"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
+        Assert.DoesNotContain("Behind the ZTNA client", DetailOf(group, "Registering Adapters"));
+        Assert.DoesNotContain(group.Tests, t => t.Status == Status.Pass && t.Name != "Registration Errors");
+        Assert.EndsWith("\n3fff:: is in a range reserved for documentation (a client's placeholder), which other hosts cannot route to",
+            DetailOf(group, "Registering Adapters"));
+
+        // With a name, Island registering its placeholder address is a warning, on top of the both-register note
+        probe.Identity = ("PROX-ENTRA", "nscriven.net");
+        group = Run(probe);
+        Assert.Equal(Status.Warn, StatusOf(group, "Registering Adapters"));
+        string detail = DetailOf(group, "Registering Adapters");
+        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", detail);
+        Assert.Contains("3fff:: is in a range reserved for documentation", detail);
+    }
+
+    [Theory]
+    [InlineData("3fff::", true)]
+    [InlineData("3fff:fff:ffff::1", true)]
+    [InlineData("3ffe::1", false)]
+    [InlineData("3fff:1000::1", false)]
+    [InlineData("2001:db8::5", true)]
+    [InlineData("2001:db9::5", false)]
+    [InlineData("192.0.2.10", true)]
+    [InlineData("198.51.100.1", true)]
+    [InlineData("203.0.113.99", true)]
+    [InlineData("172.16.50.5", false)]
+    public void Documentation_RangesAreRecognised(string ip, bool expected) =>
+        Assert.Equal(expected, Diagnostics.IsDocumentation(IPAddress.Parse(ip)));
+
+    [Fact]
+    public void ClientAndLanBothRegisterWithAName_IsANoteNamingTheLanAdapter()
+    {
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+            [IPAddress.Parse("172.16.50.5")], [DcIp], PointToPoint: true);
+        var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
+        var probe = Healthy();
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([island, iot]);
+        var group = Run(probe);
+        Assert.Equal(Status.Info, StatusOf(group, "Registering Adapters"));
+        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", DetailOf(group, "Registering Adapters"));
+
+        probe.NetAdapters.Remove(iot);
+        group = Run(probe);
+        Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
+        Assert.EndsWith("Island Private Access is the client's own adapter, so DNS gets the address servers reach this machine through",
+            DetailOf(group, "Registering Adapters"));
+    }
+
+    [Fact]
+    public void NoPrimarySuffix_RegistersWithTheAdapterSuffixWhenThatIsOn()
+    {
+        Assert.Equal([("PROX-ENTRA.nscriven.net", "IOT")], Diagnostics.RegistrationNames("PROX-ENTRA", "", SuffixedAdapters(useSuffix: true)));
+        Assert.Equal([("pc042.contoso.com", (string?)null), ("pc042.nscriven.net", "IOT")],
+            Diagnostics.RegistrationNames("pc042", "contoso.com", SuffixedAdapters(useSuffix: true)));
+        Assert.Equal([("pc042.nscriven.net", (string?)null)], Diagnostics.RegistrationNames("pc042", "nscriven.net", SuffixedAdapters(useSuffix: true)));
+    }
+
+    [Fact]
+    public void Adapters_OnePerLine_AndFilterCopiesDropped()
+    {
+        // The user's PC: Npcap's filter on the client adapter shows up as a second interface with the same addresses
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, false,
+            [IPAddress.Parse("3fff::1"), IPAddress.Parse("172.16.50.5")], [], PointToPoint: true);
+        var npcap = island with { Name = "Island Private Access-Npcap Packet Driver (NPCAP)-0000" };
+        var lan = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
+        var wifi = new NetAdapter("Wi-Fi", "Intel(R) Wi-Fi 6 AX201", false, true, [HomeIp], [DcIp]);
+        // A name that merely starts the same, with other addresses, is a real adapter
+        var other = new NetAdapter("IOT-2", "Red Hat VirtIO Ethernet Adapter #2", false, false, [IPAddress.Parse("10.9.9.9")], []);
+        Assert.Equal(["Island Private Access", "IOT", "Wi-Fi", "IOT-2"],
+            Diagnostics.DropFilterBindings([island, npcap, lan, wifi, other]).Select(a => a.Name));
+
+        var probe = new FakeProbe();
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([lan, wifi]);
+        Assert.Equal($"IOT: {ClientIp}\nWi-Fi: {HomeIp}", DetailOf(Run(probe), "Registering Adapters"));
+    }
+
     [Theory]
     [InlineData("100.64.0.0", true)]
     [InlineData("100.127.255.255", true)]
@@ -72,11 +193,11 @@ public class DnsRegistrationTests
     public void Ztna_DetectedByAdapterNameAndItsDnsProxy_IsInformational()
     {
         var group = Run(BehindZtna());
-        Assert.Equal(Status.Pass, StatusOf(group, "ZTNA / VPN Client"));
-        Assert.Equal("Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)", DetailOf(group, "ZTNA / VPN Client"));
+        Assert.Equal(Status.Info, StatusOf(group, "ZTNA / VPN Client"));
+        Assert.Equal("Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2)", DetailOf(group, "ZTNA / VPN Client"));
         // The home address is what gets registered; that is worth saying but is how ZTNA clients work
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
-        Assert.StartsWith("Wi-Fi: 192.168.1.50 — behind the ZTNA client", DetailOf(group, "Registering Adapters"));
+        Assert.StartsWith("Wi-Fi: 192.168.1.50\nBehind the ZTNA client", DetailOf(group, "Registering Adapters"));
         Assert.Equal(Status.Warn, StatusOf(group, "Registered Record")); // DNS still holds the office address
         Assert.Contains("the record is stale", DetailOf(group, "Registered Record"));
     }
@@ -157,7 +278,7 @@ public class DnsRegistrationTests
         probe.NetAdapters.Add(new("Acme Access", "Acme Access Virtual Adapter", false, false, [IPAddress.Parse("172.16.50.3")], [], Virtual: true));
         var group = Run(probe);
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
-        Assert.Contains("the client's own address (172.16.50.3) is not registered", DetailOf(group, "Registering Adapters"));
+        Assert.Contains("Not registered: Acme Access (172.16.50.3), the client's own adapter", DetailOf(group, "Registering Adapters"));
     }
 
     [Fact]
@@ -270,12 +391,12 @@ public class DnsRegistrationTests
     }
 
     [Fact]
-    public void Zone_PrimaryWithASyntheticAddressWarns_UnresolvablePrimaryFails()
+    public void Zone_PrimaryWithASyntheticAddressIsANote_UnresolvablePrimaryFails()
     {
         var probe = BehindZtna();
         probe.Hosts["dc01.contoso.com"] = [IPAddress.Parse("100.64.1.9")];
         var group = Run(probe);
-        Assert.Equal(Status.Warn, StatusOf(group, "Zone Primary Server"));
+        Assert.Equal(Status.Info, StatusOf(group, "Zone Primary Server"));
         Assert.Contains("synthetic 100.64.0.0/10 address", DetailOf(group, "Zone Primary Server"));
 
         probe.Hosts.Remove("dc01.contoso.com");
@@ -335,7 +456,7 @@ public class DnsRegistrationTests
     }
 
     [Fact]
-    public void Errors_RecentFailureEventsWarn_UnreadableLogWarns()
+    public void Errors_RecentFailureEventsWarn_UnreadableLogIsNotChecked()
     {
         var probe = Healthy();
         probe.DnsEvents = () => Samples.DnsClientEventsRefused;
@@ -345,7 +466,9 @@ public class DnsRegistrationTests
         Assert.Contains("refused the update request", DetailOf(group, "Registration Errors"));
 
         probe.DnsEvents = () => "ERROR|Access is denied";
-        Assert.Equal("Could not read the System event log: Access is denied", DetailOf(Run(probe), "Registration Errors"));
+        var unreadable = Run(probe);
+        Assert.Equal(Status.Skip, StatusOf(unreadable, "Registration Errors"));
+        Assert.Equal("Not checked: could not read the System event log: Access is denied", DetailOf(unreadable, "Registration Errors"));
     }
 
     // ── Register now ───────────────────────────────────────
@@ -412,7 +535,7 @@ public class DnsRegistrationTests
         Assert.Equal(Status.Warn, Step(steps, "Record After").Status);
         // Behind ZTNA the trace ends by saying what the tunnel has to carry
         Assert.Equal("ZTNA / VPN Client", steps[^1].Name);
-        Assert.Equal(Status.Warn, steps[^1].Status);
+        Assert.Equal(Status.Info, steps[^1].Status);
         Assert.Contains("TCP and UDP 53 to dc01.contoso.com", steps[^1].Detail);
     }
 
@@ -458,6 +581,52 @@ public class DnsRegistrationTests
         Assert.Equal([8015, 8018], result.Events.Select(e => e.Id));
         Assert.Equal(new DateTime(2026, 10, 5, 12, 2, 14, DateTimeKind.Utc), result.Events[0].TimeUtc);
         Assert.EndsWith("refused the update request.", result.Events[0].Message);
+    }
+
+    [Fact]
+    public void DnsClientEvent_OneFieldPerLine_AdapterNamed()
+    {
+        var probe = Healthy();
+        probe.NetAdapters[0] = probe.NetAdapters[0] with { Name = "IOT", Id = "{a0412fa8-7a7f-4fe1-98f3-b0fc91480be0}" };
+        probe.DnsEvents = () => Samples.DnsClientEventsWithData;
+        string detail = DetailOf(Run(probe), "Registration Errors");
+        string[] lines = detail.Split('\n');
+        Assert.StartsWith("1 in the last 24 hours; latest: event 8017 at ", lines[0]);
+        Assert.Equal([
+            "The system failed to register host (A or AAAA) resource records for network adapter with settings:",
+            "Adapter: IOT ({A0412FA8-7A7F-4FE1-98F3-B0FC91480BE0})",
+            "Host name: PROX-ONPREM",
+            "DNS suffix: scrivtech.com",
+            "DNS servers: 172.31.254.252",
+            "Sent update to: 173.245.59.63:53",
+            "Addresses: 172.31.254.20",
+            "Error code: 9004 (the server does not take dynamic updates)",
+            "Either the DNS server does not support the DNS dynamic update protocol or the authoritative zone for the specified DNS domain name does not accept dynamic updates.",
+        ], lines[1..]);
+    }
+
+    [Fact]
+    public void DnsClientEvent_WithoutDataOrInAnotherOrder_KeepsTheMessage()
+    {
+        var probe = Healthy();
+        probe.DnsEvents = () => Samples.DnsClientEventsRefused; // no DATA lines
+        Assert.EndsWith("refused the update request.", DetailOf(Run(probe), "Registration Errors"));
+        Assert.DoesNotContain("\n", DetailOf(Run(probe), "Registration Errors"));
+
+        // Values not in the (translated) message: the message as it is
+        probe.DnsEvents = () => "EVENTS|1\nEVT|8017|2026-10-23T18:56:00Z|Le système n'a pas pu inscrire\nDATA|AdapterName|{X1}\nDATA|HostName|PC9";
+        Assert.EndsWith("— Le système n'a pas pu inscrire", DetailOf(Run(probe), "Registration Errors"));
+    }
+
+    [Fact]
+    public void DnsClientEvent_TranslatedMessage_SplitsOnTheValues()
+    {
+        // French puts a space before each colon; the split still lands on the values
+        var probe = Healthy();
+        probe.DnsEvents = () => "EVENTS|1\nEVT|8017|2026-10-23T18:56:00Z|Échec de l'inscription avec les paramètres : Nom de la carte : {X1} Nom d'hôte : PC9 Le serveur a refusé.\n"
+            + "DATA|AdapterName|{X1}\nDATA|HostName|PC9";
+        string[] lines = DetailOf(Run(probe), "Registration Errors").Split('\n');
+        Assert.Equal(["Échec de l'inscription avec les paramètres :", "Adapter: {X1}", "Host name: PC9", "Le serveur a refusé."], lines[1..]);
     }
 
     [Theory]

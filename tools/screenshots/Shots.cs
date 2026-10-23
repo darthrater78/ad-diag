@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
@@ -47,13 +48,46 @@ static class Shots
 
     static void CaptureAll(MainForm form, string outDir)
     {
+        // Wine runs everything as Administrator; the screenshots show the usual unelevated app
+        form.Text = "AD Diagnostics";
+        foreach (var c in AllControls(form).Where(c => c.AccessibleName == "Running as administrator")) c.Visible = false;
+        Set(form, "_elevated", false);
+        // Before any run: the profile's sections, not run yet, with one opened to the checks it will make
+        Pump(800);
+        Set(form, "_profilePicked", true);
+        Call(form, "SetProfile", JoinProfile.Hybrid, true);
+        var preview = (DiagRun)form.GetType().GetProperty("SelectedRun", F)!.GetValue(form)!;
+        preview.Open["Domain Membership & Identity"] = true;
+        Call(form, "RerenderResults");
+        Pump(300);
+        Capture(form, outDir, "before-run.png");
         Pump(800);
         Populate(form);
-        form.Height = 1460;
+        // Tall enough for the two groups opened below
+        form.Height = 1120;
         Pump(800);
+        // Groups start closed; open two as a user would, to show their checks
+        var shown = (DiagRun)form.GetType().GetProperty("SelectedRun", F)!.GetValue(form)!;
+        shown.Open["DC Discovery & Connectivity"] = true;
+        shown.Open["Group Policy"] = true;
+        Call(form, "RerenderResults");
+        Pump(300);
+        // Put the pointer on one heading's run button to show its hover state
+        var canvas = Get<Control>(form, "_resultsCanvas");
+        var headings = (List<(string Group, Rectangle Band)>)canvas.GetType().GetField("Headings")!.GetValue(canvas)!;
+        var band = headings.Find(h => h.Group == "DC Discovery & Connectivity").Band;
+        Cursor.Position = canvas.PointToScreen(new Point(band.Right - 16, band.Top + 14));
+        Pump(300);
         Capture(form, outDir, "results.png");
         form.Height = 900;
         Pump(500);
+
+        // Where "See the fixes in the Guide" under a group that isn't ready leads
+        Call(form, "SwitchTab", "guide");
+        FrontFill(Get<RichTextBox>(form, "_guideBox"));
+        Call(form, "ShowGuideSection", Diagnostics.EntraSsoGroup);
+        Pump(500);
+        Capture(form, outDir, "guide-sso.png");
 
         Call(form, "SwitchTab", "gp");
         // Wine re-syncs the child order from its native z-order, which leaves the Runs bar in front of
@@ -72,6 +106,7 @@ static class Shots
         FrontFill(Get<Panel>(form, "_ticketsPanel"));
         var tb = Get<RichTextBox>(form, "_ticketsBox");
         tb.Clear();
+        Call(form, "RenderPrtCard", Diagnostics.PrtCardFor(Parsers.ParseDsreg(MockDsreg()), DateTime.UtcNow)!);
         var (headers, tickets) = Parsers.ParseKlist(MockKlist());
         foreach (var h in headers)
         {
@@ -88,7 +123,7 @@ static class Shots
 
         Call(form, "SwitchTab", "dns");
         FrontFill(Get<Panel>(form, "_dnsPanel"));
-        Set(form, "_dnsHeading", "Registering this computer in DNS, " + DateTime.Now.AddSeconds(-40).ToString("HH:mm:ss"));
+        Set(form, "_dnsHeading", "Registering this computer in DNS, " + DateTime.Now.AddSeconds(-40).ToString("T"));
         Get<List<TestEntry>>(form, "_dnsSteps").AddRange(MockDnsTrace());
         Call(form, "RenderDnsBox");
         Pump(500);
@@ -100,44 +135,144 @@ static class Shots
         Get<CheckBox>(form, "_chkDebug").Checked = true;
         log.Clear();
         MockLog(log);
+        // Everything starts folded; open it all as a reader would, except one section, to show both
+        var opened = Get<HashSet<object>>(form, "_logOpen");
+        foreach (var line in log.Since(0).Where(l => l.Block != null))
+        {
+            opened.Add(line.Block!);
+            if (line.Section is { } section && section != "Kerberos & Time Sync") opened.Add((line.Block!, section));
+        }
         Call(form, "RenderLog");
         Pump(500);
         Capture(form, outDir, "log.png");
+
+        // An Entra joined laptop: its profile hides the domain fields and sections, and the Intune policies tab
+        Call(form, "SetProfile", JoinProfile.Entra, false);
+        var entraHistory = Get<List<DiagRun>>(form, "_runHistory");
+        var entraRun = new DiagRun(DateTime.Now, "", "", MockEntraResults(DateTime.Now)) { Profile = JoinProfile.Entra };
+        entraRun.Open[Diagnostics.EntraSsoGroup] = true;
+        entraRun.Open[Diagnostics.CredentialsGroup] = true;
+        entraHistory.Insert(0, entraRun);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "SwitchTab", "results");
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Capture(form, outDir, "results-entra.png");
+
+        // Dynamic DNS Registration behind a ZTNA client, opened: the adapters, the client's placeholder address and
+        // a failure event one setting per line
+        var dnsRun = new DiagRun(DateTime.Now, "", "",
+            MockEntraResults(DateTime.Now).Select(g => g.Name == "Dynamic DNS Registration" ? MockZtnaRegistration(DateTime.Now) : g).ToList())
+            { Profile = JoinProfile.Entra };
+        dnsRun.Open["Dynamic DNS Registration"] = true;
+        entraHistory.Insert(0, dnsRun);
+        Set(form, "_selectedRunIndex", 0);
+        form.Height = 1000;
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Capture(form, outDir, "results-dns.png");
+        form.Height = 900;
+        entraHistory.RemoveAt(0);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(300);
+
+        Call(form, "SwitchTab", "intune");
+        FrontFill(Get<Panel>(form, "_intunePanel"));
+        var intune = Get<RichTextBox>(form, "_intuneBox");
+        intune.Clear();
+        Call(form, "AppendIntuneLine", "\n", Theme("TextColor"), false, false, null);
+        Get<HashSet<string>>(form, "_intuneOpen").Add("device"); // one section open, the others folded
+        Call(form, "RenderIntune", MockIntune(DateTime.UtcNow));
+        Get<Control>(form, "_btnIntuneSync").Enabled = true;
+        intune.SelectionStart = 0; intune.ScrollToCaret();
+        Pump(500);
+        Capture(form, outDir, "intune-policies.png");
+
+        // Back to the hybrid PC for the rest
+        Call(form, "SetProfile", JoinProfile.Hybrid, false);
+        entraHistory.Remove(entraRun);
+
+        // Last, since the menu stays open: a run started from one section, and the Run button's drop-down
+        var history = Get<List<DiagRun>>(form, "_runHistory");
+        var single = new DiagRun(DateTime.Now, "contoso.com", "DC01.contoso.com", MockResults(DateTime.Now, clockWarn: true)) { Profile = JoinProfile.Hybrid };
+        single.NotRun.UnionWith(single.Results.Select(g => g.Name).Where(n => n != "Kerberos & Time Sync"));
+        history.Insert(0, single);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "SwitchTab", "results");
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Call(form, "ShowRunMenu");
+        Pump(500);
+        Capture(form, outDir, "run-menu.png");
     }
 
     // A laptop at home behind a ZTNA client, whose record in DNS still holds its office address
     static List<TestEntry> MockDnsTrace() =>
     [
         new("Registration Name", Status.Pass, "PC042.contoso.com with 192.168.1.50"),
-        new("ZTNA / VPN Client", Status.Pass, "Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)"),
+        new("ZTNA / VPN Client", Status.Info, "Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2)"),
         new("Zone Primary Server", Status.Pass, "contoso.com -> dc01.contoso.com (10.20.0.11), answered by 100.64.0.2 (DNS server of Wi-Fi)"),
         new("Record Before", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale"),
         new("Send", Status.Pass, "ipconfig /registerdns ran: Windows IP Configuration Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer in 15 minutes."),
         new("Wait", Status.Skip, "Watching the server and the DNS Client event log for up to 30s"),
-        new("DNS Client Event", Status.Fail, $"event 8015 at {DateTime.Now.AddSeconds(-31):g} — The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings: Adapter Name : {{3F2A9B10-55C1-4E0B-9D7A-0C1E5A1B7F42}} Host Name : PC042 Primary Domain Suffix : contoso.com DNS server list : 100.64.0.2 Sent update to server : 10.20.0.11 IP Address(es) : 192.168.1.50 The reason the system could not register these RRs was because the update request it sent to the DNS server timed out."),
+        new("DNS Client Event", Status.Fail, $"event 8015 at {DateTime.Now.AddSeconds(-31):g}\nThe system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings:\nAdapter: Wi-Fi ({{3F2A9B10-55C1-4E0B-9D7A-0C1E5A1B7F42}})\nHost name: PC042\nDNS suffix: contoso.com\nDNS servers: 100.64.0.2\nSent update to: 10.20.0.11\nAddresses: 192.168.1.50\nError code: 1460 (timed out)\nThe reason the system could not register these RRs was because the update request it sent to the DNS server timed out."),
         new("Record After", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale — Windows logged a registration failure (above)"),
-        new("ZTNA / VPN Client", Status.Warn, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and TCP and UDP 53 to dc01.contoso.com to pass the tunnel as real traffic, not through the client's DNS proxy"),
+        new("ZTNA / VPN Client", Status.Info, "Through a ZTNA or VPN client a secure update needs Kerberos (port 88 to a domain controller) and TCP and UDP 53 to dc01.contoso.com to pass the tunnel as real traffic, not through the client's DNS proxy"),
     ];
 
     static void MockLog(DiagLog log)
     {
+        const string dcd = "DC Discovery & Connectivity", krb = "Kerberos & Time Sync", reg = "Dynamic DNS Registration";
+        var now = DateTime.Now;
         log.Info("log", "Debug logging on: commands, timings and raw tool output are recorded");
+
+        // A full run: its sections ran side by side, so their lines arrived interleaved
+        var run = new LogBlock($"Run {now.AddSeconds(-40):T}", "contoso.com · DC01.contoso.com · all sections") { Totals = "32 passed · 0 failed · 1 warning · 1 note" };
+        run.SectionNotes[dcd] = "9 checks · 1 note";
+        run.SectionNotes[krb] = "3 checks";
+        run.SectionNotes[reg] = "7 checks · 1 warning";
+        DiagLog.Block = run;
         log.Info("run", "Started: domain contoso.com, DC DC01.contoso.com");
+        DiagLog.Section = reg;
         log.Debug("machine", "Host name and primary DNS suffix (0 ms)\nPC042, suffix \"contoso.com\"");
-        log.Debug("machine", "Network adapters (3 ms)\nWi-Fi [Intel(R) Wi-Fi 6 AX201 160MHz]: addresses 192.168.1.50; DNS servers 100.64.0.2; registers in DNS: yes\n"
-            + "Ethernet 3 [Zscaler Network Adapter 1.0.2.0]: addresses 100.64.0.7; DNS servers 100.64.0.2; registers in DNS: no");
-        log.Debug("dns", "SOA PC042.contoso.com from 100.64.0.2 (41 ms)\nno record");
+        DiagLog.Section = dcd;
+        log.Debug("tool", "nltest /dsgetdc:contoso.com (1270 ms)\n           DC: \\\\DC01.contoso.com\n      Address: \\\\10.20.0.11\n Dc Site Name: HQ-Seattle\nThe command completed successfully");
+        DiagLog.Section = reg;
         log.Debug("dns", "SOA contoso.com from 100.64.0.2 (62 ms)\nzone contoso.com, primary server dc01.contoso.com");
-        log.Debug("tool", "nltest /dsgetdc:contoso.com (1270 ms)\n           DC: \\\\DC01.contoso.com\n      Address: \\\\10.20.0.11\n     Dom Guid: 6f1c2a54-9b1e-4a37-8f0d-2c5e7a903b11\n     Dom Name: contoso.com\n  Forest Name: contoso.com\n Dc Site Name: HQ-Seattle\nThe command completed successfully");
+        DiagLog.Section = dcd;
         log.Debug("tcp", "Connect 10.20.0.11 port 53: open (38 ms)");
         log.Debug("tcp", "Connect 10.20.0.11 port 636: no answer (3001 ms)");
+        DiagLog.Section = reg;
         log.Debug("dns", "A/AAAA PC042.contoso.com from 10.20.0.11 (57 ms)\n10.20.4.18");
-        log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
-        log.Info("result", "Warning  DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11)");
-        log.Info("result", "Passed   Dynamic DNS Registration / Zone Primary Server: contoso.com -> dc01.contoso.com (10.20.0.11), answered by 100.64.0.2 (DNS server of Wi-Fi)");
         log.Info("result", "Warning  Dynamic DNS Registration / Registered Record: dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale");
-        log.Info("run", "Complete: 32 passed, 0 failed, 3 warnings");
+        DiagLog.Section = krb;
+        log.Info("tool", "w32tm /stripchart /computer:DC01.contoso.com /samples:1 /dataonly failed after 5012 ms: w32tm timed out after 5s (TimeoutException)");
+        log.Info("result", "Skipped  Kerberos & Time Sync / Clock Skew: Not checked: could not measure (DC unreachable?)");
+        DiagLog.Section = dcd;
+        log.Info("result", "Info     DC Discovery & Connectivity / Port 636 (LDAPS): Unreachable at DC01.contoso.com (10.20.0.11); optional, often closed on purpose, and not needed to sign in");
+        DiagLog.Section = null;
+        log.Info("run", "Complete: 32 passed, 0 failed, 1 warning, 1 note");
+
+        // One section run again on its own
+        var single = new LogBlock($"Group Policy {now.AddSeconds(-12):T}", "contoso.com · DC01.contoso.com · run on its own") { Totals = "3 passed · 0 failed · 0 warnings" };
+        single.SectionNotes["Group Policy"] = "3 checks";
+        DiagLog.Block = single;
+        log.Info("run", "Started Group Policy: domain contoso.com, DC DC01.contoso.com");
+        DiagLog.Section = "Group Policy";
+        log.Debug("tool", "RSoP query (840 ms)\n2 computer GPOs, 3 user GPOs");
+        log.Info("result", "Passed   Group Policy / GP Last Refresh: 1h 12m ago");
+        DiagLog.Section = null;
+        log.Info("run", "Complete Group Policy: 3 passed, 0 failed, 0 warnings");
+        DiagLog.Block = null;
     }
+
+    static IEnumerable<Control> AllControls(Control root) =>
+        root.Controls.Cast<Control>().SelectMany(c => AllControls(c).Prepend(c));
 
     static void FrontFill(Control fill)
     {
@@ -165,14 +300,18 @@ static class Shots
 
     static void Populate(MainForm form)
     {
+        Set(form, "_profilePicked", true);
+        Call(form, "SetProfile", JoinProfile.Hybrid, true);
         Get<TextBox>(form, "_txtDomain").Text = "contoso.com";
         Get<TextBox>(form, "_txtDc").Text = "DC01";
 
         var history = Get<List<DiagRun>>(form, "_runHistory");
         var now = DateTime.Now;
-        history.Insert(0, new DiagRun(now.AddMinutes(-42), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
-        history.Insert(0, new DiagRun(now.AddMinutes(-17), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)));
-        history.Insert(0, new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false)));
+        history.Insert(0, new DiagRun(now.AddMinutes(-42), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)) { Profile = JoinProfile.Hybrid });
+        history.Insert(0, new DiagRun(now.AddMinutes(-17), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: true)) { Profile = JoinProfile.Hybrid });
+        var latest = new DiagRun(now.AddSeconds(-20), "contoso.com", "DC01.contoso.com", MockResults(now, clockWarn: false)) { Profile = JoinProfile.Hybrid };
+        latest.RanAt[Diagnostics.EntraSsoGroup] = now.AddSeconds(-4); // run again on its own
+        history.Insert(0, latest);
         Set(form, "_selectedRunIndex", 0);
         Call(form, "ShowSelectedRun");
         Call(form, "RebuildHistoryBar");
@@ -197,7 +336,7 @@ static class Shots
             [
                 new("Locate DC", Status.Pass, $"Found {dc}"),
                 new("Port 389 (LDAP)", Status.Pass, $"Reachable at {dc} ({ip})"),
-                new("Port 636 (LDAPS)", Status.Warn, $"Unreachable at {dc} ({ip})"),
+                new("Port 636 (LDAPS)", Status.Info, $"Unreachable at {dc} ({ip}); optional, often closed on purpose, and not needed to sign in"),
                 new("Port 88 (Kerberos)", Status.Pass, $"Reachable at {dc} ({ip})"),
                 new("Port 445 (SMB)", Status.Pass, $"Reachable at {dc} ({ip})"),
                 new("Port 135 (RPC)", Status.Pass, $"Reachable at {dc} ({ip})"),
@@ -220,9 +359,10 @@ static class Shots
             ]),
             new("Group Policy",
             [
-                new("GP Last Refresh", Status.Pass, $"Computer: {gpTime} (1h 12m ago)"),
-                new("Applied GPOs", Status.Pass, "Computer: 5 GPO(s) applied"),
-                new("Denied GPOs", Status.Pass, "Computer: 2 GPO(s) filtered out (informational)"),
+                // Not elevated, so only the user scope could be read
+                new("GP Last Refresh", Status.Pass, $"User: {gpTime} (1h 12m ago) (run as Administrator for Computer scope)") { NeedsAdmin = true },
+                new("Applied GPOs", Status.Pass, "User: 3 GPO(s) applied (run as Administrator for Computer scope)") { NeedsAdmin = true },
+                new("Denied GPOs", Status.Pass, "User: 1 GPO(s) filtered out (informational) (run as Administrator for Computer scope)") { NeedsAdmin = true },
             ]),
             new("Trust Relationships",
             [
@@ -235,6 +375,7 @@ static class Shots
                     ? new("Clock Skew", Status.Warn, $"74.31s drift from {dc}")
                     : new("Clock Skew", Status.Pass, $"0.04s drift from {dc}"),
                 new("Time Source", Status.Pass, dc),
+                new("krbtgt Key", Status.Pass, $"krbtgt key last set {now.AddDays(-96):d} (96d ago)"),
             ]),
             new("Dynamic DNS Registration",
             [
@@ -246,7 +387,132 @@ static class Shots
                 new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
                 new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
             ]),
+            // A hybrid joined PC without a PRT, so it signs in through Seamless SSO, whose address Group Policy never
+            // put in the intranet zone
+            new(Diagnostics.EntraSsoGroup,
+            [
+                new("Join Type", Status.Pass, "Microsoft Entra hybrid joined (DomainJoined: YES, AzureAdJoined: YES), tenant Contoso"),
+                new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
+                new("Primary Refresh Token", Status.Warn, "AzureAdPrt: NO; browsers fall back to Seamless SSO"),
+                new("Seamless SSO Ticket", Status.Pass, "HTTP/autologon.microsoftazuread-sso.com obtained from CONTOSO.COM"),
+                new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, not Local intranet: browsers and apps that follow the Windows zones won't send it a Kerberos ticket, so Seamless SSO can't sign them in"),
+                new("Automatic Logon", Status.Skip, "Depends on the Intranet Zone check"),
+                new("Status Bar Scripts", Status.Skip, "Depends on the Intranet Zone check"),
+                new("Seamless SSO Key", Status.Warn, $"AZUREADSSOACC$ key last set {now.AddDays(-212):d} (212d ago); roll it over at least every 30 days (Update-AzureADSSOForest)"),
+                new("Entra Endpoints", Status.Pass, "login.microsoftonline.com and autologon.microsoftazuread-sso.com reachable on port 443"),
+            ], new Readiness(Status.Fail, "Not ready for Seamless SSO.", true)),
+            new(Diagnostics.CredentialsGroup,
+            [
+                new("Windows Hello", Status.Pass, "Set up for this user (NgcSet: YES)"),
+                new("Hello Trust", Status.Pass, "Cloud Kerberos trust, set by Group Policy"),
+                new("Sign-in Methods", Status.Pass, "PIN, fingerprint"),
+                new("TPM", Status.Pass, "TPM 2.0; the device key is protected by it (TpmProtected: YES)"),
+                new("Ticket Encryption", Status.Warn, "RC4 on MSSQLSvc/sql01.contoso.com:1433; set the accounts to AES (msDS-SupportedEncryptionTypes)"),
+                new("Saved Credentials", Status.Pass, "No saved Windows credentials for servers"),
+            ]),
+            new(Diagnostics.IntuneGroup,
+            [
+                new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),
+                new("Last Sync", Status.Pass, $"Last successful sync {now.AddMinutes(-28):g} (28m ago)"),
+                new("Management Extension", Status.Pass, "Intune Management Extension service running"),
+                new("Device Policies", Status.Pass, "38 settings from Microsoft Intune in 9 areas (BitLocker, Defender, DeviceLock, ...)"),
+            ]),
         ];
+    }
+
+    // An Entra joined laptop behind Island: both adapters register, the client's adapter with its 3fff:: placeholder,
+    // and the DNS server refuses the update. The texts are the app's own, as DnsRegistration.cs writes them.
+    static TestGroup MockZtnaRegistration(DateTime now) => new("Dynamic DNS Registration",
+    [
+        new("Registration Name", Status.Pass, "LT-0417.contoso.com (Ethernet)"),
+        new("ZTNA / VPN Client", Status.Info, "Island adapter (3fff::, 172.16.50.3); DNS answered by its local proxy (127.73.83.76)"),
+        new("Registering Adapters", Status.Warn, "Island Private Access: 3fff::, 172.16.50.3\nEthernet: 10.20.4.18\n"
+            + "Both the client's adapter (Island Private Access) and Ethernet register, so DNS holds both; servers that reach this machine "
+            + "through the client cannot use Ethernet's address. To register only the client's, turn off \"Register this connection's "
+            + "addresses in DNS\" on Ethernet\n3fff:: is in a range reserved for documentation (a client's placeholder), which other hosts cannot route to"),
+        new("Zone Primary Server", Status.Pass, "contoso.com -> dc01.contoso.com (10.20.0.11), answered by 127.73.83.76 (DNS server of Island Private Access)"),
+        new("Update Path (Port 53)", Status.Pass, "dc01.contoso.com (10.20.0.11) reachable over TCP"),
+        new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
+        new("Registration Errors", Status.Warn, $"3 in the last 24 hours; latest: event 8015 at {now.AddMinutes(-42):g}\n"
+            + "The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings:\n"
+            + "Adapter: Island Private Access ({7C1D44E2-0B9A-4C6F-8E21-5A3F9B60D218})\nHost name: LT-0417\nDNS suffix: contoso.com\n"
+            + "DNS servers: 127.73.83.76\nSent update to: 10.20.0.11:53\nAddresses: 3fff::, 172.16.50.3\nError code: 9005 (refused)\n"
+            + "The reason the system could not register these RRs was because the DNS server contacted refused the update request."),
+    ]);
+
+    // An Entra joined laptop: only the sections that apply to it
+    static List<TestGroup> MockEntraResults(DateTime now) =>
+    [
+        new("Dynamic DNS Registration",
+        [
+            new("Registration Name", Status.Pass, "LT-0417"),
+            new("ZTNA / VPN Client", Status.Info, "Zscaler Client Connector adapter detected (Zscaler Network Adapter 1.0.2.0)"),
+            new("Registering Adapters", Status.Pass, "Wi-Fi: 192.168.1.44"),
+            new("Zone Primary Server", Status.Pass, "home.arpa -> router.home.arpa (192.168.1.1), answered by 192.168.1.1 (DNS server of Wi-Fi)"),
+            new("Update Path (Port 53)", Status.Pass, "router.home.arpa (192.168.1.1) reachable over TCP"),
+            new("Registered Record", Status.Warn, "router.home.arpa has no A or AAAA record for LT-0417.home.arpa"),
+            new("Registration Errors", Status.Pass, "No DNS Client registration errors in the last 24 hours"),
+        ]),
+        new(Diagnostics.EntraSsoGroup,
+        [
+            new("Join Type", Status.Pass, "Microsoft Entra joined (AzureAdJoined: YES, DomainJoined: NO), tenant Contoso"),
+            new("Device Auth", Status.Pass, "DeviceAuthStatus: SUCCESS"),
+            new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, renewed {now.AddHours(-3):g} (3h 0m ago)"),
+            new("Cloud Kerberos", Status.Pass, "CloudTgt: YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources"),
+            new("On-premises Kerberos", Status.Pass, "OnPremTgt: YES, a ticket for AD resources through cloud Kerberos trust"),
+            new("Cloud Trust Groups", Status.Pass, "No group membership blocks cloud Kerberos trust for this account"),
+            new("Cloud Kerberos Key", Status.Pass, $"krbtgt_AzureAD key last set {now.AddDays(-41):d} (41d ago)"),
+            new("Entra Endpoints", Status.Pass, "login.microsoftonline.com reachable on port 443"),
+        ], new Readiness(Status.Pass, "Ready for single sign-on.", false)),
+        new(Diagnostics.CredentialsGroup,
+        [
+            new("Windows Hello", Status.Pass, "Set up for this user (NgcSet: YES)"),
+            new("Hello Trust", Status.Pass, "Cloud Kerberos trust, set by Intune"),
+            new("Sign-in Methods", Status.Pass, "PIN, face"),
+            new("TPM", Status.Pass, "TPM 2.0; the device key is protected by it (TpmProtected: YES)"),
+            new("Ticket Encryption", Status.Pass, "All 3 cached tickets use AES"),
+            new("Saved Credentials", Status.Warn, "1 saved Windows credential (fs01.contoso.com); a saved password replaces single sign-on there and locks the account out once it goes stale"),
+        ]),
+        new(Diagnostics.IntuneGroup,
+        [
+            new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),
+            new("Last Sync", Status.Pass, $"Last successful sync {now.AddMinutes(-28):g} (28m ago)"),
+            new("Management Extension", Status.Info, "Not installed; Intune adds it with the first Win32 app, script or remediation"),
+            new("Device Policies", Status.Pass, "6 settings from Microsoft Intune in 3 areas (BitLocker, Defender, Update); 1 set by another provider instead"),
+        ]),
+    ];
+
+    // What the Intune policies tab shows for the same laptop
+    static IntuneState MockIntune(DateTime nowUtc)
+    {
+        var enrollment = new MdmEnrollment("5A1B2C3D-0000-4000-8000-000000000042", "MS DM Server", 1, "jdoe@contoso.com");
+        List<MdmSetting> device =
+        [
+            new("BitLocker", "RequireDeviceEncryption", "1", true, null),
+            new("BitLocker", "EncryptionMethodByDriveType", "<enabled/><data id=\"EncryptionMethodWithXtsOsDropDown_Name\" value=\"7\"/>", true, null),
+            new("LocalUsersAndGroups", "Configure", Diagnostics.DescribeGroupConfiguration("LocalUsersAndGroups", "Configure",
+                "<GroupConfiguration><accessgroup desc=\"S-1-5-32-544\"><group action=\"U\" /><add member=\"S-1-12-1-3655296493-1187120100-2401813136-1528714871\"/>"
+                + "<add member=\"S-1-12-1-1186921468-1311707598-3826263997-2380512583\"/></accessgroup></GroupConfiguration>")!, true, null),
+            new("Defender", "AllowRealtimeMonitoring", "1", true, null),
+            new("Defender", "AllowCloudProtection", "1", true, null),
+            new("Defender", "CloudBlockLevel", "2", false, "{0F2A9B11-0000-4000-8000-0000000000AA}"),
+            new("Update", "ActiveHoursStart", "8", true, null),
+            new("Update", "DeferQualityUpdatesPeriodInDays", "3", true, null),
+        ];
+        List<MdmSetting> user =
+        [
+            new("Edge", "HomepageLocation", "https://intranet.contoso.com", true, null),
+            new("OneDrive", "KFMSilentOptIn", "72f988bf-0000-4000-8000-000000000001", true, null),
+        ];
+        var apps = new List<MdmApp>
+        {
+            new("0C295A70-0C7C-451D-8D2D-C15DFCF7B226", "Microsoft Intune Management Extension", "1.106.151.0", 70, 0, false, "IntuneWindowsAgent.msi", true),
+            new("A99DF952-D7EE-44E9-B277-A9881EAC57B0", "IntuneWindowsAgent.msi", "1.106.106.0", 70, 0, false, "IntuneWindowsAgent.msi"),
+            new("DDF6D6BF-887E-4EB3-A89D-2C153BAF3256", "IntuneWindowsAgent.msi", "1.105.103.0", 70, 0, false, "IntuneWindowsAgent.msi"),
+            new("6A7DFC50-0395-4E1E-BF84-ED1404E72051", "Contoso VPN Client", "4.2.1.0", 70, 0, false, "ContosoVpn.msi", true),
+            new("7ECACCD0-8601-4884-8860-7A4ADF4ED814", "ContosoTimesheet.msi", "2.0.0.0", 60, unchecked((int)0x80070643), true, "ContosoTimesheet.msi"),
+        };
+        return new(enrollment, nowUtc.AddMinutes(-28), null, null, null, null, device, user, null, apps, null);
     }
 
     static string MockRsop()
@@ -273,6 +539,23 @@ static class Shots
             G("User", "{8A4B2D33-0003-4C8F-8D2E-3A7C9F5B2003}", 3, "1|1|0|1", "Desktop Wallpaper"),
             G("User", "{8A4B2D33-0004-4C8F-8D2E-3A7C9F5B2004}", 0, "0|1|0|1", "Legacy Printer Deployment"),
         ]);
+    }
+
+    // A hybrid joined PC whose Primary Refresh Token was renewed an hour ago
+    static string MockDsreg()
+    {
+        string Utc(TimeSpan offset) => (DateTime.UtcNow + offset).ToString("yyyy-MM-dd HH:mm:ss.000 'UTC'", CultureInfo.InvariantCulture);
+        return $"""
+                     AzureAdJoined : YES
+                      DomainJoined : YES
+                        TenantName : Contoso
+                        AzureAdPrt : YES
+              AzureAdPrtUpdateTime : {Utc(TimeSpan.FromHours(-1))}
+              AzureAdPrtExpiryTime : {Utc(TimeSpan.FromDays(14) - TimeSpan.FromHours(1))}
+               AzureAdPrtAuthority : https://login.microsoftonline.com/72f988bf-0000-4000-8000-000000000001
+                         OnPremTgt : NO
+                          CloudTgt : NO
+            """;
     }
 
     static string MockKlist()

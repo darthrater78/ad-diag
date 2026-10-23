@@ -63,6 +63,7 @@ REGEDIT4
 
 [HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements]
 "Segoe UI"="Selawik"
+"Segoe UI Symbol"="Selawik"
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Fonts]
 "Selawik (TrueType)"="selawk.ttf"

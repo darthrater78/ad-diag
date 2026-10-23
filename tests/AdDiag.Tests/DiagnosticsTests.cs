@@ -16,6 +16,8 @@ public class DiagnosticsTests
         // Keyed by the start of "tool arguments"; a tool with no entry behaves as one that never answers
         public Dictionary<string, string> Tools = new();
         public List<string> ToolCalls = [];
+        // Every key set 10 days ago
+        public string KeyAges = $"KEY|AZUREADSSOACC$|{DateTime.UtcNow.AddDays(-10):o}\nKEY|krbtgt_AzureAD|{DateTime.UtcNow.AddDays(-10):o}\nKEY|krbtgt|{DateTime.UtcNow.AddDays(-10):o}";
         public string PasswordAge = $"OK|contoso.com|{DateTime.UtcNow.AddDays(-10):o}";
         public string Rsop = $"SCOPE|Computer|OK|{DateTime.UtcNow.AddHours(-1):o}|HQ\nGPO|Computer|{{A}}|1|1|1|0|1|Default Domain Policy\nGPO|Computer|{{B}}|0|1|1|1|1|Server Hardening";
         public Dictionary<string, IPAddress[]> Hosts = new(StringComparer.OrdinalIgnoreCase);
@@ -55,6 +57,8 @@ public class DiagnosticsTests
                 DnsEventQueries++;
                 return DnsEvents();
             }
+            if (script.Contains("KEY|")) return KeyAges;
+            if (script.Contains("DENY")) return CloudTrust;
             return script.Contains("pwdLastSet") ? PasswordAge : Rsop;
         }
 
@@ -98,6 +102,40 @@ public class DiagnosticsTests
         }
 
         public bool IsElevated() => Elevated;
+
+        // The Seamless SSO URL in the Local intranet zone, automatic logon in the intranet zone, status bar scripts allowed
+        public UrlSecurity Url = new(1, 0x20000, 0);
+        public Exception? UrlError;
+
+        public UrlSecurity UrlSecurity(string url, CancellationToken ct) => UrlError != null ? throw UrlError : Url;
+
+        // HKLM, keyed by path (case-insensitive); a key listed in Denied throws as a standard user would see it
+        public Dictionary<string, Dictionary<string, object>> Registry = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> Denied = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, int> Services = new(StringComparer.OrdinalIgnoreCase);
+        public string? Sid = "S-1-12-1-1000";
+
+        public string[]? RegistrySubKeys(string hklmPath)
+        {
+            if (Denied.Contains(hklmPath)) throw new UnauthorizedAccessException($"Access to {hklmPath} is denied");
+            string prefix = hklmPath.TrimEnd('\\') + "\\";
+            var subkeys = Registry.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(k => k[prefix.Length..].Split('\\')[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return subkeys.Length > 0 || Registry.ContainsKey(hklmPath) ? subkeys : null;
+        }
+
+        public Dictionary<string, object>? RegistryValues(string hklmPath) =>
+            Denied.Contains(hklmPath) ? throw new UnauthorizedAccessException($"Access to {hklmPath} is denied")
+            : Registry.TryGetValue(hklmPath, out var values) ? values
+            : RegistrySubKeys(hklmPath) != null ? [] : null;
+
+        public int? ServiceState(string name) => Services.TryGetValue(name, out int state) ? state : null;
+        public string? CurrentUserSid() => Sid;
+        public int? Tpm = 2;
+        public string? Upn = "jdoe@contoso.com";
+        public string? CurrentUserUpn() => Upn;
+        public string CloudTrust = "USER|S-1-5-21-1-2-3-1105\nGROUP|S-1-5-21-1-2-3-513\nDENY|S-1-5-21-1-2-3-512|Domain Admins\nALLOW|S-1-5-21-1-2-3-513|Domain Users";
+        public int? TpmVersion() => Tpm;
     }
 
     // A machine where everything works
@@ -142,7 +180,7 @@ public class DiagnosticsTests
             Diagnostics.TestGroupPolicy(Config(), probe), Diagnostics.TestTrusts(Config(), probe),
             Diagnostics.TestKerberosAndTime(Config(), probe), Diagnostics.TestDnsRegistration(Config(), probe),
         };
-        Assert.Equal(35, groups.Sum(g => g.Tests.Count));
+        Assert.Equal(36, groups.Sum(g => g.Tests.Count));
         Assert.All(groups.SelectMany(g => g.Tests), t => Assert.True(t.Status == Status.Pass, $"{t.Name}: {t.Status} — {t.Detail}"));
     }
 
@@ -154,9 +192,9 @@ public class DiagnosticsTests
         Assert.Equal(5, group.Tests.Count);
         Assert.Equal(Status.Fail, StatusOf(group, "Domain Joined"));
         Assert.Contains("timed out", DetailOf(group, "Domain Joined"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Secure Channel"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Site Assignment"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Computer Password Age"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Secure Channel"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Site Assignment"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Computer Password Age"));
         Assert.Equal(Status.Pass, StatusOf(group, "Logged-on User"));
     }
 
@@ -172,13 +210,41 @@ public class DiagnosticsTests
 
     [Theory]
     [InlineData(Samples.NltestScVerifyBroken, "Fail")]
-    [InlineData(Samples.NltestScVerifyAccessDenied, "Warn")]
+    [InlineData(Samples.NltestScVerifyAccessDenied, "Skip")]
     public void Membership_SecureChannelVerdict(string nltest, string expected)
     {
         var probe = Healthy();
         probe.Tools["nltest /sc_verify"] = nltest;
         Assert.Equal(expected, StatusOf(Diagnostics.TestDomainMembership(Config(), probe), "Secure Channel").ToString());
     }
+
+    [Theory]
+    [InlineData(Samples.NltestScVerifyAccessDenied, true)]
+    [InlineData(Samples.NltestScVerifyBroken, false)]
+    public void Membership_SecureChannelDenied_IsMarkedNeedsAdmin(string nltest, bool needsAdmin)
+    {
+        var probe = Healthy();
+        probe.Tools["nltest /sc_verify"] = nltest;
+        var group = Diagnostics.TestDomainMembership(Config(), probe);
+        Assert.Equal(needsAdmin, group.Tests.Single(t => t.Name == "Secure Channel").NeedsAdmin);
+        Assert.False(group.Tests.Single(t => t.Name == "Domain Joined").NeedsAdmin);
+        // Before a run, the app marks it from this list
+        Assert.All(group.Tests.Where(t => t.NeedsAdmin), t => Assert.Contains(t.Name, Diagnostics.AdminChecks));
+    }
+
+    [Fact]
+    public void GroupPolicy_ComputerScopeDenied_MarksEveryRowNeedsAdmin()
+    {
+        var probe = new FakeProbe { Rsop = $"SCOPE|Computer|DENIED\nSCOPE|User|OK|{DateTime.UtcNow.AddHours(-1):o}|HQ\nGPO|User|{{A}}|1|1|1|0|1|Drive Maps" };
+        var group = Diagnostics.TestGroupPolicy(Config(), probe);
+        Assert.All(group.Tests, t => Assert.True(t.NeedsAdmin));
+        Assert.All(group.Tests, t => Assert.Contains(t.Name, Diagnostics.AdminChecks));
+        Assert.Equal(Status.Pass, StatusOf(group, "Applied GPOs"));
+    }
+
+    [Fact]
+    public void GroupPolicy_Elevated_MarksNothing() =>
+        Assert.All(Diagnostics.TestGroupPolicy(Config(), new FakeProbe()).Tests, t => Assert.False(t.NeedsAdmin));
 
     [Theory]
     [InlineData(10, "Pass")]
@@ -192,14 +258,17 @@ public class DiagnosticsTests
     }
 
     [Fact]
-    public void DcConnectivity_RequiredPortClosedFails_OptionalPortClosedWarns()
+    public void DcConnectivity_RequiredPortClosedFails_RpcWarns_LdapsIsANote()
     {
         var probe = Healthy();
         probe.OpenPorts.Remove(445);
+        probe.OpenPorts.Remove(135);
         probe.OpenPorts.Remove(636);
         var group = Diagnostics.TestDcConnectivity(Config(), probe);
         Assert.Equal(Status.Fail, StatusOf(group, "Port 445 (SMB)"));
-        Assert.Equal(Status.Warn, StatusOf(group, "Port 636 (LDAPS)"));
+        Assert.Equal(Status.Warn, StatusOf(group, "Port 135 (RPC)"));
+        Assert.Equal(Status.Info, StatusOf(group, "Port 636 (LDAPS)"));
+        Assert.Contains("not needed to sign in", DetailOf(group, "Port 636 (LDAPS)"));
         Assert.Equal(Status.Pass, StatusOf(group, "Port 389 (LDAP)"));
     }
 
@@ -284,10 +353,11 @@ public class DiagnosticsTests
     }
 
     [Fact]
-    public void GroupPolicy_NoResults_WarnsAndSkips()
+    public void GroupPolicy_NoResults_IsNotChecked()
     {
         var group = Diagnostics.TestGroupPolicy(Config(), new FakeProbe { Rsop = "" });
-        Assert.Equal(Status.Warn, StatusOf(group, "GP Last Refresh"));
+        Assert.Equal(Status.Skip, StatusOf(group, "GP Last Refresh"));
+        Assert.StartsWith("Not checked:", DetailOf(group, "GP Last Refresh"));
         Assert.Equal(Status.Skip, StatusOf(group, "Applied GPOs"));
         Assert.Equal(Status.Skip, StatusOf(group, "Denied GPOs"));
     }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -11,7 +12,28 @@ using System.Threading.Tasks;
 #nullable enable
 namespace AdDiag;
 
-record LogLine(long Seq, DateTime Time, bool Debug, string Source, string Message);
+/// <summary>
+/// A run or another action (a Group Policy query, a DNS registration) whose lines the log shows under one heading.
+/// Set <see cref="DiagLog.Block"/> to it at the start of an async method: every line logged by that method, and by
+/// the tasks and threads it starts, joins it.
+/// </summary>
+sealed class LogBlock(string title, string detail)
+{
+    public string Title { get; } = title;
+    public string Detail { get; } = detail;
+    /// <summary>The outcome once it is known, such as "32 passed · 0 failed · 3 warnings".</summary>
+    public string? Totals { get; set; }
+    /// <summary>Each section's counts once it has finished, by section name.</summary>
+    public ConcurrentDictionary<string, string> SectionNotes { get; } = new();
+}
+
+record LogLine(long Seq, DateTime Time, bool Debug, string Source, string Message, LogBlock? Block = null, string? Section = null);
+
+/// <summary>One row of the log as shown: a block's heading, a section's heading inside a block, or a line.</summary>
+abstract record LogItem;
+sealed record LogBlockHeading(LogBlock Block) : LogItem;
+sealed record LogSectionHeading(LogBlock Block, string Section) : LogItem;
+sealed record LogEntry(LogLine Line) : LogItem;
 
 /// <summary>
 /// The app's log: what it did and what came back. Held in memory only (the app writes nothing to disk unless the
@@ -31,6 +53,21 @@ sealed class DiagLog(Func<DateTime>? clock = null)
     volatile bool _debug;
 
     public bool DebugEnabled { get => _debug; set => _debug = value; }
+
+    static readonly AsyncLocal<LogBlock?> CurrentBlock = new();
+    static readonly AsyncLocal<string?> CurrentSection = new();
+
+    /// <summary>The block that lines logged from here join; it flows into the tasks and threads started from here.</summary>
+    public static LogBlock? Block { get => CurrentBlock.Value; set => CurrentBlock.Value = value; }
+
+    /// <summary>The results section that lines logged from here belong to, within <see cref="Block"/>.</summary>
+    public static string? Section { get => CurrentSection.Value; set => CurrentSection.Value = value; }
+
+    /// <summary>The number of the last line added: changes whenever a line is.</summary>
+    public long LastSeq
+    {
+        get { lock (_lines) return _seq; }
+    }
 
     public void Info(string source, string message) => Add(false, source, message);
 
@@ -52,7 +89,7 @@ sealed class DiagLog(Func<DateTime>? clock = null)
             message = message[..MaxMessageChars] + $"\n... ({message.Length - MaxMessageChars} more characters not logged)";
         lock (_lines)
         {
-            _lines.Enqueue(new(++_seq, _clock(), debug, source, message));
+            _lines.Enqueue(new(++_seq, _clock(), debug, source, message, Block, Section));
             while (_lines.Count > MaxLines) _lines.Dequeue();
         }
     }
@@ -75,21 +112,165 @@ sealed class DiagLog(Func<DateTime>? clock = null)
         }
     }
 
-    /// <summary>"14:02:03.118  dns     " — the fixed-width start of a line; continuation lines are indented to match.</summary>
-    public static string Prefix(LogLine line) => $"{line.Time:HH:mm:ss.fff}  {line.Source,-7} ";
+    public const int SectionColumn = 17;
 
-    public static string Body(LogLine line)
+    /// <summary>
+    /// "14:02:03.118  dns     " — the fixed-width start of a line, followed in the By time view by its section's
+    /// short name in a column of its own; continuation lines are indented to match.
+    /// </summary>
+    public static string Prefix(LogLine line, string? section = null) =>
+        $"{line.Time:HH:mm:ss.fff}  {line.Source,-7} " + (section == null ? "" : Fit(section, SectionColumn - 1).PadRight(SectionColumn));
+
+    static string Fit(string text, int width) => text.Length <= width ? text : text[..(width - 1)] + "…";
+
+    public static string Body(LogLine line, int prefixLength)
     {
         string text = (line.Debug ? "DEBUG " : "") + line.Message;
-        return text.Replace("\n", "\n" + new string(' ', Prefix(line).Length + (line.Debug ? 6 : 0)));
+        return text.Replace("\n", "\n" + new string(' ', prefixLength + (line.Debug ? 6 : 0)));
     }
 
-    /// <summary>The whole log as plain text: what Save log writes and Copy log puts on the clipboard.</summary>
+    public static string Body(LogLine line) => Body(line, Prefix(line).Length);
+
+    /// <summary>
+    /// A result line taken apart for the formatted views: the status word, the check's name and its detail. The
+    /// section's name in front of the check's is left out, since both views show the section beside or above the
+    /// line. Null for any other line.
+    /// </summary>
+    public static (string Word, string Name, string Detail)? ParseResult(LogLine line)
+    {
+        // Written by the app as "Warning  Group / Check: detail"
+        if (line.Source != "result" || line.Message.Length < 9) return null;
+        string word = line.Message[..8].Trim();
+        string rest = line.Message[8..].TrimStart();
+        if (line.Section is { } section && rest.StartsWith(section + " / ", StringComparison.Ordinal))
+            rest = rest[(section.Length + 3)..];
+        int colon = rest.IndexOf(": ", StringComparison.Ordinal);
+        return colon < 0 ? (word, rest, "") : (word, rest[..colon], rest[(colon + 2)..]);
+    }
+
+    public const int KindColumn = 10;
+
+    /// <summary>
+    /// A line as the Sections and By time views write it: the time (with milliseconds only By time), a kind column
+    /// holding a result's status or the line's source, By time's <paramref name="section"/> column, then the
+    /// message: a result's "Check: detail" without its section's name, any other message without a DEBUG label.
+    /// Further lines, such as raw tool output, line up under the message.
+    /// </summary>
+    public static string Formatted(LogLine line, bool bySection, string? section)
+    {
+        string time = bySection ? $"{line.Time:HH:mm:ss}  " : $"{line.Time:HH:mm:ss.fff}  ";
+        var result = ParseResult(line);
+        string prefix = time + (result?.Word ?? line.Source).PadRight(KindColumn)
+            + (section == null ? "" : Fit(section, SectionColumn - 1).PadRight(SectionColumn));
+        string message = result is { } r ? (r.Detail.Length > 0 ? $"{r.Name}: {r.Detail}" : r.Name) : line.Message;
+        return prefix + message.Replace("\n", "\n" + new string(' ', prefix.Length));
+    }
+
+    /// <summary>A run's "Started" and "Complete" lines, which its heading already says in the Sections view.</summary>
+    public static bool IsRunBookend(LogLine line) =>
+        line.Source == "run" && line.Block != null && line.Section == null
+        && (line.Message.StartsWith("Started", StringComparison.Ordinal) || line.Message.StartsWith("Complete", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The lines in the order they show. By section: a block's lines go under its heading where the block first
+    /// appears, its own lines first, then each section's under a heading of its own, in <paramref name="sectionOrder"/>
+    /// (others after, as they first appear), and its own lines from after its sections began below them; lines outside
+    /// any block stay where they fall. By time: every line in
+    /// order, with a block's heading before its first line and again where its lines resume after another block's.
+    /// </summary>
+    public static List<LogItem> Arrange(IReadOnlyList<LogLine> lines, bool bySection, IReadOnlyList<string> sectionOrder) =>
+        bySection ? ArrangeBySection(lines, sectionOrder) : ArrangeByTime(lines);
+
+    static List<LogItem> ArrangeByTime(IReadOnlyList<LogLine> lines)
+    {
+        var items = new List<LogItem>();
+        LogBlock? current = null;
+        foreach (var line in lines)
+        {
+            if (line.Block != null && line.Block != current)
+            {
+                items.Add(new LogBlockHeading(line.Block));
+                current = line.Block;
+            }
+            items.Add(new LogEntry(line));
+        }
+        return items;
+    }
+
+    static List<LogItem> ArrangeBySection(IReadOnlyList<LogLine> lines, IReadOnlyList<string> sectionOrder)
+    {
+        var rank = sectionOrder.Select((section, i) => (section, i)).DistinctBy(p => p.section).ToDictionary(p => p.section, p => p.i);
+        var byBlock = lines.Where(l => l.Block != null).ToLookup(l => l.Block!); // keeps each block's lines in order
+        var items = new List<LogItem>();
+        var seen = new HashSet<LogBlock>();
+        foreach (var line in lines)
+        {
+            if (line.Block is not { } block)
+                items.Add(new LogEntry(line));
+            else if (seen.Add(block))
+                AddBlock(items, block, byBlock[block].ToList(), rank);
+        }
+        return items;
+    }
+
+    // A block's heading, its own lines from before its sections began (such as "Started"), each section under its
+    // heading in the given order (others after, as they first appear), then the block's later lines
+    static void AddBlock(List<LogItem> items, LogBlock block, List<LogLine> mine, Dictionary<string, int> rank)
+    {
+        items.Add(new LogBlockHeading(block));
+        long sectionsStart = mine.FirstOrDefault(l => l.Section != null)?.Seq ?? long.MaxValue;
+        items.AddRange(mine.Where(l => l.Section == null && l.Seq < sectionsStart).Select(l => new LogEntry(l)));
+        var sections = mine.Select(l => l.Section).OfType<string>().Distinct()
+            .Select((section, first) => (section, first))
+            .OrderBy(p => rank.GetValueOrDefault(p.section, int.MaxValue)).ThenBy(p => p.first);
+        foreach (var (section, _) in sections)
+        {
+            items.Add(new LogSectionHeading(block, section));
+            items.AddRange(mine.Where(l => l.Section == section).Select(l => new LogEntry(l)));
+        }
+        items.AddRange(mine.Where(l => l.Section == null && l.Seq > sectionsStart).Select(l => new LogEntry(l)));
+    }
+
+    /// <summary>The whole log as plain text, one line after another: the order lines were added in.</summary>
     public string Text()
     {
         var sb = new StringBuilder();
         foreach (var line in Since(0))
             sb.Append(Prefix(line)).AppendLine(Body(line));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The whole log as plain text in the view on screen: what Save log writes and Copy log puts on the clipboard.
+    /// <paramref name="sections"/> gives the results sections in order, each with the short name By time shows.
+    /// </summary>
+    public string Text(bool bySection, IReadOnlyList<(string Name, string Short)> sections)
+    {
+        var shortNames = sections.ToDictionary(s => s.Name, s => s.Short);
+        var rule = new string('=', 72);
+        var sb = new StringBuilder();
+        foreach (var item in Arrange(Since(0), bySection, sections.Select(s => s.Name).ToList()))
+        {
+            switch (item)
+            {
+                case LogBlockHeading { Block: var block }:
+                    if (sb.Length > 0) sb.AppendLine();
+                    sb.AppendLine(rule).AppendLine($"{block.Title}  {block.Detail}");
+                    if (block.Totals != null) sb.AppendLine(block.Totals);
+                    sb.AppendLine(rule);
+                    break;
+                case LogSectionHeading { Block: var block, Section: var section }:
+                    string note = block.SectionNotes.TryGetValue(section, out var n) ? $" ({n})" : "";
+                    sb.AppendLine().AppendLine($"--- {section}{note} ".PadRight(rule.Length, '-'));
+                    break;
+                case LogEntry { Line: var line } when bySection && IsRunBookend(line):
+                    break; // the banner above says it
+                case LogEntry { Line: var line }:
+                    string? column = bySection ? null : line.Section == null ? "" : shortNames.GetValueOrDefault(line.Section, line.Section);
+                    sb.AppendLine(Formatted(line, bySection, column));
+                    break;
+            }
+        }
         return sb.ToString();
     }
 }
@@ -198,6 +379,21 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
 
     static string From(IPAddress? server) => $"from {(server == null ? "the configured DNS servers" : server.ToString())}";
 
+    public string[]? RegistrySubKeys(string hklmPath) =>
+        Call("registry", $@"Subkeys of HKLM\{hklmPath}", () => inner.RegistrySubKeys(hklmPath), keys => keys == null ? "no such key" : $"{keys.Length} subkeys");
+
+    public Dictionary<string, object>? RegistryValues(string hklmPath) =>
+        Call("registry", $@"Values of HKLM\{hklmPath}", () => inner.RegistryValues(hklmPath), values => values == null ? "no such key" : $"{values.Count} values");
+
+    public int? ServiceState(string name) =>
+        Call("machine", $"Service {name}", () => inner.ServiceState(name), state => state == null ? "not installed" : $"state {state}");
+
+    public string? CurrentUserSid() => Call("machine", "Current user SID", inner.CurrentUserSid, sid => sid ?? "(unknown)");
+
+    public string? CurrentUserUpn() => Call("machine", "Current user UPN", inner.CurrentUserUpn, upn => upn ?? "(none)");
+
+    public int? TpmVersion() => Call("machine", "TPM", inner.TpmVersion, v => v == null ? "none" : $"version {v}");
+
     public SoaRecord? QuerySoa(string name, IPAddress? server, CancellationToken ct) =>
         Call("dns", $"SOA {name} {From(server)}", () => inner.QuerySoa(name, server, ct), soa => soa == null ? "no record" : $"zone {soa.Zone}, primary server {soa.PrimaryServer}");
 
@@ -205,4 +401,8 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
         Call("dns", $"A/AAAA {name} {From(server)}", () => inner.QueryAddresses(name, server, ct), Addresses);
 
     public bool IsElevated() => Call("machine", "Elevation", inner.IsElevated, elevated => elevated ? "running as Administrator" : "not elevated");
+
+    public UrlSecurity UrlSecurity(string url, CancellationToken ct) =>
+        Call("machine", $"Internet settings for {url}", () => inner.UrlSecurity(url, ct),
+            s => $"zone {s.Zone}, logon policy 0x{s.Logon:x}, status bar policy {s.StatusBar}");
 }

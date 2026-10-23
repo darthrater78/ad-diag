@@ -140,4 +140,157 @@ public class LogTests
         Assert.ThrowsAny<OperationCanceledException>(() => probe.RunTool("klist", "", 5000, cts.Token));
         Assert.Empty(log.Since(0));
     }
+
+    // A run whose two sections ran side by side, so their lines arrive interleaved, then a line outside any run
+    static (DiagLog Log, LogBlock Run) SectionedLog()
+    {
+        var log = NewLog();
+        var run = new LogBlock("Run 14:02:03", "contoso.com · DC01 · all sections") { Totals = "5 passed · 0 failed · 1 warning" };
+        run.SectionNotes["DNS for Active Directory"] = "5 checks";
+        DiagLog.Block = run;
+        log.Info("run", "Started");
+        DiagLog.Section = "DNS for Active Directory";
+        log.Info("dns", "dns one");
+        DiagLog.Section = "DC Discovery & Connectivity";
+        log.Info("tcp", "dc one");
+        DiagLog.Section = "DNS for Active Directory";
+        log.Info("dns", "dns two");
+        DiagLog.Section = null;
+        log.Info("run", "Complete");
+        DiagLog.Block = null;
+        log.Info("log", "Debug logging off");
+        return (log, run);
+    }
+
+    static readonly (string Name, string Short)[] Order =
+        [("DC Discovery & Connectivity", "DC Discovery"), ("DNS for Active Directory", "DNS for AD")];
+
+    static string Describe(LogItem item) => item switch
+    {
+        LogBlockHeading h => "# " + h.Block.Title,
+        LogSectionHeading h => "## " + h.Section,
+        LogEntry e => e.Line.Message,
+        _ => "?",
+    };
+
+    [Fact]
+    public void Arrange_BySection_GroupsARunsLinesUnderItsSectionsInResultsOrder()
+    {
+        var (log, _) = SectionedLog();
+
+        var items = DiagLog.Arrange(log.Since(0), bySection: true, Order.Select(o => o.Name).ToList());
+
+        Assert.Equal(["# Run 14:02:03", "Started",
+            "## DC Discovery & Connectivity", "dc one",
+            "## DNS for Active Directory", "dns one", "dns two",
+            "Complete", "Debug logging off"], items.Select(Describe));
+    }
+
+    [Fact]
+    public void Arrange_ByTime_KeepsTheOrderAndRepeatsAHeadingOnlyWhenItsRunResumes()
+    {
+        var (log, run) = SectionedLog();
+        var other = new LogBlock("Kerberos tickets 14:03:00", "klist");
+        DiagLog.Block = other;
+        log.Info("tool", "klist");
+        DiagLog.Block = run;
+        log.Info("run", "late line");
+        DiagLog.Block = null;
+
+        var items = DiagLog.Arrange(log.Since(0), bySection: false, []);
+
+        Assert.Equal(["# Run 14:02:03", "Started", "dns one", "dc one", "dns two", "Complete", "Debug logging off",
+            "# Kerberos tickets 14:03:00", "klist", "# Run 14:02:03", "late line"], items.Select(Describe));
+    }
+
+    [Fact]
+    public void Text_BySection_HasRunBannersAndSectionRules()
+    {
+        var (log, _) = SectionedLog();
+        string nl = Environment.NewLine, rule = new('=', 72);
+
+        string text = log.Text(bySection: true, Order);
+
+        Assert.StartsWith(rule + nl + "Run 14:02:03  contoso.com · DC01 · all sections" + nl + "5 passed · 0 failed · 1 warning" + nl + rule + nl, text);
+        Assert.Contains(nl + "--- DNS for Active Directory (5 checks) ".PadRight(72, '-') + nl, text);
+        Assert.Contains(nl + "--- DC Discovery & Connectivity ".PadRight(72, '-') + nl, text);
+        Assert.True(text.IndexOf("dc one") < text.IndexOf("dns one"));
+    }
+
+    [Fact]
+    public void Text_ByTime_NamesEachLinesSectionInAColumn()
+    {
+        var (log, _) = SectionedLog();
+
+        string text = log.Text(bySection: false, Order);
+
+        string column(string section) => section.PadRight(DiagLog.SectionColumn);
+        string kind(string source) => source.PadRight(DiagLog.KindColumn);
+        Assert.Contains("14:02:03.118  " + kind("tcp") + column("DC Discovery") + "dc one", text);
+        // A run's own lines, and lines outside any run, leave the column blank so the messages line up
+        Assert.Contains("14:02:03.118  " + kind("run") + column("") + "Complete", text);
+        Assert.Contains("14:02:03.118  " + kind("log") + column("") + "Debug logging off", text);
+    }
+
+    [Fact]
+    public void Text_BySection_DropsTheRunsBookendsAndShortensTheTime()
+    {
+        var (log, _) = SectionedLog();
+
+        string text = log.Text(bySection: true, Order);
+
+        Assert.DoesNotContain("Started", text);
+        Assert.DoesNotContain("Complete", text);
+        Assert.Contains("14:02:03  " + "dns".PadRight(DiagLog.KindColumn) + "dns one", text);
+        Assert.DoesNotContain("14:02:03.118", text.Split(Environment.NewLine).Where(l => l.Contains("dns one")).Single());
+    }
+
+    [Fact]
+    public void Formatted_ResultShowsStatusAndCheck_DebugDropsItsLabel_RawOutputLinesUp()
+    {
+        DiagLog.Block = new LogBlock("Run", "");
+        DiagLog.Section = "Group Policy";
+        var log = NewLog();
+        log.DebugEnabled = true;
+        log.Info("result", "Warning  Group Policy / GP Last Refresh: 3 days ago");
+        log.Debug("tool", "RSoP query (840 ms)\n2 computer GPOs");
+        DiagLog.Block = null;
+        DiagLog.Section = null;
+        var lines = log.Since(0);
+
+        Assert.Equal("14:02:03  Warning   GP Last Refresh: 3 days ago", DiagLog.Formatted(lines[0], bySection: true, null));
+        string pad = new(' ', "14:02:03  ".Length + DiagLog.KindColumn);
+        Assert.Equal($"14:02:03  {"tool".PadRight(DiagLog.KindColumn)}RSoP query (840 ms)\n{pad}2 computer GPOs",
+            DiagLog.Formatted(lines[1], bySection: true, null));
+        // The raw log keeps every line as written
+        Assert.Contains("Warning  Group Policy / GP Last Refresh", log.Text());
+        Assert.Contains("DEBUG RSoP query", log.Text());
+    }
+
+    [Fact]
+    public async Task BlockAndSection_FollowLinesIntoTasksAndThreads_AndStayOutOfTheCaller()
+    {
+        var log = NewLog();
+        var run = new LogBlock("Run", "");
+
+        async Task Run()
+        {
+            DiagLog.Block = run;
+            await Task.Factory.StartNew(() =>
+            {
+                DiagLog.Section = "Group Policy";
+                var thread = new Thread(() => log.Info("tool", "from a thread"));
+                thread.Start();
+                thread.Join();
+            }, TaskCreationOptions.LongRunning);
+            log.Info("run", "back in the run");
+        }
+        await Run();
+        log.Info("log", "after the run");
+
+        var lines = log.Since(0);
+        Assert.Equal((run, "Group Policy"), (lines[0].Block, lines[0].Section));
+        Assert.Equal((run, (string?)null), (lines[1].Block, lines[1].Section));
+        Assert.Equal((null, null), (lines[2].Block, lines[2].Section));
+    }
 }
