@@ -248,7 +248,7 @@ How this user's sign-in credentials are held, on every profile.
 
 Whether this PC is managed by Microsoft Intune (or another MDM), on every profile, since Intune works the same however the PC is joined. Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
 
-- **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown
+- **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown. Only an enrollment with an MDM server counts: Windows' own entries there (Local, Deploy and Cloud Authority) and the ConfigMgr bridge are on PCs that aren't in Intune too
 - **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns; a failed attempt since the last success is a note (the next sync retries it)
 - **Management Extension** — the Intune Management Extension service, which installs Win32 apps and runs scripts; stopped warns, not installed is Info (Intune adds it with the first such assignment)
 - **Device Policies** — how many settings Intune pushed to the device are in force, and how many another provider sets instead

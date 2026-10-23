@@ -18,6 +18,7 @@ static partial class Diagnostics
         MdmExtensionCheck = "Management Extension", MdmPoliciesCheck = "Device Policies";
 
     const string EnrollmentsKey = @"SOFTWARE\Microsoft\Enrollments";
+    const string OmadmAccountsKey = @"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts";
     const string IntuneProvider = "MS DM Server";
     const string ExtensionService = "IntuneManagementExtension";
     // A PC that is on syncs about every 8 hours; a week without one means it has been off or can't reach Intune
@@ -104,14 +105,18 @@ static partial class Diagnostics
 
     /// <summary>
     /// The MDM enrollment Windows keeps under HKLM\SOFTWARE\Microsoft\Enrollments, preferring a completed Intune one;
-    /// null when there is none. Other entries there (Windows Hello, provisioning) have no provider and are ignored.
+    /// null when there is none. Entries without an MDM sync account (Windows Hello, provisioning, Windows' own Local,
+    /// Deploy and Cloud Authority, the ConfigMgr bridge) are ignored.
     /// </summary>
     internal static MdmEnrollment? ReadEnrollment(IProbe probe)
     {
+        // Windows keeps built-in entries here too (Local, Deploy and Cloud Authority, the ConfigMgr bridge) on every
+        // PC; only an enrollment with an MDM server has a sync account, so only those count
+        var accounts = new HashSet<string>(probe.RegistrySubKeys(OmadmAccountsKey) ?? [], StringComparer.OrdinalIgnoreCase);
         var found = new List<MdmEnrollment>();
         foreach (string id in probe.RegistrySubKeys(EnrollmentsKey) ?? [])
         {
-            if (!Guid.TryParse(id, out _)) continue;
+            if (!Guid.TryParse(id, out _) || !accounts.Contains(id)) continue;
             var values = probe.RegistryValues($@"{EnrollmentsKey}\{id}");
             if (values == null || values.GetValueOrDefault("ProviderID") is not string provider || provider.Length == 0) continue;
             int? state = values.GetValueOrDefault("EnrollmentState") is int s ? s : null;
@@ -127,7 +132,7 @@ static partial class Diagnostics
         string? syncError = null;
         try
         {
-            var conn = probe.RegistryValues($@"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\{enrollment.Id}\Protected\ConnInfo");
+            var conn = probe.RegistryValues($@"{OmadmAccountsKey}\{enrollment.Id}\Protected\ConnInfo");
             success = MdmTime(conn?.GetValueOrDefault("ServerLastSuccessTime"), zone);
             failure = MdmTime(conn?.GetValueOrDefault("ServerLastFailureTime"), zone);
         }

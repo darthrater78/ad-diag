@@ -55,6 +55,31 @@ public class IntuneTests
     }
 
     [Fact]
+    public void BuiltInAuthoritiesOnly_IsNotEnrolled()
+    {
+        // As on a real hybrid PC outside Intune: Windows' own entries, none with an MDM sync account
+        var probe = new FakeProbe();
+        probe.Registry[@"SOFTWARE\Microsoft\Enrollments\8345CBE6-CEFC-462A-8219-78F3FC0377C1"] = new() { ["ProviderID"] = "Deploy Authority", ["EnrollmentState"] = 1, ["EnrollmentType"] = 30 };
+        probe.Registry[@"SOFTWARE\Microsoft\Enrollments\C429BE2D-071B-4E13-B616-4141C334ECDF"] = new() { ["ProviderID"] = "Cloud Authority", ["EnrollmentState"] = 1, ["EnrollmentType"] = 31 };
+        probe.Registry[@"SOFTWARE\Microsoft\Enrollments\E17005D5-A50E-4E57-BE94-1D4FA69C6F93"] = new() { ["ProviderID"] = "Local Authority", ["EnrollmentState"] = 1, ["EnrollmentType"] = 28 };
+        probe.Registry[@"SOFTWARE\Microsoft\Enrollments\28293FE1-9327-4C3F-BEF8-29849C6E8036"] = new() { ["ProviderID"] = "WMI_Bridge_SCCM_Server", ["EnrollmentState"] = 1, ["EnrollmentType"] = 12 };
+
+        var entry = Assert.Single(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc).Tests);
+
+        Assert.Equal(Status.Info, entry.Status);
+        Assert.StartsWith("Not enrolled", entry.Detail);
+    }
+
+    [Fact]
+    public void IntuneAmongBuiltInAuthorities_IsChosen()
+    {
+        var probe = Enrolled();
+        probe.Registry[@"SOFTWARE\Microsoft\Enrollments\8345CBE6-CEFC-462A-8219-78F3FC0377C1"] = new() { ["ProviderID"] = "Deploy Authority", ["EnrollmentState"] = 1 };
+
+        Assert.StartsWith("Enrolled in Microsoft Intune", Entry(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc), "MDM Enrollment").Detail);
+    }
+
+    [Fact]
     public void Enrolled_AllWell_Passes()
     {
         var group = Diagnostics.TestIntune(Enrolled(), Now, TimeZoneInfo.Utc);
