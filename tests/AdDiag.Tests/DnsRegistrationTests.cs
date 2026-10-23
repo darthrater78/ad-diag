@@ -58,11 +58,11 @@ public class DnsRegistrationTests
         Assert.Empty(probe.SoaCalls);
     }
 
-    // The PC from the report: no primary suffix, IOT has nscriven.net and registers, Island has scrivtech.com and doesn't
+    // The PC from the report: no primary suffix, IOT has nscriven.net and registers, the ZTNA tunnel has scrivtech.com and doesn't
     static List<NetAdapter> SuffixedAdapters(bool useSuffix) =>
     [
         new("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net", RegistersSuffix: useSuffix),
-        new("Island Private Access", "Wintun Userspace Tunnel", false, false, [IPAddress.Parse("172.16.50.5")], [], DnsSuffix: "scrivtech.com", RegistersSuffix: true),
+        new("ZTNA Tunnel", "Wintun Userspace Tunnel", false, false, [IPAddress.Parse("172.16.50.5")], [], DnsSuffix: "scrivtech.com", RegistersSuffix: true),
     ];
 
     [Fact]
@@ -77,7 +77,7 @@ public class DnsRegistrationTests
         string detail = DetailOf(group, "Registration Name");
         Assert.StartsWith("Nothing is registered: PROX-ENTRA has no primary DNS suffix", detail);
         Assert.Contains("\nIOT: nscriven.net — \"Use this connection's DNS suffix in DNS registration\" is off", detail);
-        Assert.Contains("\nIsland Private Access: scrivtech.com — \"Register this connection's addresses in DNS\" is off", detail);
+        Assert.Contains("\nZTNA Tunnel: scrivtech.com — \"Register this connection's addresses in DNS\" is off", detail);
         // Nothing is registered, so the adapter list is not a pass
         Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
         Assert.Equal($"No registration name. Once there is one, these addresses are registered:\nIOT: {ClientIp}", DetailOf(group, "Registering Adapters"));
@@ -87,32 +87,32 @@ public class DnsRegistrationTests
     [Fact]
     public void UsersPc_ClientAndLanBothRegister_NoContradictions()
     {
-        // The report's screenshot: both adapters register addresses, neither registers its suffix, and Island has an
-        // address-less second interface that used to print "Island adapter" twice
-        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+        // The report's screenshot: both adapters register addresses, neither registers its suffix, and the client has an
+        // address-less second interface that used to print its adapter twice
+        var tunnel = new NetAdapter("ZTNA Tunnel", "Wintun Userspace Tunnel", false, true,
             [IPAddress.Parse("3fff::"), IPAddress.Parse("172.16.50.5")], [IPAddress.Parse("127.73.83.76")], PointToPoint: true, DnsSuffix: "scrivtech.com");
-        var filter = new NetAdapter("Island Private Access-WFP Native MAC Layer LightWeight Filter-0000", "Island Private Access", false, false, [], []);
+        var filter = new NetAdapter("ZTNA Tunnel-WFP Native MAC Layer LightWeight Filter-0000", "Wintun Userspace Tunnel", false, false, [], []);
         var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net");
         var probe = Healthy();
         probe.Identity = ("PROX-ENTRA", "");
         probe.NetAdapters.Clear();
-        probe.NetAdapters.AddRange([island, filter, iot]);
+        probe.NetAdapters.AddRange([tunnel, filter, iot]);
         var group = Run(probe);
 
         Assert.Equal(Status.Info, StatusOf(group, "ZTNA / VPN Client"));
-        Assert.Equal("Island adapter (3fff::, 172.16.50.5); DNS answered by its local proxy (127.73.83.76)", DetailOf(group, "ZTNA / VPN Client"));
+        Assert.Equal("Wintun adapter (3fff::, 172.16.50.5); DNS answered by its local proxy (127.73.83.76)", DetailOf(group, "ZTNA / VPN Client"));
         Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
         Assert.DoesNotContain("Behind the ZTNA client", DetailOf(group, "Registering Adapters"));
         Assert.DoesNotContain(group.Tests, t => t.Status == Status.Pass && t.Name != "Registration Errors");
         Assert.EndsWith("\n3fff:: is in a range reserved for documentation (a client's placeholder), which other hosts cannot route to",
             DetailOf(group, "Registering Adapters"));
 
-        // With a name, Island registering its placeholder address is a warning, on top of the both-register note
+        // With a name, the client registering its placeholder address is a warning, on top of the both-register note
         probe.Identity = ("PROX-ENTRA", "nscriven.net");
         group = Run(probe);
         Assert.Equal(Status.Warn, StatusOf(group, "Registering Adapters"));
         string detail = DetailOf(group, "Registering Adapters");
-        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", detail);
+        Assert.Contains("Both the client's adapter (ZTNA Tunnel) and IOT register", detail);
         Assert.Contains("3fff:: is in a range reserved for documentation", detail);
     }
 
@@ -133,20 +133,20 @@ public class DnsRegistrationTests
     [Fact]
     public void ClientAndLanBothRegisterWithAName_IsANoteNamingTheLanAdapter()
     {
-        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+        var tunnel = new NetAdapter("ZTNA Tunnel", "Wintun Userspace Tunnel", false, true,
             [IPAddress.Parse("172.16.50.5")], [DcIp], PointToPoint: true);
         var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
         var probe = Healthy();
         probe.NetAdapters.Clear();
-        probe.NetAdapters.AddRange([island, iot]);
+        probe.NetAdapters.AddRange([tunnel, iot]);
         var group = Run(probe);
         Assert.Equal(Status.Info, StatusOf(group, "Registering Adapters"));
-        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", DetailOf(group, "Registering Adapters"));
+        Assert.Contains("Both the client's adapter (ZTNA Tunnel) and IOT register", DetailOf(group, "Registering Adapters"));
 
         probe.NetAdapters.Remove(iot);
         group = Run(probe);
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
-        Assert.EndsWith("Island Private Access is the client's own adapter, so DNS gets the address servers reach this machine through",
+        Assert.EndsWith("ZTNA Tunnel is the client's own adapter, so DNS gets the address servers reach this machine through",
             DetailOf(group, "Registering Adapters"));
     }
 
@@ -163,15 +163,15 @@ public class DnsRegistrationTests
     public void Adapters_OnePerLine_AndFilterCopiesDropped()
     {
         // The user's PC: Npcap's filter on the client adapter shows up as a second interface with the same addresses
-        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, false,
+        var tunnel = new NetAdapter("ZTNA Tunnel", "Wintun Userspace Tunnel", false, false,
             [IPAddress.Parse("3fff::1"), IPAddress.Parse("172.16.50.5")], [], PointToPoint: true);
-        var npcap = island with { Name = "Island Private Access-Npcap Packet Driver (NPCAP)-0000" };
+        var npcap = tunnel with { Name = "ZTNA Tunnel-Npcap Packet Driver (NPCAP)-0000" };
         var lan = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
         var wifi = new NetAdapter("Wi-Fi", "Intel(R) Wi-Fi 6 AX201", false, true, [HomeIp], [DcIp]);
         // A name that merely starts the same, with other addresses, is a real adapter
         var other = new NetAdapter("IOT-2", "Red Hat VirtIO Ethernet Adapter #2", false, false, [IPAddress.Parse("10.9.9.9")], []);
-        Assert.Equal(["Island Private Access", "IOT", "Wi-Fi", "IOT-2"],
-            Diagnostics.DropFilterBindings([island, npcap, lan, wifi, other]).Select(a => a.Name));
+        Assert.Equal(["ZTNA Tunnel", "IOT", "Wi-Fi", "IOT-2"],
+            Diagnostics.DropFilterBindings([tunnel, npcap, lan, wifi, other]).Select(a => a.Name));
 
         var probe = new FakeProbe();
         probe.NetAdapters.Clear();
@@ -225,8 +225,8 @@ public class DnsRegistrationTests
             [IPAddress.Parse("fe80::1"), IPAddress.Parse("172.16.50.3")], [IPAddress.Parse("127.73.83.76")], Virtual: true);
         Assert.Equal("virtual adapter \"Acme Access\" (172.16.50.3); DNS answered by its local proxy (127.73.83.76)",
             Diagnostics.DescribeZtna([lan, client]));
-        var island = client with { Name = "Island Private Access", Description = "Island Private Access Virtual Adapter Tunnel" };
-        Assert.StartsWith("Island adapter (172.16.50.3)", Diagnostics.DescribeZtna([lan, island]));
+        var twingate = client with { Name = "Twingate", Description = "Twingate Virtual Adapter" };
+        Assert.StartsWith("Twingate adapter (172.16.50.3)", Diagnostics.DescribeZtna([lan, twingate]));
 
         var miniport = new NetAdapter("Local Area Connection* 6", "WAN Miniport (IP)", false, false, [], [], Virtual: true);
         var vswitch = new NetAdapter("vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter", false, true, [IPAddress.Parse("172.22.0.1")], [], Virtual: true);
