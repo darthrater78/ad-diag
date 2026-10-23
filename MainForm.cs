@@ -187,7 +187,7 @@ class MainForm : Form
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
 
-        _placeholderText = PlaceholderText;
+        ShowPreview();
         WireLifecycle();
         AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
         _ = DetectStartupAsync();
@@ -902,11 +902,7 @@ class MainForm : Form
         _runHistory.Clear();
         SetRunning(false); // a cancelled run returns early and never ends itself
         _selectedRunIndex = -1;
-        _renderedGroups = null;
-        _placeholderText = PlaceholderText;
-        _resultsBar.Visible = false;
-        _resultsCanvas.Height = S(200);
-        _resultsCanvas.Invalidate();
+        ShowPreview();
         _summaryPanel.Visible = false;
         _btnExport.Enabled = _btnCopy.Enabled = false;
         RebuildHistoryBar();
@@ -1394,7 +1390,6 @@ class MainForm : Form
         _ => "Microsoft Entra joined",
     };
 
-    string PlaceholderText => _profile == JoinProfile.Entra ? "Run diagnostics to check this PC" : "Enter target domain and run diagnostics";
 
     void FillProfileChoices()
     {
@@ -1422,11 +1417,7 @@ class MainForm : Form
         LayoutTabs();
         if (entra && _gpPanel.Visible) SwitchTab("results");
         PopulateGuide();
-        if (_renderedGroups == null)
-        {
-            _placeholderText = PlaceholderText;
-            _resultsCanvas.Invalidate();
-        }
+        if (_runHistory.Count == 0) ShowPreview();
         if (changed || detected)
             AppLog.Info("app", $"Profile: {ProfileName(profile)}{(detected ? " (detected)" : " (picked)")}");
         if (!entra && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
@@ -2872,7 +2863,7 @@ class MainForm : Form
         if (_renderedGroups == null)
         {
             _resultsCanvas.Rows.Clear();
-            string msg = _placeholderText ?? "Enter target domain and run diagnostics";
+            string msg = _placeholderText ?? "";
             TextRenderer.DrawText(g, msg, PlaceholderFont, new Point(S(GridLeft), S(40)), DimColor, TextFormatFlags.NoPrefix);
             return;
         }
@@ -3514,11 +3505,7 @@ class MainForm : Form
         if (_runHistory.Count == 0)
         {
             _selectedRunIndex = -1;
-            _renderedGroups = null;
-            _placeholderText = "Run diagnostics for this domain";
-            _resultsBar.Visible = false;
-            _resultsCanvas.Height = S(200);
-            _resultsCanvas.Invalidate();
+            ShowPreview();
             _summaryPanel.Visible = false;
             _lblStatus.Text = "";
             _btnExport.Enabled = _btnCopy.Enabled = false;
@@ -3532,7 +3519,22 @@ class MainForm : Form
         RebuildHistoryBar();
     }
 
-    DiagRun? SelectedRun => _selectedRunIndex >= 0 && _selectedRunIndex < _runHistory.Count ? _runHistory[_selectedRunIndex] : null;
+    // The run on show; before any run, the preview of the profile's sections
+    DiagRun? SelectedRun => _selectedRunIndex >= 0 && _selectedRunIndex < _runHistory.Count ? _runHistory[_selectedRunIndex] : _preview;
+    DiagRun? _preview;
+
+    /// <summary>
+    /// Before any run: every section the profile runs, as a heading that hasn't run with its Run button, so what
+    /// will be checked shows before anything is. It is never a run of its own: running starts a real one.
+    /// </summary>
+    void ShowPreview()
+    {
+        var preview = new DiagRun(DateTime.MinValue, "", "", BuildSkeleton(_profile)) { Profile = _profile };
+        preview.NotRun.UnionWith(preview.Results.Select(g => g.Name));
+        _preview = preview;
+        RenderResults(preview.Results);
+        _resultsBar.Visible = false; // nothing to open or close yet
+    }
 
     void ShowSelectedRun()
     {

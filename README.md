@@ -40,7 +40,11 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
    On the other profiles the app auto-detects the current domain (from `USERDNSDOMAIN`, `dsregcmd /status`, or the machine's DNS domain suffix) and pre-fills the **Domain** field. Enter target details:
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
-3. Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or click **Run again** at the right of its heading in Results (**Run** on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there, and the group opens to show them (or stays open) and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
+3. Before a run, **Results** lists every group the profile runs, each with its own **Run** button:
+
+   ![Results before a run: every group of the profile, not run yet](docs/screenshots/before-run.png)
+
+   Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or click **Run again** at the right of its heading in Results (**Run** on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there, and the group opens to show them (or stays open) and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
 
    ![The Run button's menu over a run started from one group, the others not run yet](docs/screenshots/run-menu.png)
 

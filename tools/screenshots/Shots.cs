@@ -51,6 +51,12 @@ static class Shots
         // Wine runs everything as Administrator; the screenshots show the usual unelevated app
         form.Text = "AD Diagnostics";
         foreach (var c in AllControls(form).Where(c => c.AccessibleName == "Running as administrator")) c.Visible = false;
+        // Before any run: the profile's sections, not run yet
+        Pump(800);
+        Set(form, "_profilePicked", true);
+        Call(form, "SetProfile", JoinProfile.Hybrid, true);
+        Pump(300);
+        Capture(form, outDir, "before-run.png");
         Pump(800);
         Populate(form);
         // Tall enough for the two groups opened below
