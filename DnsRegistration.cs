@@ -13,8 +13,10 @@ namespace AdDiag;
 /// <summary>A connected network adapter, as far as DNS registration is concerned.</summary>
 /// <param name="Virtual">A software adapter with no hardware behind it, which is what a ZTNA or VPN client installs.</param>
 /// <param name="PointToPoint">Holds an IPv4 /32 address and has no default gateway, the usual shape of a client's adapter.</param>
+/// <param name="DnsSuffix">The connection-specific DNS suffix, set by hand or by DHCP.</param>
+/// <param name="RegistersSuffix">"Use this connection's DNS suffix in DNS registration" is on, so Windows also registers host.DnsSuffix.</param>
 record NetAdapter(string Name, string Description, bool Tunnel, bool RegistersInDns, IPAddress[] Addresses, IPAddress[] DnsServers,
-    bool Virtual = false, bool PointToPoint = false);
+    bool Virtual = false, bool PointToPoint = false, string DnsSuffix = "", bool RegistersSuffix = false);
 record SoaRecord(string Zone, string PrimaryServer);
 
 // Dynamic DNS registration: whether this machine's own host record can reach, and is right on, the DNS server
@@ -259,8 +261,10 @@ static partial class Diagnostics
     public static TestGroup TestDnsRegistration(DiagConfig cfg, IProbe probe)
     {
         var tests = new List<TestEntry>();
-        string? fqdn = CheckName(probe, tests.Add);
-        var (adapters, ztna) = CheckAdapters(cfg, probe, tests.Add);
+        var adapterTests = new List<TestEntry>();
+        var (adapters, ztna) = CheckAdapters(cfg, probe, adapterTests.Add);
+        string? fqdn = CheckName(probe, adapters, tests.Add);
+        tests.AddRange(adapterTests);
         if (fqdn != null)
         {
             CheckServer(probe, fqdn, adapters, ztna, cfg.Cancel, tests.Add);
@@ -274,24 +278,52 @@ static partial class Diagnostics
         return new("Dynamic DNS Registration", tests);
     }
 
-    // The name Windows registers; null if this machine has none
-    static string? CheckName(IProbe probe, Action<TestEntry> report)
+    // The name Windows registers (the first, when there are several); null if this machine has none
+    static string? CheckName(IProbe probe, List<NetAdapter> adapters, Action<TestEntry> report)
     {
         try
         {
             var (host, suffix) = probe.HostIdentity();
-            if (!string.IsNullOrWhiteSpace(suffix))
+            var names = RegistrationNames(host, suffix, adapters);
+            if (names.Count > 0)
             {
-                report(new(RegName, Status.Pass, $"{host}.{suffix}"));
-                return $"{host}.{suffix}";
+                report(new(RegName, Status.Pass, string.Join(" · ", names.Select(n => n.Source == null ? n.Fqdn : $"{n.Fqdn} ({n.Source})"))));
+                return names[0].Fqdn;
             }
-            report(new(RegName, Status.Warn, $"{host} has no primary DNS suffix, so Windows registers no name for it (not domain-joined?)"));
+            report(new(RegName, Status.Warn, NoNameReason(host, adapters)));
         }
         catch (Exception ex)
         {
             report(new(RegName, Status.Skip, $"Not checked: could not read the host name: {ex.Message}"));
         }
         return null;
+    }
+
+    /// <summary>
+    /// The names Windows registers: host plus the primary DNS suffix from every registering adapter, and host plus an
+    /// adapter's own suffix where "Use this connection's DNS suffix in DNS registration" is on (Source names the adapter).
+    /// </summary>
+    internal static List<(string Fqdn, string? Source)> RegistrationNames(string host, string? suffix, List<NetAdapter> adapters)
+    {
+        var names = new List<(string Fqdn, string? Source)>();
+        if (!string.IsNullOrWhiteSpace(suffix)) names.Add(($"{host}.{suffix.Trim('.')}", null));
+        foreach (var a in adapters.Where(a => a.RegistersInDns && a.RegistersSuffix && a.DnsSuffix.Trim('.').Length > 0))
+        {
+            string fqdn = $"{host}.{a.DnsSuffix.Trim('.')}";
+            if (!names.Any(n => n.Fqdn.Equals(fqdn, StringComparison.OrdinalIgnoreCase))) names.Add((fqdn, a.Name));
+        }
+        return names;
+    }
+
+    // Why nothing is registered: no primary suffix, and any adapter suffix isn't used for registration
+    static string NoNameReason(string host, List<NetAdapter> adapters)
+    {
+        var unused = adapters.Where(a => a.DnsSuffix.Trim('.').Length > 0).ToList();
+        if (unused.Count == 0)
+            return $"{host} has no primary DNS suffix and no adapter has a DNS suffix, so Windows registers no name for it";
+        string list = string.Join(", ", unused.Select(a => $"{a.Name} ({a.DnsSuffix.Trim('.')}{(a.RegistersInDns ? "" : ", registration off")})"));
+        return $"{host} has no primary DNS suffix, so Windows registers no name for it. {list}: the suffix is used for lookups only; "
+            + "to register with it, turn on \"Use this connection's DNS suffix in DNS registration\" (adapter > IPv4 > Advanced > DNS)";
     }
 
     static (List<NetAdapter> Adapters, string? Ztna) CheckAdapters(DiagConfig cfg, IProbe probe, Action<TestEntry> report)
@@ -471,13 +503,14 @@ static partial class Diagnostics
         try
         {
             var (host, suffix) = probe.HostIdentity();
-            if (string.IsNullOrWhiteSpace(suffix))
+            adapters = probe.Adapters();
+            var names = RegistrationNames(host, suffix, adapters);
+            if (names.Count == 0)
             {
-                Stop(report, RegName, $"{host} has no primary DNS suffix, so Windows has no name to register");
+                Stop(report, RegName, NoNameReason(host, adapters));
                 return null;
             }
-            fqdn = $"{host}.{suffix}";
-            adapters = probe.Adapters();
+            fqdn = names[0].Fqdn;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

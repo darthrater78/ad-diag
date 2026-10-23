@@ -1142,8 +1142,8 @@ class MainForm : Form
 
             ("Dynamic DNS Registration",
                 "A domain member registers its own host record with the DNS server that owns its zone. These checks only read; the DNS registration tab can send a registration and trace it. A ZTNA or VPN client changes what each step means, so it is detected first.\n\n" +
-                "• Registration Name — the name Windows registers: the host name plus the primary DNS suffix\n" +
-                "  Fix: A machine with no primary DNS suffix registers nothing. The suffix is set by the domain join (System Properties > Computer Name > Change > More)\n\n" +
+                "• Registration Name — the name Windows registers: the host name plus the primary DNS suffix, and plus an adapter's own DNS suffix where \"Use this connection's DNS suffix in DNS registration\" is on\n" +
+                "  Fix: A machine with neither registers nothing. The primary suffix is set by the domain join (System Properties > Computer Name > Change > More); the adapter option is in the adapter's IPv4 > Advanced > DNS\n\n" +
                 "• ZTNA / VPN Client — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Island and others), any other tunnel or virtual adapter that holds an address, an adapter with a /32 address and no gateway, 100.64.0.0/10 addresses, or DNS answered by the client's local proxy (informational)\n" +
                 "  Fix: Nothing to fix. It explains the results below: the client decides which DNS queries and which traffic reach the corporate network. If a client is missed or wrongly found, pick its adapter (or None) under 'ZTNA adapter' on the DNS registration tab; the choice lasts until the app closes\n\n" +
                 "• Registering Adapters — the connected adapters with 'Register this connection's addresses in DNS' turned on, and the addresses they would register\n" +
@@ -1529,16 +1529,56 @@ class MainForm : Form
     void RenderIntune(IntuneState s)
     {
         RenderIntuneEnrollment(s);
+        var e = s.Enrollment;
         if (s.PolicyError != null)
         {
             IntuneSection("Policy settings");
-            AppendIntuneLine($"  Not read: {s.PolicyError}\n", WarnColor);
+            AppendIntuneLine($"  Not read: {s.PolicyError}\n\n\n", WarnColor);
+        }
+        else
+        {
+            RenderIntuneScope("Device scope", s.Device, e.ProviderName);
+            RenderIntuneScope(e.Upn is { Length: > 0 } user ? $"User scope ({user})" : "User scope", s.User, e.ProviderName);
+        }
+        RenderIntuneApps(s, e.ProviderName);
+    }
+
+    // The MSI apps the MDM pushed, as Settings > Access work or school > Info lists them under Applications
+    void RenderIntuneApps(IntuneState s, string provider)
+    {
+        IntuneSection("Applications");
+        if (s.AppsError != null)
+        {
+            AppendIntuneLine($"  Not read: {s.AppsError}\n", WarnColor);
             return;
         }
-        var e = s.Enrollment;
-        RenderIntuneScope("Device scope", s.Device, e.ProviderName);
-        RenderIntuneScope(e.Upn is { Length: > 0 } user ? $"User scope ({user})" : "User scope", s.User, e.ProviderName);
+        if (s.Apps.Count == 0)
+        {
+            AppendIntuneLine($"    No MSI apps from {provider}\n", DimColor);
+            return;
+        }
+        AppendIntuneLine($"  {s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")} from {provider}\n\n", DimColor);
+        foreach (var app in s.Apps)
+        {
+            var (text, look) = Diagnostics.MsiStatus(app.Status);
+            var (mark, color) = StatusMark(look);
+            AppendIntuneLine($"    {mark} ", color);
+            AppendIntuneLine(app.Name ?? "Unnamed app", TextColor, bold: app.Name != null);
+            if (app.Version is { Length: > 0 } version) AppendIntuneLine($"  {version}", DimColor);
+            if (app.User) AppendIntuneLine("  (user)", DimColor);
+            AppendIntuneLine($"  — {text}", look == Status.Info ? DimColor : color);
+            if (app.LastError is { } error and not 0)
+                AppendIntuneLine($", error 0x{error:X8}", FailColor);
+            AppendIntuneLine("\n      ", TextColor);
+            AppendIntuneLine($"{{{app.ProductCode}}}\n", DimColor, mono: true);
+        }
     }
+
+    // Shapes as in the results grid, so the status reads without colour
+    static (string Mark, Color Color) StatusMark(Status status) => status switch
+    {
+        Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), Status.Info => ("i", AccentColor), _ => ("–", DimColor),
+    };
 
     void RenderIntuneEnrollment(IntuneState s)
     {
@@ -1987,10 +2027,7 @@ class MainForm : Form
     void AppendDnsStep(TestEntry step)
     {
         // Shapes as in the results grid, so the status reads without colour
-        var (mark, color) = step.Status switch
-        {
-            Status.Pass => ("●", PassColor), Status.Warn => ("▲", WarnColor), Status.Fail => ("✕", FailColor), Status.Info => ("i", AccentColor), _ => ("–", DimColor),
-        };
+        var (mark, color) = StatusMark(step.Status);
         DnsParagraph(row: true);
         AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
         AppendRun(_dnsBox, $"\t{step.Name}", TextColor, GpBoldFont);
@@ -3773,8 +3810,25 @@ class MainForm : Form
                     ip.IsDynamicDnsEnabled, ip.UnicastAddresses.Select(u => u.Address).ToArray(), ip.DnsAddresses.ToArray(),
                     IsSoftwareAdapter(n.Id),
                     ip.UnicastAddresses.Any(u => u.Address.AddressFamily == AddressFamily.InterNetwork && u.PrefixLength == 32)
-                        && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)));
+                        && !ip.GatewayAddresses.Any(g => !g.Address.Equals(IPAddress.Any) && !g.Address.Equals(IPAddress.IPv6Any)),
+                    ip.DnsSuffix ?? "", RegistersAdapterSuffix(n.Id));
             }).ToList();
+
+        // "Use this connection's DNS suffix in DNS registration": Group Policy's setting if there is one, else the adapter's
+        static bool RegistersAdapterSuffix(string id)
+        {
+            try
+            {
+                using var policy = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient");
+                if (policy?.GetValue("RegisterAdapterName") is int forced) return forced != 0;
+                using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{id}");
+                return key?.GetValue("RegisterAdapterName") is int on && on != 0;
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                return false;
+            }
+        }
 
         // Windows enumerates a software adapter itself (ROOT\, SWD\); a real one is found on a bus (PCI\, USB\, VMBUS\)
         static bool IsSoftwareAdapter(string id)

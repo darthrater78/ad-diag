@@ -88,6 +88,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 
 Newest first. Dates are when the change was made; unreleased changes ship in the next version.
 
+- **2026-10-23 (unreleased, session 4):** the Intune tab lists the MSI apps Intune pushed, read-only from `EnterpriseDesktopAppManagement` and the uninstall keys; of an installer's download URL only the file name is kept, never the query, which can carry an access token. The DNS registration name also reads each adapter's DNS suffix and its "Use this connection's DNS suffix in DNS registration" setting, read-only.
 - **2026-10-23 (unreleased):** the Cloud Trust Groups check reads the signed-in user's own groups and the Entra Kerberos server object's password replication policy from AD; the domain and UPN put into the query must first match strict patterns that allow no quotes or LDAP filter characters.
 - **2026-10-23 (unreleased):** the key rollover checks read three accounts' `pwdLastSet` from AD with a fixed query; the only thing put into it is the domain, and only once it is a plain DNS name.
 - **2026-10-23 (unreleased):** the Credentials & Windows Hello group reads the Hello policy and the user's biometric enrollment from the registry read-only, the TPM's version from TPM Base Services (which any user may ask), and only the target names of saved credentials from `cmdkey /list`, never their passwords.
@@ -187,7 +188,7 @@ Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same 
 
 Checks whether this machine's own host record can reach, and is right on, the DNS server that owns its zone. These checks only read. SOA and host records are queried with the Windows DNS API on the wire, never from the resolver cache or the machine's own knowledge of its name.
 
-- **Registration Name** — the name Windows registers: host name plus primary DNS suffix
+- **Registration Name** — the name Windows registers: host name plus primary DNS suffix, and host name plus an adapter's own DNS suffix where "Use this connection's DNS suffix in DNS registration" is on. With neither, it says which adapter suffixes are used for lookups only
 - **ZTNA / VPN Client** (informational) — an adapter from a known client (Zscaler, Cloudflare WARP, Netskope, GlobalProtect, Twingate, Tailscale, Island, Microsoft Global Secure Access, Cisco, Fortinet and others), any other tunnel adapter, any other virtual (software) adapter that holds an address, an adapter with a `/32` address and no default gateway, addresses in `100.64.0.0/10`, or DNS answered by the client's local proxy. Hypervisor and loopback adapters are not counted. A client in "VPN mode" gives its adapter a real routable address, so detection does not depend on the address range
 - **Registering Adapters** — connected adapters with "Register this connection's addresses in DNS" turned on and the addresses they would register; warns when one is a `100.64.0.0/10` tunnel address that no other host can route to, and notes when a client's adapter holds a routable address but has registration turned off
 - **Zone Primary Server** — the zone and its primary server, found the way Windows finds where to send an update: the SOA record of the name, then of each parent, asked of the DNS servers of the adapters that register (IPv4 servers, in order; one that doesn't answer is passed over), not of whichever server the system resolver prefers. The detail names the server that answered. If no registering adapter has an IPv4 DNS server, the configured DNS servers are asked. Warns when the primary server resolves to a public address, which usually means the zone found is the internet-facing copy that takes no updates from this machine; a synthetic `100.64.0.0/10` address from a ZTNA client is Info, since updates reach the real server if the client forwards port 53 for it
@@ -307,10 +308,11 @@ Every step is also written to the log.
 
 ![Intune policies tab with the enrollment, device and user settings](docs/screenshots/intune-policies.png)
 
-Every setting Intune pushed, read from the MDM client's `PolicyManager` keys:
+Every setting and MSI app Intune pushed, read from the MDM client's `PolicyManager` and `EnterpriseDesktopAppManagement` keys:
 
 - **Enrollment** — the MDM and the account that enrolled the PC, the last successful sync (and a failed attempt since), and the Management Extension's state
 - **Device scope** and **User scope** — each setting by area, with its value. A green dot is the value in force; an amber dot is a setting another provider (another MDM, a provisioning package) sets instead, with that provider's id
+- **Applications** — the MSI apps Intune pushed to the device and to the signed-in user, the list Settings > Accounts > Access work or school > Info shows under Applications: each app's name (from its uninstall entry, else its installer's file name), version and install state, with the error code when it failed. Win32 apps the Management Extension installs aren't kept there, so they aren't listed
 - **Refresh** — reads it all again
 - **Sync now** — after a confirmation, starts the enrollment's own sync task (`PushLaunch`, the one behind **Sync** in Settings > Accounts > Access work or school). The task needs Run as Administrator, so when the app isn't elevated the button reads **Sync in Settings** and opens that Settings page instead, where Windows' own **Sync** works for a standard user
 

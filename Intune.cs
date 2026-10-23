@@ -19,6 +19,11 @@ static partial class Diagnostics
 
     const string EnrollmentsKey = @"SOFTWARE\Microsoft\Enrollments";
     const string OmadmAccountsKey = @"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts";
+    // MSI apps an MDM pushed (EnterpriseDesktopAppManagement CSP), under the device context or a user's SID
+    const string DesktopAppsKey = @"SOFTWARE\Microsoft\EnterpriseDesktopAppManagement";
+    const string DeviceAppContext = "S-0-0-00-0000000000-0000000000-000000000-000";
+    static readonly string[] UninstallKeys =
+        [@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"];
     const string IntuneProvider = "MS DM Server";
     const string ExtensionService = "IntuneManagementExtension";
     // A PC that is on syncs about every 8 hours; a week without one means it has been off or can't reach Intune
@@ -147,21 +152,84 @@ static partial class Diagnostics
         catch (Exception ex) when (ex is not OperationCanceledException) { extensionError = ex.Message; }
 
         List<MdmSetting> device = [], user = [];
-        string? policyError = null;
+        List<MdmApp> apps = [];
+        string? policyError = null, appsError = null;
+        string? sid = probe.CurrentUserSid();
         try
         {
             string providerRoot = $@"SOFTWARE\Microsoft\PolicyManager\providers\{enrollment.Id}\default";
             device = ReadSettings(probe, $@"{providerRoot}\Device", @"SOFTWARE\Microsoft\PolicyManager\current\device", enrollment.Id);
-            if (probe.CurrentUserSid() is { } sid)
+            if (sid != null)
                 user = ReadSettings(probe, $@"{providerRoot}\{sid}", $@"SOFTWARE\Microsoft\PolicyManager\current\{sid}", enrollment.Id);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
         {
             policyError = "needs Run as Administrator to read the policy settings";
         }
+        try { apps = ReadApps(probe, enrollment.Id, sid); }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            appsError = "needs Run as Administrator to read the apps";
+        }
 
-        return new(enrollment, success, failure, syncError, extension, extensionError, device, user, policyError);
+        return new(enrollment, success, failure, syncError, extension, extensionError, device, user, policyError, apps, appsError);
     }
+
+    /// <summary>
+    /// The MSI apps this enrollment pushed, the list Settings shows under Applications: for the device, then for
+    /// <paramref name="sid"/>. Apps another MDM server pushed are left out.
+    /// </summary>
+    internal static List<MdmApp> ReadApps(IProbe probe, string enrollmentId, string? sid)
+    {
+        var apps = new List<MdmApp>();
+        foreach (var (context, isUser) in new[] { (DeviceAppContext, false), (sid, true) })
+        {
+            if (context == null) continue;
+            string msiPath = $@"{DesktopAppsKey}\{context}\MSI";
+            foreach (string key in (probe.RegistrySubKeys(msiPath) ?? []).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                var values = probe.RegistryValues($@"{msiPath}\{key}");
+                if (values == null) continue;
+                if (values.GetValueOrDefault("ServerAccountID") is string server && !SameId(server, enrollmentId)) continue;
+                // The key and ProductCode wrap the product code in one or two pairs of braces
+                string code = key.Trim('{', '}');
+                apps.Add(new(code, AppName(probe, code, values), values.GetValueOrDefault("ProductVersion") as string,
+                    values.GetValueOrDefault("Status") as int?, values.GetValueOrDefault("LastError") as int?, isUser));
+            }
+        }
+        return apps;
+    }
+
+    // The installed product's name; else the installer's file name, from the URL's path only (the query can hold a token)
+    static string? AppName(IProbe probe, string code, Dictionary<string, object> values)
+    {
+        if (Guid.TryParse(code, out var guid))
+            foreach (string root in UninstallKeys)
+                if (probe.RegistryValues($@"{root}\{guid.ToString("B").ToUpperInvariant()}")?.GetValueOrDefault("DisplayName") is string { Length: > 0 } name)
+                    return name;
+        string? url = values.GetValueOrDefault("CurrentDownloadUrl") as string
+            ?? (values.GetValueOrDefault("DownloadUrlList") as string[])?.FirstOrDefault(u => u.Length > 0);
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
+        string file = Uri.UnescapeDataString(uri.AbsolutePath.Split('/').Last());
+        return file.Length > 0 ? file : null;
+    }
+
+    /// <summary>An MSI app's Status as Settings words it (EnterpriseDesktopAppManagement CSP), and how it went.</summary>
+    internal static (string Text, Status Look) MsiStatus(int? status) => status switch
+    {
+        10 => ("Initialized", Status.Info),
+        20 => ("Download in progress", Status.Info),
+        25 => ("Download pending retry", Status.Warn),
+        30 => ("Download failed", Status.Fail),
+        40 => ("Download completed", Status.Info),
+        48 => ("Waiting for the user to sign in", Status.Info),
+        50 => ("Install in progress", Status.Info),
+        55 => ("Install pending retry", Status.Warn),
+        60 => ("Install failed", Status.Fail),
+        70 => ("Installed (enforcement completed)", Status.Pass),
+        null => ("status not recorded", Status.Info),
+        var other => ($"status {other}", Status.Info),
+    };
 
     // What the provider set, area by area, and whether its value is the one in force
     static List<MdmSetting> ReadSettings(IProbe probe, string providerPath, string currentPath, string providerId)
@@ -253,6 +321,10 @@ record MdmEnrollment(string Id, string Provider, int? State, string? Upn)
 /// <summary>One setting an MDM provider pushed: whether it is the value in force, or which provider's is instead.</summary>
 record MdmSetting(string Area, string Name, string Value, bool ProviderWins, string? Winner);
 
+/// <summary>One MSI app an MDM pushed: its product code, name when known, version, CSP Status and LastError, and whether it is the user's.</summary>
+record MdmApp(string ProductCode, string? Name, string? Version, int? Status, int? LastError, bool User);
+
 /// <summary>What the Intune group and the Intune policies tab show; an error is the reason a part couldn't be read.</summary>
 record IntuneState(MdmEnrollment Enrollment, DateTime? LastSuccess, DateTime? LastFailure, string? SyncError,
-    int? ExtensionState, string? ExtensionError, List<MdmSetting> Device, List<MdmSetting> User, string? PolicyError);
+    int? ExtensionState, string? ExtensionError, List<MdmSetting> Device, List<MdmSetting> User, string? PolicyError,
+    List<MdmApp> Apps, string? AppsError);

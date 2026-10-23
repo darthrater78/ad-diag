@@ -460,7 +460,13 @@ static class Shots
             new("Edge", "HomepageLocation", "https://intranet.contoso.com", true, null),
             new("OneDrive", "KFMSilentOptIn", "72f988bf-0000-4000-8000-000000000001", true, null),
         ];
-        return new(enrollment, nowUtc.AddMinutes(-28), null, null, null, null, device, user, null);
+        var apps = new List<MdmApp>
+        {
+            new("DDF6D6BF-887E-4EB3-A89D-2C153BAF3256", "Microsoft Intune Management Extension", "1.105.103.0", 70, 0, false),
+            new("6A7DFC50-0395-4E1E-BF84-ED1404E72051", "Contoso VPN Client", "4.2.1.0", 70, 0, false),
+            new("7ECACCD0-8601-4884-8860-7A4ADF4ED814", "ContosoTimesheet.msi", "2.0.0.0", 60, unchecked((int)0x80070643), true),
+        };
+        return new(enrollment, nowUtc.AddMinutes(-28), null, null, null, null, device, user, null, apps, null);
     }
 
     static string MockRsop()

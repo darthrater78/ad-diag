@@ -58,6 +58,36 @@ public class DnsRegistrationTests
         Assert.Empty(probe.SoaCalls);
     }
 
+    // The PC from the report: no primary suffix, IOT has nscriven.net and registers, Island has scrivtech.com and doesn't
+    static List<NetAdapter> SuffixedAdapters(bool useSuffix) =>
+    [
+        new("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net", RegistersSuffix: useSuffix),
+        new("Island Private Access", "Wintun Userspace Tunnel", false, false, [IPAddress.Parse("172.16.50.5")], [], DnsSuffix: "scrivtech.com", RegistersSuffix: true),
+    ];
+
+    [Fact]
+    public void NoPrimarySuffix_NamesTheAdapterSuffixesUsedOnlyForLookups()
+    {
+        var probe = Healthy();
+        probe.Identity = ("PROX-ENTRA", "");
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange(SuffixedAdapters(useSuffix: false));
+        var group = Run(probe);
+        Assert.Equal(Status.Warn, StatusOf(group, "Registration Name"));
+        string detail = DetailOf(group, "Registration Name");
+        Assert.Contains("IOT (nscriven.net), Island Private Access (scrivtech.com, registration off)", detail);
+        Assert.Contains("Use this connection's DNS suffix in DNS registration", detail);
+    }
+
+    [Fact]
+    public void NoPrimarySuffix_RegistersWithTheAdapterSuffixWhenThatIsOn()
+    {
+        Assert.Equal([("PROX-ENTRA.nscriven.net", "IOT")], Diagnostics.RegistrationNames("PROX-ENTRA", "", SuffixedAdapters(useSuffix: true)));
+        Assert.Equal([("pc042.contoso.com", (string?)null), ("pc042.nscriven.net", "IOT")],
+            Diagnostics.RegistrationNames("pc042", "contoso.com", SuffixedAdapters(useSuffix: true)));
+        Assert.Equal([("pc042.nscriven.net", (string?)null)], Diagnostics.RegistrationNames("pc042", "nscriven.net", SuffixedAdapters(useSuffix: true)));
+    }
+
     [Theory]
     [InlineData("100.64.0.0", true)]
     [InlineData("100.127.255.255", true)]

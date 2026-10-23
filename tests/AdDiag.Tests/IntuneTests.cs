@@ -185,6 +185,75 @@ public class IntuneTests
         Assert.Contains("EnrollmentState 6", entry.Detail);
     }
 
+    const string AppsRoot = @"SOFTWARE\Microsoft\EnterpriseDesktopAppManagement";
+    const string DeviceContext = "S-0-0-00-0000000000-0000000000-000000000-000";
+
+    // MSI apps as a real PC keeps them: key and ProductCode in double braces, the MDM's account id beside each
+    static FakeProbe WithApps()
+    {
+        var probe = Enrolled();
+        probe.Registry[$@"{AppsRoot}\{DeviceContext}\MSI\{{{{DDF6D6BF-887E-4EB3-A89D-2C153BAF3256}}}}"] = new()
+        {
+            ["Status"] = 70, ["LastError"] = 0, ["ProductVersion"] = "1.105.103.0", ["ServerAccountID"] = Id,
+            ["CurrentDownloadUrl"] = "https://imeswda-afd-hotfix.manage.microsoft.com/IntuneWindowsAgent.msi?sig=secret",
+        };
+        probe.Registry[$@"{AppsRoot}\{DeviceContext}\MSI\{{6A7DFC50-0395-4E1E-BF84-ED1404E72051}}"] = new()
+        {
+            ["Status"] = 60, ["LastError"] = unchecked((int)0x80070643), ["ServerAccountID"] = Id,
+        };
+        probe.Registry[@"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{6A7DFC50-0395-4E1E-BF84-ED1404E72051}"] =
+            new() { ["DisplayName"] = "Contoso VPN Client" };
+        // Another MDM server's app
+        probe.Registry[$@"{AppsRoot}\{DeviceContext}\MSI\{{0C295A70-0C7C-451D-8D2D-C15DFCF7B226}}"] = new()
+        {
+            ["Status"] = 70, ["ServerAccountID"] = "0F000000-0000-4000-8000-0000000000AA",
+        };
+        probe.Registry[$@"{AppsRoot}\{Sid}\MSI\{{A99DF952-D7EE-44E9-B277-9881EAC57B0B}}"] = new() { ["Status"] = 50, ["ServerAccountID"] = Id };
+        return probe;
+    }
+
+    [Fact]
+    public void Apps_ListThisEnrollmentsMsiAppsForDeviceAndUser()
+    {
+        var probe = WithApps();
+        var state = Diagnostics.ReadIntuneState(probe, Diagnostics.ReadEnrollment(probe)!);
+
+        Assert.Null(state.AppsError);
+        Assert.Equal(["6A7DFC50-0395-4E1E-BF84-ED1404E72051", "DDF6D6BF-887E-4EB3-A89D-2C153BAF3256", "A99DF952-D7EE-44E9-B277-9881EAC57B0B"],
+            state.Apps.Select(a => a.ProductCode));
+        var vpn = state.Apps[0];
+        Assert.Equal(("Contoso VPN Client", 60, unchecked((int)0x80070643), false), (vpn.Name, vpn.Status, vpn.LastError, vpn.User));
+        Assert.True(state.Apps[2].User);
+    }
+
+    [Fact]
+    public void Apps_NameFallsBackToTheInstallerFileWithoutTheQuery()
+    {
+        var probe = WithApps();
+        var ime = Diagnostics.ReadApps(probe, Id, Sid).Single(a => a.ProductCode.StartsWith("DDF6", StringComparison.Ordinal));
+        Assert.Equal(("IntuneWindowsAgent.msi", "1.105.103.0"), (ime.Name, ime.Version));
+    }
+
+    [Fact]
+    public void Apps_DeniedIsAReasonNotAFailure()
+    {
+        var probe = WithApps();
+        probe.Denied.Add($@"{AppsRoot}\{DeviceContext}\MSI");
+        var state = Diagnostics.ReadIntuneState(probe, Diagnostics.ReadEnrollment(probe)!);
+        Assert.Empty(state.Apps);
+        Assert.Contains("Administrator", state.AppsError);
+        Assert.Null(state.PolicyError);
+    }
+
+    [Theory]
+    [InlineData(70, "Pass")]
+    [InlineData(60, "Fail")]
+    [InlineData(30, "Fail")]
+    [InlineData(55, "Warn")]
+    [InlineData(50, "Info")]
+    [InlineData(99, "Info")]
+    public void Apps_StatusLooksLikeSettings(int status, string look) => Assert.Equal(look, Diagnostics.MsiStatus(status).Look.ToString());
+
     [Fact]
     public void State_ListsDeviceAndUserSettingsWithTheirWinner()
     {
