@@ -402,6 +402,14 @@ sealed class LoggingProbe(IProbe inner, DiagLog log) : IProbe
 
     public bool IsElevated() => Call("machine", "Elevation", inner.IsElevated, elevated => elevated ? "running as Administrator" : "not elevated");
 
+    public SspiResult Authenticate(string package, string spn, CancellationToken ct) =>
+        Call("sspi", $"{package} sign-in to {spn}", () => inner.Authenticate(package, spn, ct),
+            r => $"status 0x{r.Status:X8}" + (r.Package != null ? $", package {r.Package}" : ""));
+
+    public ShareOpen OpenShare(string unc, CancellationToken ct) =>
+        Call("share", $"Open {unc}", () => inner.OpenShare(unc, ct),
+            r => r.Entries is { } n ? $"{n} entries" : $"error {r.Error}: {r.Message}");
+
     public UrlSecurity UrlSecurity(string url, CancellationToken ct) =>
         Call("machine", $"Internet settings for {url}", () => inner.UrlSecurity(url, ct),
             s => $"zone {s.Zone}, logon policy 0x{s.Logon:x}, status bar policy {s.StatusBar}");

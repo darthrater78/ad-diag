@@ -18,6 +18,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../MainForm.cs" />
+    <Compile Include="../../MainForm.Smb.cs" />
     <Compile Include="../../Parsers.cs" />
     <Compile Include="../../Runner.cs" />
     <Compile Include="../../Diagnostics.cs" />
@@ -27,6 +28,8 @@
     <Compile Include="../../Credentials.cs" />
     <Compile Include="../../KdcKeys.cs" />
     <Compile Include="../../CloudTrust.cs" />
+    <Compile Include="../../SmbPath.cs" />
+    <Compile Include="../../SmbNative.cs" />
     <Compile Include="../../Log.cs" />
   </ItemGroup>
 </Project>

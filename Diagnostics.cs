@@ -63,6 +63,14 @@ interface IProbe
     int? TpmVersion();
     /// <summary>The signed-in user's UPN (user@domain), for Entra and domain accounts alike; null if Windows has none.</summary>
     string? CurrentUserUpn();
+    /// <summary>
+    /// The first step of an SSPI sign-in to <paramref name="spn"/> with <paramref name="package"/> ("Kerberos" or
+    /// "Negotiate") and this user's own credentials. Nothing is sent to the server; for Kerberos, Windows asks the KDC
+    /// for the service ticket. For Negotiate, the package it chose.
+    /// </summary>
+    SspiResult Authenticate(string package, string spn, CancellationToken ct);
+    /// <summary>Lists a share's root over SMB: the entry count, or the Win32 error that stopped it.</summary>
+    ShareOpen OpenShare(string unc, CancellationToken ct);
 }
 
 /// <summary>How the PC is joined, which decides what the app checks and shows.</summary>

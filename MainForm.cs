@@ -44,7 +44,7 @@ static class Program
     }
 }
 
-class MainForm : Form
+partial class MainForm : Form
 {
     // Tokens: see DESIGN.md. The theme starts from the Windows light/dark app setting and the header button
     // switches it (SetTheme); nothing is saved, so the next launch follows Windows again.
@@ -174,10 +174,11 @@ class MainForm : Form
         if (_elevated) Text = "Administrator: " + Text;
         var layout = BuildLayout();
         layout.Controls.Add(BuildHeader(appVersion, _elevated), 0, 0);
-        layout.Controls.Add(BuildConfigPanel(), 0, 1);
-        layout.Controls.Add(BuildActionsPanel(), 0, 2);
-        layout.Controls.Add(BuildSummaryPanel(), 0, 3);
-        layout.Controls.Add(BuildContent(), 0, 4);
+        layout.Controls.Add(BuildModeBar(), 0, 1);
+        layout.Controls.Add(BuildConfigPanel(), 0, 2);
+        layout.Controls.Add(BuildActionsPanel(), 0, 3);
+        layout.Controls.Add(BuildSummaryPanel(), 0, 4);
+        layout.Controls.Add(BuildContent(), 0, 5);
 
         var mainPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = Padding.Empty };
         mainPanel.Controls.Add(layout);
@@ -190,6 +191,7 @@ class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
 
         ShowPreview();
+        ApplyMode();
         WireLifecycle();
         AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(_elevated ? "running as Administrator" : "not elevated")}");
         _ = DetectStartupAsync();
@@ -223,11 +225,12 @@ class MainForm : Form
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // header
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // mode: Active Directory or SMB
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // config
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // actions
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // summary
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // content
-        layout.RowCount = 5;
+        layout.RowCount = 6;
         return layout;
     }
 
@@ -286,8 +289,14 @@ class MainForm : Form
         configPanel.Controls.AddRange([lblProfile, _cmbProfile, _lblProfileHint]);
         FillProfileChoices();
 
-        _txtDomain = MakeInput(configPanel, "Domain", 0, 0);
-        _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0);
+        _txtDomain = MakeInput(configPanel, "Domain", 0, 0, out _lblDomain);
+        _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0, out _);
+        // The SMB mode's field takes the DC's place; it isn't a domain control, so the Entra profile doesn't hide it
+        _txtSmbTarget = MakeInput(configPanel, "Server or share", 1, 0, out _lblSmbTarget);
+        _domainControls.Remove(_txtSmbTarget);
+        _domainControls.Remove(_lblSmbTarget);
+        _txtSmbTarget.Visible = _lblSmbTarget.Visible = false;
+        _txtSmbTarget.AccessibleName = "Server or share to test, as in \\\\files\\Finance";
 
         _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
@@ -320,7 +329,9 @@ class MainForm : Form
         var btnReset = new ThemedButton { Text = "Reset all", BackColor = SurfaceColor, ForeColor = FailColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(75, 26), Location = new Point(508, 4) };
         btnReset.Click += BtnReset_Click;
         _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(591, 4), Size = new Size(209, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-        actionsPanel.Controls.AddRange([_btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
+        _btnSmbTest = new ThemedButton { Text = "Test connection", BackColor = AccentColor, ForeColor = OnAccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(156, 26), Location = new Point(10, 4), Visible = false };
+        _btnSmbTest.Click += (s, e) => RunSmbTest();
+        actionsPanel.Controls.AddRange([_btnRun, _btnRunMenu, _btnSmbTest, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
         return actionsPanel;
     }
 
@@ -346,12 +357,17 @@ class MainForm : Form
 
     Panel BuildTabBar()
     {
-        var tabBar = new Panel { Height = 30, Dock = DockStyle.Top, BackColor = BgColor };
-        tabBar.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, tabBar.Height - 1, tabBar.Width, tabBar.Height - 1);
+        var tabBar = _tabBar = new Panel { Height = 30, Dock = DockStyle.Top, BackColor = BgColor };
+        tabBar.Paint += (s, e) =>
+        {
+            e.Graphics.DrawLine(BorderPen, 0, tabBar.Height - 1, tabBar.Width, tabBar.Height - 1);
+            // Between the mode's own tabs and the Guide and Log, which serve both modes
+            if (_tabDividerX > 0) e.Graphics.DrawLine(BorderPen, _tabDividerX, S(7), _tabDividerX, tabBar.Height - S(8));
+        };
         _btnTabResults = new ThemedButton { Text = "Results", IsTab = true, Selected = true, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(10, 2) };
         _btnTabResults.Click += (s, e) => SwitchTab("results");
         _btnTabGuide = new ThemedButton { Text = "Guide", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(94, 2) };
-        _btnTabGuide.Click += (s, e) => SwitchTab("guide");
+        _btnTabGuide.Click += (s, e) => { if (_mode == TestMode.Smb) ShowGuideSection(SmbGuideTitle); else SwitchTab("guide"); };
         _btnTabGp = new ThemedButton { Text = "Group Policy", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(110, 26), Location = new Point(178, 2) };
         _btnTabGp.Click += (s, e) => { SwitchTab("gp"); RefreshGpTab(); };
         _btnTabTickets = new ThemedButton { Text = "Kerberos tickets", IsTab = true, Selected = false, BackColor = BgColor, Font = TabFontInactive, Size = new Size(130, 26), Location = new Point(292, 2) };
@@ -392,12 +408,13 @@ class MainForm : Form
         // The tabs share one host under the Runs strip. Docked straight into the wrapper, a tab's place depended on
         // the wrapper's child order, which WinForms can change once the strip appears, leaving tabs under it
         var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
-        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _intunePanel, _logPanel]);
+        BuildSmbPanel();
+        tabHost.Controls.AddRange([_resultsArea, _smbPanel, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _intunePanel, _logPanel]);
         contentWrapper.Controls.Add(tabHost);
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
 
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbBox, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             ThemeScrollbars(scrolling);
         return contentWrapper;
     }
@@ -696,7 +713,7 @@ class MainForm : Form
         Retheme(this);
         _btnTheme.Text = ThemeButtonText;
         ApplyTitleBarTheme();
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbBox, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
         RerenderTextPanes();
         Invalidate(true);
@@ -726,6 +743,7 @@ class MainForm : Form
         if (_intuneLoaded) RefreshIntuneTab();
         else { _intuneBox.Clear(); AppendIntuneLine("Switch to this tab to load Intune details, or click Refresh.\n", DimColor); }
         RenderDnsBox();
+        RenderSmb();
         RenderLog();
         RebuildHistoryBar();
     }
@@ -875,7 +893,7 @@ class MainForm : Form
         return col == 0 ? (left, domainWidth) : (left + domainWidth + gap, room - domainWidth);
     }
 
-    TextBox MakeInput(Panel parent, string label, int col, int row)
+    TextBox MakeInput(Panel parent, string label, int col, int row, out Label labelControl)
     {
         // Two columns to the right of the profile picker; the DC's is wider, since its label shares the row with the suffix box
         var (x, w) = InputColumn(parent.Width, col, px => px);
@@ -899,6 +917,7 @@ class MainForm : Form
 
         parent.Controls.AddRange([lbl, txt]);
         _domainControls.AddRange([lbl, txt]);
+        labelControl = lbl;
 
         parent.Resize += (s, e) =>
         {
@@ -915,6 +934,11 @@ class MainForm : Form
 
     void BtnClear_Click(object? sender, EventArgs e)
     {
+        if (_mode == TestMode.Smb)
+        {
+            ClearSmb();
+            return;
+        }
         AppLog.Info("run", "Results cleared" + (_running ? "; run cancelled" : ""));
         _runCts?.Cancel();
         _runHistory.Clear();
@@ -936,6 +960,8 @@ class MainForm : Form
 
         _txtDomain.Text = "";
         _txtDc.Text = "";
+        _txtSmbTarget.Text = "";
+        ClearSmb();
         _profilePicked = false;
         SetProfile(_detectedProfile ?? JoinProfile.Domain);
         BtnClear_Click(sender, e);
@@ -946,7 +972,9 @@ class MainForm : Form
 
     void SwitchTab(string tab)
     {
-        _resultsArea.Visible = tab == "results";
+        _tab = tab;
+        _resultsArea.Visible = tab == "results" && _mode == TestMode.Ad;
+        _smbPanel.Visible = tab == "results" && _mode == TestMode.Smb;
         _guideBox.Visible = tab == "guide";
         _gpPanel.Visible = tab == "gp";
         _ticketsPanel.Visible = tab == "tickets";
@@ -1249,6 +1277,41 @@ class MainForm : Form
                 "  Fix: If it is stopped, start the 'Microsoft Intune Management Extension' service. If it won't stay running, read its logs in C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\n\n" +
                 "• Device Policies — how many settings Intune pushed to the device are in force, and how many MSI apps it pushed; a setting another provider (another MDM, a provisioning package) sets instead is counted separately, and an app that failed to download or install warns\n" +
                 "  Fix: None arriving: check the device's and user's group assignments in the Intune admin center, then sync"),
+
+            (SmbGuideTitle,
+                "Switch to SMB at the top, type a file server or share in Server or share (\\\\files\\Finance, or files.contoso.com) and click Test connection. The test follows the path a connection takes and stops at the first step that fails: Name, Port 445, Kerberos, Sign-in, Share. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked. It runs only when asked, never with Run diagnostics, and it is read only: no password is asked for or saved. Every step is in the Log tab, and with Debug ticked so is each lookup, query and SSPI status it made.\n\n" +
+                "• Name — the server's name in DNS, after a short name gets the Domain field's domain, and its addresses. IPv6 only is a note: some networks and apps need IPv4. A server given by address skips Kerberos, which needs a name\n" +
+                "  Fix: Check the spelling and the server's A record. On an Entra joined PC, check the on-prem domain and that this PC's DNS servers (on a VPN, its DNS settings) can answer for it\n\n" +
+                "• Port 445 (SMB) — a TCP connection to the server on 445, IPv4 first\n" +
+                "  Fix: A firewall between this PC and the server, or the server's Server service is stopped. On a VPN, check that it routes the server's network\n\n" +
+                "• Cloud Kerberos Trust — Entra joined PCs, and hybrid joined ones with Windows Hello: dsregcmd's CloudTgt and OnPremTgt. Without OnPremTgt the PC gets no Kerberos ticket for on-prem servers\n" +
+                "  Fix: Create the Microsoft Entra Kerberos server object in the domain (Set-AzureADKerberosServer), then sign out and back in\n\n" +
+                "• Ticket-granting ticket — a krbtgt ticket for the domain, requested if none is cached\n" +
+                "  Fix: See DC Discovery & Connectivity and Kerberos & Time Sync in Active Directory\n\n" +
+                "• _kpasswd._tcp SRV — domain and hybrid joined PCs: the Kerberos password change service. Missing warns without stopping: sign-in works, password changes fail\n" +
+                "  Fix: Run 'nltest /dsregdns' on a DC, or restart its Netlogon service\n\n" +
+                "• SPN — the account in AD that holds cifs/<server> or HOST/<server> (HOST covers cifs), found by an LDAP search any user may make. None means Kerberos can't name the server; two accounts holding it makes Kerberos fail\n" +
+                "  Fix: 'setspn -S cifs/<server> <account>'; for a duplicate, 'setspn -Q cifs/<server>' lists the holders and 'setspn -D' removes one. Register an alias the users type, too\n\n" +
+                "• Service ticket — asks the KDC for a cifs/<server> ticket through Windows' own Kerberos, as a connection would. The reason it fails is read from its status number (KDC_ERR_S_PRINCIPAL_UNKNOWN, clock skew, no DC)\n" +
+                "  Fix: As the reason says: the SPN, the clock, or reaching a DC\n\n" +
+                "• Ticket encryption — AES or RC4 on that ticket. RC4 breaks against DCs hardened to AES\n" +
+                "  Fix: Set the server's account to AES (msDS-SupportedEncryptionTypes), then purge tickets on the Kerberos tickets tab\n\n" +
+                "• Max Token Size — the largest Kerberos ticket Windows accepts. Below 48000 bytes, users in many groups can fail sign-in\n" +
+                "  Fix: Delete MaxTokenSize under HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\Kerberos\\Parameters, or set it to 48000\n\n" +
+                "• Negotiation — what Windows' Negotiate picks for this server with your own sign-in: Kerberos, or NTLM because Kerberos had no ticket. Nothing is sent to the server\n" +
+                "  Fix: NTLM where Kerberos should work: fix the Kerberos step's warning\n\n" +
+                "• LAN Manager auth level — how NTLM answers when it is used (LmCompatibilityLevel). Levels 0 to 2 send LM or NTLMv1. On an Entra joined PC with Windows Hello it adds that a Hello sign-in leaves NTLM no password hash to use\n" +
+                "  Fix: Set 'Network security: LAN Manager authentication level' to 'Send NTLMv2 response only' (level 3) or higher\n\n" +
+                "• Saved credential — a Windows credential in Credential Manager for this server (its name and user only; the password isn't read). Windows signs in to the server with it instead of your own sign-in\n" +
+                "  Fix: If it's stale or the wrong account, remove it in Control Panel > Credential Manager > Windows Credentials, or 'cmdkey /delete:<server>'\n\n" +
+                "• Share access — opens the share and counts the entries in its root (up to 1000). Errors are read by number: 5 access denied, 67 no such share, 1326 sign-in refused, 1272 guest only, 1219 already connected as someone else\n" +
+                "  Fix: Access denied: the share and folder (NTFS) permissions. No such share: 'net view \\\\<server>' lists them. Sign-in refused: the password, a lockout, or the Kerberos step\n\n" +
+                "• Signing — whether this PC requires SMB signing. Not required is a note: packets are signed when the server requires it\n" +
+                "  Fix: To require it, enable 'Microsoft network client: Digitally sign communications (always)'\n\n" +
+                "• SMBv1 client — the mrxsmb10 driver. SMBv1 has no encryption and is the target of EternalBlue-style attacks\n" +
+                "  Fix: Windows Features > SMB 1.0/CIFS File Sharing Support > clear SMB 1.0/CIFS Client\n\n" +
+                "• Insecure guest logons — whether this PC opens shares as guest when the server refuses its sign-in; Group Policy wins over the local setting\n" +
+                "  Fix: Disable 'Enable insecure guest logons' under Computer Configuration > Administrative Templates > Network > Lanman Workstation"),
         };
 
         return s;
@@ -1432,11 +1495,7 @@ class MainForm : Form
         FillProfileChoices();
 
         bool entra = profile == JoinProfile.Entra;
-        foreach (var control in _domainControls) control.Visible = !entra;
-        _lblProfileHint.Visible = entra;
-        _btnTabGp.Visible = !entra;
-        LayoutTabs();
-        if (entra && _gpPanel.Visible) SwitchTab("results");
+        ApplyMode();
         PopulateGuide();
         if (_runHistory.Count == 0) ShowPreview();
         if (changed || detected)
@@ -1466,15 +1525,28 @@ class MainForm : Form
         }
     }
 
-    // Tabs sit left to right in a fixed order, closing up around a hidden one
+    // Tabs sit left to right in a fixed order, closing up around a hidden one: the mode's own tabs, a divider, then
+    // the Guide and the Log, which serve both modes
     void LayoutTabs()
     {
+        bool smb = _mode == TestMode.Smb, entra = _profile == JoinProfile.Entra;
+        _btnTabGp.Visible = !smb && !entra;
+        _btnTabDns.Visible = _btnTabIntune.Visible = !smb;
+        ThemedButton[] own = [_btnTabResults, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune];
         int x = S(10);
-        foreach (var tab in _tabs.Where(t => t.Visible))
+        foreach (var tab in own.Where(t => t.Visible))
         {
             tab.Left = x;
             x += tab.Width + S(4);
         }
+        _tabDividerX = x + S(6);
+        x += S(16);
+        foreach (var tab in new[] { _btnTabGuide, _btnTabLog })
+        {
+            tab.Left = x;
+            x += tab.Width + S(4);
+        }
+        _tabBar?.Invalidate();
     }
 
     // ── Intune policies tab ─────────────────────────────────
@@ -1867,8 +1939,11 @@ class MainForm : Form
                 AppendTicketsLine(h + "\n", AccentColor, bold: true);
         }
 
-        for (int i = 0; i < tickets.Count; i++)
-            RenderTicket(tickets[i].Server, tickets[i].Fields, i);
+        // After an SMB test the server's own ticket leads, so it's found without scrolling
+        bool Tested(KlistTicket t) => _smbTestedSpn != null && t.Server.Split('@')[0].Trim().Equals(_smbTestedSpn, StringComparison.OrdinalIgnoreCase);
+        var ordered = tickets.OrderBy(t => Tested(t) ? 0 : 1).ToList();
+        for (int i = 0; i < ordered.Count; i++)
+            RenderTicket(ordered[i].Server, ordered[i].Fields, i, Tested(ordered[i]));
 
         if (tickets.Count == 0)
             AppendTicketsLine("No Kerberos tickets cached.\n", DimColor);
@@ -1893,7 +1968,7 @@ class MainForm : Form
         AppendTicketsLine(" └──\n\n", BorderColor);
     }
 
-    void RenderTicket(string server, Dictionary<string, string> fields, int index)
+    void RenderTicket(string server, Dictionary<string, string> fields, int index, bool tested = false)
     {
         string svc = server.Split('/')[0].ToUpperInvariant();
         string cacheFlag = fields.TryGetValue("Cache Flags", out var cf) ? cf : "";
@@ -1903,7 +1978,9 @@ class MainForm : Form
 
         AppendTicketsLine($"\n ┌─ ", BorderColor);
         AppendTicketsLine($" {label} ", OnAccentColor, bold: true, backColor: svc == "KRBTGT" ? AccentColor : PassColor);
-        AppendTicketsLine($"  {desc}\n", DimColor);
+        AppendTicketsLine($"  {desc}", DimColor);
+        if (tested) AppendTicketsLine("  · the server the SMB test checked", AccentColor, bold: true);
+        AppendTicketsLine("\n", DimColor);
         AppendTicketsLine($" │\n", BorderColor);
 
         TicketField("Server", server, TextColor, bold: true);
@@ -2113,38 +2190,45 @@ class MainForm : Form
         box.AppendText(text);
     }
 
-    // Starts a paragraph in the DNS pane: a result row has the grid's three columns (status, name, detail) and
-    // wraps its detail under the detail column; anything else is plain text
-    void DnsParagraph(bool row)
+    // Starts a paragraph in a step pane (DNS registration, SMB): a result row has the grid's three columns (status,
+    // name, detail) and wraps its detail under the detail column; anything else is plain text
+    void StepParagraph(RichTextBox box, bool row)
     {
-        _dnsBox.SelectionStart = _dnsBox.TextLength;
-        _dnsBox.SelectionLength = 0;
-        _dnsBox.SelectionTabs = row ? [S(96), S(270)] : [];
-        _dnsBox.SelectionHangingIndent = row ? S(270) : 0;
+        box.SelectionStart = box.TextLength;
+        box.SelectionLength = 0;
+        box.SelectionTabs = row ? [S(96), S(270)] : [];
+        box.SelectionHangingIndent = row ? S(270) : 0;
     }
+
+    void DnsParagraph(bool row) => StepParagraph(_dnsBox, row);
 
     void AppendDnsStep(TestEntry step)
     {
-        // Shapes as in the results grid, so the status reads without colour
+        AppendStepRow(_dnsBox, step, StepWord(step));
+        _dnsBox.ScrollToCaret();
+    }
+
+    // One result row in a step pane, with the results grid's shapes so the status reads without colour
+    void AppendStepRow(RichTextBox box, TestEntry step, string word)
+    {
         var (mark, color) = StatusMark(step.Status);
-        DnsParagraph(row: true);
-        AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
-        AppendRun(_dnsBox, $"\t{step.Name}", TextColor, GpBoldFont);
+        StepParagraph(box, row: true);
+        AppendRun(box, $"  {mark} {word}", color);
+        AppendRun(box, $"\t{step.Name}", TextColor, GpBoldFont);
         var detailColor = step.Status == Status.Skip ? DimColor : TextColor;
         string[] lines = step.Detail.Split('\n');
-        AppendRun(_dnsBox, $"\t{lines[0]}\n", detailColor);
+        AppendRun(box, $"\t{lines[0]}\n", detailColor);
         // A detail on several lines (an event's settings) keeps its later lines under the detail column
         foreach (string line in lines.Skip(1))
         {
-            _dnsBox.SelectionStart = _dnsBox.TextLength;
-            _dnsBox.SelectionTabs = [];
-            _dnsBox.SelectionIndent = S(270);
-            _dnsBox.SelectionHangingIndent = 0;
-            AppendRun(_dnsBox, line + "\n", detailColor);
+            box.SelectionStart = box.TextLength;
+            box.SelectionTabs = [];
+            box.SelectionIndent = S(270);
+            box.SelectionHangingIndent = 0;
+            AppendRun(box, line + "\n", detailColor);
         }
-        _dnsBox.SelectionStart = _dnsBox.TextLength;
-        _dnsBox.SelectionIndent = 0;
-        _dnsBox.ScrollToCaret();
+        box.SelectionStart = box.TextLength;
+        box.SelectionIndent = 0;
     }
 
     void RenderDnsBox()
@@ -2363,7 +2447,8 @@ class MainForm : Form
     static readonly Font LogGapFont = new("Segoe UI", 4f);
 
     // The results sections in order, each with the short name the By time view shows beside a line
-    static IReadOnlyList<(string Name, string Short)> LogSectionNames => Sections.Select(s => (s.Name, s.Short)).ToList();
+    static IReadOnlyList<(string Name, string Short)> LogSectionNames =>
+        [.. Sections.Select(s => (s.Name, s.Short)), .. Diagnostics.SmbSteps.Select(s => (s, s)), (Diagnostics.SmbSettings, "SMB settings")];
 
     void SetLogView(LogView view)
     {
@@ -3622,7 +3707,7 @@ class MainForm : Form
             x += btn.Width + S(4);
         }
         _historyPanel.Controls.Add(DeleteRunButton());
-        _historyPanel.Visible = true;
+        _historyPanel.Visible = _mode == TestMode.Ad;
     }
 
     ThemedButton RunButton(int index, int x)
@@ -3728,7 +3813,7 @@ class MainForm : Form
         _lblInfoCount.Text = notes.ToString();
         _lblWarnCaption.Text = warn == 1 ? "warning" : "warnings";
         _lblInfoCaption.Text = notes == 1 ? "note" : "notes";
-        _summaryPanel.Visible = true;
+        _summaryPanel.Visible = _mode == TestMode.Ad;
     }
 
     /// <summary>The selected run as plain text: what Export saves and Copy puts on the clipboard.</summary>
@@ -3766,9 +3851,8 @@ class MainForm : Form
         {
             foreach (var test in group.Tests)
             {
-                char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', Status.Info => 'i', _ => 'o' };
                 // A detail of several lines keeps its column
-                sb.AppendLine($"  {icon} {test.Name,-26} {test.Detail.Replace("\n", "\n" + new string(' ', 31))}");
+                sb.AppendLine($"  {ReportIcon(test.Status)} {test.Name,-26} {test.Detail.Replace("\n", "\n" + new string(' ', 31))}");
             }
             if (group.Readiness is { } ready)
                 sb.AppendLine($"  = {"Readiness",-26} {ready.Text}" + (ready.ShowGuide ? $" Fixes: Guide tab, {group.Name}." : ""));
@@ -3776,12 +3860,15 @@ class MainForm : Form
         sb.AppendLine();
     }
 
+    static char ReportIcon(Status status) => status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', Status.Info => 'i', _ => 'o' };
+
     void BtnCopy_Click(object? sender, EventArgs e)
     {
-        if (SelectedRun is not { IsPending: false } run) return;
+        string? report = _mode == TestMode.Smb ? BuildSmbReport() : SelectedRun is { IsPending: false } run ? BuildReport(run) : null;
+        if (report == null) return;
         try
         {
-            Clipboard.SetText(BuildReport(run));
+            Clipboard.SetText(report);
             _lblStatus.Text = "Results copied to the clipboard";
         }
         catch (Exception ex)
@@ -3792,17 +3879,25 @@ class MainForm : Form
 
     void BtnExport_Click(object? sender, EventArgs e)
     {
-        if (SelectedRun is not { IsPending: false } run) return;
+        string? report, name;
+        if (_mode == TestMode.Smb)
+        {
+            if (BuildSmbReport() is not { } smb || _smbTarget == null) return;
+            (report, name) = (smb, $"smb-{_smbTarget.Server}");
+        }
+        else
+        {
+            if (SelectedRun is not { IsPending: false } run) return;
+            (report, name) = (BuildReport(run), run.Domain.Length > 0 ? run.Domain : "entra");
+        }
 
         using var dlg = new SaveFileDialog
         {
-            FileName = $"ad-diag-{(run.Domain.Length > 0 ? Regex.Replace(run.Domain, @"[^a-zA-Z0-9.\-]", "_") : "entra")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"ad-diag-{Regex.Replace(name, @"[^a-zA-Z0-9.\-]", "_")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Text files (*.txt)|*.txt",
             DefaultExt = ".txt"
         };
         if (dlg.ShowDialog() != DialogResult.OK) return;
-
-        string report = BuildReport(run);
 
         try
         {
@@ -4003,6 +4098,12 @@ class MainForm : Form
         public int? TpmVersion() => QueryTpmVersion();
 
         public string? CurrentUserUpn() => QueryUserUpn();
+
+        public SspiResult Authenticate(string package, string spn, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => SmbNative.Authenticate(package, spn), SspiTimeoutMs, $"{package} sign-in to {spn}", ct);
+
+        public ShareOpen OpenShare(string unc, CancellationToken ct) =>
+            Runner.RunWithTimeout(() => SmbNative.OpenShare(unc), ShareTimeoutMs, $"Opening {unc}", ct);
 
         public string? CurrentUserSid()
         {
@@ -4450,6 +4551,7 @@ class MainForm : Form
     }
 
     const int ShareTimeoutMs = 20000;
+    const int SspiTimeoutMs = 15000; // a Kerberos request waits on the KDC, which can be slow over a VPN
 
     /// <summary>Runs a System32 tool inside the kill-on-close job; see <see cref="Runner.RunProcess"/>.</summary>
     static string RunProcess(string fileName, string arguments, int timeoutMs = 15000, CancellationToken ct = default) =>

@@ -1,6 +1,6 @@
 # AD Diagnostics
 
-Standalone Windows diagnostic tool that checks the health of a domain-joined machine's relationship with Active Directory. Single-exe, no install required.
+Standalone Windows diagnostic tool that checks the health of a domain-joined machine's relationship with Active Directory, and tests the path from the PC to a file share over SMB. Single-exe, no install required.
 
 [GitHub](https://github.com/darthrater78/ad-diag) · [v2026.10.23 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v2026.10.23)
 
@@ -32,7 +32,7 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
 
 ## Usage
 
-1. Launch `ad-diag.exe`
+1. Launch `ad-diag.exe`. The **Test** switch at the top picks what to test: **Active Directory** (the default, below) or **SMB**, a connection to one file share (see [SMB Connection Test](#smb-connection-test)). The fields under it, the primary button and the tabs follow the switch.
 2. The app reads how the PC is joined (`dsregcmd /status`) and sets the **Profile**: **Domain joined**, **Microsoft Entra hybrid joined** or **Microsoft Entra joined**, marked "(detected)". Each profile shows, runs and logs only what applies to it; pick another profile to check something else (for the session only, nothing is saved). An Entra joined PC has no domain, so its profile hides the Domain and DC fields, the Group Policy tab and the groups that need a domain (see [Profiles](#profiles)).
 
    ![Results on an Entra joined PC: only Dynamic DNS Registration, Entra Seamless Single Sign-On and Intune](docs/screenshots/results-entra.png)
@@ -48,12 +48,12 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
 
    ![The Run button's menu over a run started from one group, the others not run yet](docs/screenshots/run-menu.png)
 
-4. Review results. Every group starts collapsed to its heading, which shows its result (**PASSED**, **WARNING** or **FAILED**, the worst of its checks) and its counts. Click a heading (or use Up, Down and Enter or Space) to open or close it, **Expand all** / **Collapse all** for every group, or tick **Expand all groups after a run** to open them all by default (not saved). Switch to the **Guide** tab for explanations and fix suggestions (each group's section starts folded; click its title to open it), the **Group Policy** tab for a full Computer/User scope breakdown and an in-app **gpupdate**, the **Kerberos Tickets** tab for your full ticket cache and Primary Refresh Token, the **DNS registration** tab to register this computer in DNS and trace the result, the **Intune policies** tab for every setting Intune pushed and an in-app **Sync now**, or the **Log** tab to see what the app ran
+4. Review results. Every group starts collapsed to its heading, which shows its result (**PASSED**, **WARNING** or **FAILED**, the worst of its checks) and its counts. Click a heading (or use Up, Down and Enter or Space) to open or close it, **Expand all** / **Collapse all** for every group, or tick **Expand all groups after a run** to open them all by default (not saved). The tabs are in two parts: the mode's own tabs, then, after a divider, the **Guide** and the **Log**, which serve both modes. Switch to the **Guide** tab for explanations and fix suggestions (each group's section starts folded; click its title to open it), the **Group Policy** tab for a full Computer/User scope breakdown and an in-app **gpupdate**, the **Kerberos Tickets** tab for your full ticket cache and Primary Refresh Token, the **DNS registration** tab to register this computer in DNS and trace the result, the **Intune policies** tab for every setting Intune pushed and an in-app **Sync now**, or the **Log** tab to see what the app ran
 
 Up to 5 diagnostic runs are stored with timestamps — click any run to review it, or **Delete Run** to remove it.
 
-- **Clear** — clears results and run history, keeps input fields
-- **Reset** — clears everything including input fields, and returns the Profile to the detected one
+- **Clear** — clears what the mode shows: the results and run history, or the SMB test; keeps input fields
+- **Reset** — clears everything in both modes including input fields, and returns the Profile to the detected one
 - **Export results** — saves a timestamped text report via Save dialog
 - **Copy results** — puts the same report on the clipboard, for pasting into a ticket
 
@@ -68,7 +68,8 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Encryption at rest: not needed, since nothing is stored.** No settings file, cache or credential store exists to encrypt; the only files are the ones you save yourself, as plain text you chose to write.
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session. The only files it writes are the ones you save yourself: **Export results** and **Save log**.
 - **Two connections leave the corporate network, and they send nothing.** The Entra Seamless Single Sign-On group opens a TCP connection on port 443 to `login.microsoftonline.com` and, on a domain-joined or hybrid joined PC, `autologon.microsoftazuread-sso.com`, then closes it: no TLS handshake, no request, no account name. Everything else the app contacts is your own DNS servers and domain controllers.
-- **Saved credentials are listed by name only.** `cmdkey /list` gives the targets of saved Windows credentials; the app never asks Credential Manager for a password.
+- **Saved credentials are listed by name only.** `cmdkey /list` gives the targets of saved Windows credentials and, for the SMB test, their user names; the app never asks Credential Manager for a password.
+- **The SMB test signs in to nothing.** It asks Windows' own SSPI (Kerberos, then Negotiate) for the first token of a sign-in to `cifs/<server>` with the signed-in user's own credentials, reads the status and the package it chose, and frees the token without sending it. For Kerberos that makes the KDC issue the service ticket, which Windows caches in memory as any connection would. No password is asked for, supplied or stored. It then lists the root of the share you typed, counting at most 1,000 entries, and changes nothing there.
 - **Intune details are read, never changed.** The Intune group and tab read the registry keys the Windows MDM client keeps (`HKLM\SOFTWARE\Microsoft\Enrollments`, `Provisioning\OMADM`, `PolicyManager`), opened read-only, and ask the service manager for one service's state with query rights only. Policy values can name internal hosts or groups; they stay in memory like everything else.
 - **Exported reports contain only metadata.** The text export includes test names and diagnostic details (trust names, GPO counts, port status). No raw tokens, password hashes, or credential material is included.
 - **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `w32tm`, PowerShell queries, and other tools is parsed in memory for specific values only. The raw output is never written to disk, and is kept only while **Debug** is ticked on the Log tab (see below).
@@ -78,8 +79,8 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 
 - **Single instance enforced.** A per-session mutex prevents multiple instances from running simultaneously in the same logon session (other users on a shared host can run their own).
 - **Nothing outlives the app.** Every external tool is started inside a Windows job object set to kill-on-close, so the tools end with the app however it exits (normal close, crash or End Task). On close, the in-flight diagnostic run is cancelled, the job is emptied and the process terminates itself outright rather than waiting on worker threads.
-- **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s), share access (20s) and reading the Internet settings (5s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
-- **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
+- **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s), share access (20s), an SMB test's SSPI request (15s) and reading the Internet settings (5s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
+- **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. The SMB field's server must be a plain DNS name (labels of letters, digits and hyphens) or an IP address, and its share may hold none of `"/\[]:|<>+=;,?*` or control characters; a path below the share is dropped. Only a server name that passed goes into the SPN search, and no user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
 - **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `secur32`, `tbs`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
 - **Links open unelevated.** The GitHub and Release Notes links accept only `https` URLs and open through `explorer.exe`, so the browser runs at the desktop's integrity level, never with the app's admin token.
@@ -88,6 +89,8 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 
 Newest first. Dates are when the change was made; unreleased changes ship in the next version.
 
+- **Unreleased, 2026-10-23:** CI checks the repo's shell scripts (`scripts/ci-changes.sh`, `tools/screenshots/run.sh`) with shellcheck, pinned to a version and the release's checksum.
+- **Unreleased, 2026-10-23:** the SMB test adds two calls to Windows: the first step of an SSPI sign-in (`AcquireCredentialsHandle`, `InitializeSecurityContext`, `QueryContextAttributes` in `secur32`, loaded from System32), whose token is freed unsent, and listing a share's root, capped at 1,000 entries. The SPN search is a fixed LDAP query into which only a server and domain that match the DNS-name pattern are put; `cmdkey /list` is now read for user names as well as targets. The server and share field is validated before anything runs.
 - **v2026.10.23, 2026-10-23:** the DNS Client event query also reads each event's named data fields, from the XML Windows itself renders for the event (values arrive escaped, and Windows PowerShell resolves no external entities), so the latest failure can be shown one setting per line; it reads the same System log entries as before.
 - **v2026.10.23, 2026-10-23:** the Intune tab lists the MSI apps Intune pushed, read-only from `EnterpriseDesktopAppManagement` and the uninstall keys; of an installer's download URL only the file name is kept, never the query, which can carry an access token. The LocalUsersAndGroups policy's XML is read with .NET's XmlReader, which refuses a DTD, so a value can't make the app read anything outside it. The DNS registration name also reads each adapter's DNS suffix and its "Use this connection's DNS suffix in DNS registration" setting, read-only.
 - **v2026.10.23, 2026-10-23:** the Cloud Trust Groups check reads the signed-in user's own groups and the Entra Kerberos server object's password replication policy from AD; the domain and UPN put into the query must first match strict patterns that allow no quotes or LDAP filter characters.
@@ -259,6 +262,34 @@ Whether this PC is managed by Microsoft Intune (or another MDM), on every profil
 
 Reading the sync times or policy settings may need Run as Administrator; without it those checks show as not checked.
 
+## SMB Connection Test
+
+![The SMB test: a share reached, but with NTLM, because the server's SPN is missing](docs/screenshots/smb.png)
+
+Switch **Test** to **SMB**, type a file server or share in **Server or share** (`\\files\Finance`, `files\Finance`, `files.contoso.com`, or an IP address) and click **Test connection** or press Enter. A short name gets the **Domain** field's domain. It runs only when you ask, never with Run diagnostics.
+
+The test follows the path a connection takes, and the strip at the top lights each connection point as it passes. It stops at the first step that fails, and the line under the strip says where it stopped and what to do. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked.
+
+| Step | Checks |
+|---|---|
+| **Name** | The name in DNS and its addresses (IPv6 only is a note). An IP address skips Kerberos, which needs a name |
+| **Port 445** | A TCP connection on 445, IPv4 first |
+| **Kerberos** | Cloud Kerberos Trust (see below); the ticket-granting ticket; the `_kpasswd._tcp` SRV record (domain and hybrid joined); the account holding `cifs/<server>` or `HOST/<server>` in AD, and a duplicate; a `cifs/<server>` service ticket from the KDC and why it failed, read by status number; the ticket's encryption; Max Token Size |
+| **Sign-in** | What Windows' Negotiate picks for the server: Kerberos, or NTLM and why; the LAN Manager authentication level; a saved credential in Credential Manager that replaces your own sign-in |
+| **Share** | Opens the share and counts its root's entries; errors are read by number (access denied, no such share, sign-in refused, guest only, already connected as someone else) |
+| *This PC's SMB settings* | Signing required, the SMBv1 client driver, insecure guest logons (Group Policy first). Listed under the path, since none stops a connection on its own |
+
+The **Profile** changes what the steps check:
+
+| | Domain joined | Microsoft Entra hybrid joined | Microsoft Entra joined |
+|---|---|---|---|
+| Domain | The Domain field | The Domain field | An **On-prem domain** field, since the PC has no domain of its own; needed for short names and the Kerberos checks |
+| Cloud Kerberos Trust row | — | Only with Windows Hello set up; missing OnPremTgt warns, since a Hello sign-in then falls back to NTLM | Always; missing OnPremTgt fails, since there's no other way to an on-prem ticket |
+| `_kpasswd._tcp` SRV | Checked | Checked | Not checked |
+| NTLM | Used when Kerberos fails | Used when Kerberos fails | The LAN Manager row adds that a Windows Hello sign-in leaves no password hash for NTLM, so Kerberos must work |
+
+In SMB mode the tabs are **Results** (the path and its steps), **Kerberos tickets** (with the tested server's ticket first), **Guide** (it opens at the SMB section) and **Log**. **Export results** and **Copy results** give the test as text. Every step and result is in the Log, and with **Debug** ticked so is each lookup, query and SSPI status the test made.
+
 ## Group Policy Tab
 
 ![Group Policy tab with Computer and User scope breakdown](docs/screenshots/group-policy.png)
@@ -290,6 +321,8 @@ A dedicated tab that parses `klist` and renders every cached Kerberos ticket wit
 Each ticket card shows: server, client, encryption type (AES = green, RC4 = yellow warning), flags, cache type, KDC called, and start/end/renew times with expiry detection.
 
 On an Entra joined or hybrid joined PC a **PRT** card comes first: the Primary Refresh Token isn't a Kerberos ticket, so `klist` never lists it, and the card reads it from `dsregcmd /status`: join type, tenant, status, when it was renewed and expires, its authority, and the Cloud and On-premises Kerberos ticket flags. Its badge follows the same rule as the Results row: green when present and renewed within 14 days; missing or expired is amber on a hybrid joined PC (Seamless SSO covers for it) and red on an Entra joined one.
+
+After an SMB test, the tested server's `cifs/` ticket comes first among the tickets, marked "the server the SMB test checked".
 
 - **Purge All Tickets** — runs `klist purge` with confirmation dialog
 - **Refresh** — re-reads the ticket cache
@@ -323,7 +356,7 @@ Every setting and MSI app Intune pushed, read from the MDM client's `PolicyManag
 
 ![Log tab with Debug on](docs/screenshots/log.png)
 
-What the app did and what came back. **Sections** (the default) groups it by run: each run, single-section run, Group Policy query, gpupdate, ticket refresh or DNS registration starts with a heading carrying its time, what it covered and its totals, and inside a run each results section has a heading of its own, so a section's commands, raw output and results read together even though the sections run side by side. Every run and section starts folded to its heading; click one (or press Enter on it) to open it. A result shows its mark and status, the check's name in bold and its detail; tool output lines up under the command that produced it. **By time** shows the same lines in the order they happened, with each line's section named in a column. **Raw** shows the log exactly as Save log writes it: one plain line each, with no headings or colours. Times on screen follow the Windows clock setting; log lines keep a 24-hour time so they line up and sort. Without **Debug** it records each run, every result, the DNS registration steps and any tool or query that failed. With **Debug** ticked it also records each command, DNS query (with the server it was sent to) and port check with its duration and raw output, and the Windows error number behind a failure. A script that runs again unchanged is logged once, and connected adapters that hold no address share one line. Debug is off at every start.
+What the app did and what came back. **Sections** (the default) groups it by run: each run, single-section run, SMB test, Group Policy query, gpupdate, ticket refresh or DNS registration starts with a heading carrying its time, what it covered and its totals, and inside a run each results section has a heading of its own, so a section's commands, raw output and results read together even though the sections run side by side. Every run and section starts folded to its heading; click one (or press Enter on it) to open it. A result shows its mark and status, the check's name in bold and its detail; tool output lines up under the command that produced it. **By time** shows the same lines in the order they happened, with each line's section named in a column. **Raw** shows the log exactly as Save log writes it: one plain line each, with no headings or colours. Times on screen follow the Windows clock setting; log lines keep a 24-hour time so they line up and sort. Without **Debug** it records each run, every result, the DNS registration steps and any tool or query that failed. An SMB test's steps (Name, Port 445, Kerberos, Sign-in, Share, SMB settings) each get a section of their own, followed by its verdict and fix. With **Debug** ticked it also records each command, DNS query (with the server it was sent to), port check, SSPI request (its status number and the package chosen) and share listing with its duration and raw output, and the Windows error number behind a failure. A script that runs again unchanged is logged once, and connected adapters that hold no address share one line. Debug is off at every start.
 
 - **Copy log** / **Save log** — the whole log as text in the view on screen, to the clipboard or to a file you choose
 - **Clear log** — empties it
@@ -332,7 +365,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 
 **Runtime:** .NET 10 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs`, `DnsRegistration.cs`, `EntraSso.cs`, `Credentials.cs` and `Intune.cs` hold the eleven test groups and the traced DNS registration, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
+**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs`, `DnsRegistration.cs`, `EntraSso.cs`, `Credentials.cs` and `Intune.cs` hold the eleven test groups and the traced DNS registration, and `SmbPath.cs` the SMB test (with its UI in `MainForm.Smb.cs` and its two native calls in `SmbNative.cs`), which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Starts in the Windows light or dark app setting; the header button switches between **Dark mode** and the light theme, **Flashbang**, at any time (the choice is not saved, since the app writes nothing to disk). Scales with the display DPI; every status has its own shape as well as its own colour, and each result row is exposed to screen readers as a list item. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
@@ -340,6 +373,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 
 **Input Validation:**
 - `HostnamePattern`: `^[a-zA-Z0-9.\-]+$` — domain and DC fields
+- `ParseSmbTarget` — the SMB field: a DNS name or IP address, and a share name without path or wildcard characters
 
 **Settings:** None — no data is persisted to disk. The app auto-detects the domain on startup.
 
@@ -363,7 +397,8 @@ What the app did and what came back. **Sections** (the default) groups it by run
 | `powershell` (Get-CimInstance, `root\rsop`) | Group Policy results (diagnostics + tab) | 25s |
 | `powershell` (Get-WinEvent, System log) | DNS Client registration failures (diagnostics + DNS registration tab) | 15s |
 | `ipconfig /registerdns` | Register in DNS (DNS registration tab) | 20s |
-| `cmdkey /list` | Names of saved Windows credentials (Credentials & Windows Hello) | 15s |
+| `cmdkey /list` | Names of saved Windows credentials (Credentials & Windows Hello), and their users (SMB test) | 15s |
+| `powershell` (DirectorySearcher) | The accounts holding `cifs/<server>` or `HOST/<server>` (SMB test) | 20s |
 | `powershell` (Start-ScheduledTask, `PushLaunch`) | Start an Intune sync (Intune policies tab, **Sync now**, elevated only) | 30s |
 
 All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout; the same deadline covers a tool that exits but leaves its output pipe open.
@@ -392,11 +427,21 @@ The README screenshots are generated from mock data by `tools/screenshots/run.sh
 
 ## Releasing
 
-Bump `<Version>` in `AdDiag.csproj` and add a `### v<version> — <date>` section at the top of [Version History](#version-history), merge to `main`, then push a tag of the form `vYYYY.MM.DD`, the UTC date of the bump; a second release that day is `vYYYY.MM.DD-2`, then `-3` (a suffix with a letter, such as `-rc1`, is a prerelease). Releases up to v1.3.0 used semver. The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History section as the release notes. A final release with no section, or an empty one, fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
+Bump `<Version>` in `AdDiag.csproj` and add a `### v<version> — <date>` section at the top of [Version History](#version-history), merge to `main`, then push a tag of the form `vYYYY.MM.DD`, the UTC date of the bump; a second release that day is `vYYYY.MM.DD-2`, then `-3` (a suffix with a letter, such as `-rc1`, is a prerelease). Releases up to v1.3.0 used semver. The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History section as the release notes. A final release with no section, or an empty one, fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and, when workflows or shell scripts change, actionlint and shellcheck (each pinned to a version and checksum).
 
 ## Version History
 
 Newest first. Each version's section is its GitHub release notes: the release workflow publishes everything between its heading and the next.
+
+### Unreleased
+
+#### New
+- **SMB connection test**: a **Test** switch at the top picks Active Directory or SMB. Type a server or share and the test follows the path to it (name, port 445, Kerberos, sign-in, share), lights each step as it passes, and says where it stopped and how to fix it. Each profile gets its own checks; brought over from smb-diag, with fixes to its SMBv1, guest logon, signing and Kerberos-or-NTLM checks.
+- Every SMB test is in the Log, step by step, with Debug detail.
+
+#### Tabs
+- The tabs follow the switch: the mode's own tabs, a divider, then Guide and Log. Guide moves from second place to the end.
+- After an SMB test, the Kerberos tickets tab lists the tested server's ticket first.
 
 ### v2026.10.23 — 2026-10-23
 

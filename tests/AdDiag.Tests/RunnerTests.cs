@@ -134,7 +134,8 @@ public class RunnerTests
         while (root != null && !File.Exists(Path.Combine(root.FullName, "AdDiag.csproj"))) root = root.Parent;
         Assert.NotNull(root);
         string shots = File.ReadAllText(Path.Combine(root.FullName, "tools", "screenshots", "Shots.cs"));
-        string form = File.ReadAllText(Path.Combine(root.FullName, "MainForm.cs"));
+        // MainForm is split into partial files (MainForm.cs, MainForm.Smb.cs); a name may live in any of them
+        string form = string.Concat(Directory.GetFiles(root.FullName, "MainForm*.cs").Select(File.ReadAllText));
 
         var names = Regex.Matches(shots, @"\b(?:Get<[^>]+>|Set|Call)\(\w+, ""(\w+)""|\bTheme\(""(\w+)""\)")
             .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Distinct().ToList();

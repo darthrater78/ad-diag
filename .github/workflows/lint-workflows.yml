@@ -1,13 +1,15 @@
-name: Lint workflows
+name: Lint workflows and scripts
 
 on:
   push:
     branches: ['**']
     paths:
       - '.github/workflows/**'
+      - '**/*.sh'
   pull_request:
     paths:
       - '.github/workflows/**'
+      - '**/*.sh'
 
 permissions:
   contents: read
@@ -26,6 +28,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Pinned rather than the runner's own copy, so a runner image update can't change what passes. actionlint
+      # also runs it over every workflow's run: blocks once it is on PATH
+      - name: Download shellcheck
+        env:
+          # Bumped by hand; shellcheck publishes no checksum file, so this is the sha256 of the release tarball as
+          # downloaded from GitHub when pinned, and a substituted one is refused
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/shellcheck"
+          tar xJf shellcheck.tar.xz --strip-components=1 -C "$RUNNER_TEMP/shellcheck" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
+
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck
 
       - name: Download actionlint
         env:
