@@ -71,21 +71,28 @@ jobs:
           if ($declared -ne $release) { throw "Tag $env:REF_NAME does not match AdDiag.csproj <Version>$declared</Version>" }
           "VERSION=$version" >> $env:GITHUB_ENV
 
-      # The release body is the tag's row in the README's Version History table, so the two can't drift; a
-      # release without a row fails here, before anything is built. Prereleases get GitHub's generated notes only.
+      # The release body is the tag's section in the README's Version History ("### v2026.10.23 — date", up to the
+      # next heading of that level or higher), so the two can't drift; a release without one fails here, before
+      # anything is built. Prereleases get GitHub's generated notes only.
       - name: Extract release notes from README
         id: notes
         shell: pwsh
         run: |
-          if ($env:PRERELEASE -eq 'true') { exit 0 }
-          $row = Get-Content -Encoding utf8 README.md |
-            Where-Object { $_ -match "^\|\s*$([regex]::Escape($env:REF_NAME))\s*\|" } | Select-Object -First 1
-          if (-not $row) { throw "README.md Version History has no row for $env:REF_NAME" }
-          $notes = ($row.Trim().Trim('|').Split('|') | Select-Object -Skip 2) -join '|'
-          if (-not $notes.Trim()) { throw "README.md Version History row for $env:REF_NAME has no notes" }
-          $notes.Trim() | Out-File -Encoding utf8 release-notes.md
-          "path=release-notes.md" >> $env:GITHUB_OUTPUT
           "ASSET=ad-diag-$env:REF_NAME-win-x64.exe" >> $env:GITHUB_ENV
+          if ($env:PRERELEASE -eq 'true') { exit 0 }
+          $lines = @(Get-Content -Encoding utf8 README.md)
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^###\s+$([regex]::Escape($env:REF_NAME))(\s|$)") { $start = $i + 1; break }
+          }
+          if ($start -lt 0) { throw "README.md Version History has no '### $env:REF_NAME' section" }
+          $end = $start
+          while ($end -lt $lines.Count -and $lines[$end] -notmatch '^#{1,3}\s') { $end++ }
+          # A PowerShell range runs backwards when $end -le $start, so an empty section is caught here
+          $notes = if ($end -gt $start) { ($lines[$start..($end - 1)] -join "`n").Trim() } else { '' }
+          if (-not $notes) { throw "README.md Version History section for $env:REF_NAME is empty" }
+          $notes | Out-File -Encoding utf8 release-notes.md
+          "path=release-notes.md" >> $env:GITHUB_OUTPUT
 
       - name: Publish win-x64 self-contained build
         shell: pwsh
