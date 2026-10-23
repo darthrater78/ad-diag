@@ -63,7 +63,7 @@ How the app is built with regard to security, and what has changed since. Every 
 
 ### No credentials are stored or transmitted
 
-The diagnostic run is **read-only**. Four actions change something, and each asks first: **Run gpupdate**, **Purge all tickets**, **Register now** (which asks Windows to register this computer's records in DNS) and **Sync now** (which starts the MDM client's own Intune sync). The app does not store, transmit, or log any credentials, tokens, or secrets.
+The diagnostic run is **read-only**. Four actions change something, and each asks first: **Run gpupdate**, **Purge all tickets**, **Register now** (which asks Windows to register this computer's records in DNS) and **Sync now** (which starts the MDM client's own Intune sync; when the app isn't running as Administrator, the button reads **Sync in Settings** and opens Settings > Access work or school instead, since the sync task needs Administrator). The app does not store, transmit, or log any credentials, tokens, or secrets.
 
 - **Encryption at rest: not needed, since nothing is stored.** No settings file, cache or credential store exists to encrypt; the only files are the ones you save yourself, as plain text you chose to write.
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session. The only files it writes are the ones you save yourself: **Export results** and **Save log**.
@@ -91,6 +91,7 @@ Newest first. Dates are when the change was made; unreleased changes ship in the
 - **2026-10-23 (unreleased):** the Cloud Trust Groups check reads the signed-in user's own groups and the Entra Kerberos server object's password replication policy from AD; the domain and UPN put into the query must first match strict patterns that allow no quotes or LDAP filter characters.
 - **2026-10-23 (unreleased):** the key rollover checks read three accounts' `pwdLastSet` from AD with a fixed query; the only thing put into it is the domain, and only once it is a plain DNS name.
 - **2026-10-23 (unreleased):** the Credentials & Windows Hello group reads the Hello policy and the user's biometric enrollment from the registry read-only, the TPM's version from TPM Base Services (which any user may ask), and only the target names of saved credentials from `cmdkey /list`, never their passwords.
+- **2026-10-23 (unreleased, later):** unelevated, Sync now becomes **Sync in Settings**: it opens the fixed `ms-settings:workplace` page through `explorer.exe` (no ShellExecute, no elevation prompt) rather than asking for Administrator.
 - **2026-10-23 (unreleased):** the Intune group and tab read the MDM client's registry keys read-only, and query one service's state with query rights only; the one new action that changes something, **Sync now**, asks first and starts Windows' own sync task, its path built only from the enrollment's GUID. The Kerberos tickets and Intune panes no longer turn URLs into links, so a policy value can't become something to click.
 - **2026-10-22 (unreleased):** the Internet-settings query for the Seamless SSO checks passed a buffer the wrong way to the Windows URL security manager, which could crash the app with memory corruption; it now passes a plain integer.
 - **v1.2.0, 2026-10-05:** every network call has a deadline, and every tool runs in a kill-on-close job object, so an unreachable domain can't hang the app and no tool outlives it.
@@ -248,7 +249,7 @@ How this user's sign-in credentials are held, on every profile.
 Whether this PC is managed by Microsoft Intune (or another MDM), on every profile, since Intune works the same however the PC is joined. Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
 
 - **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown
-- **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns, as does a failed attempt since the last success
+- **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns; a failed attempt since the last success is a note (the next sync retries it)
 - **Management Extension** — the Intune Management Extension service, which installs Win32 apps and runs scripts; stopped warns, not installed is Info (Intune adds it with the first such assignment)
 - **Device Policies** — how many settings Intune pushed to the device are in force, and how many another provider sets instead
 
@@ -311,7 +312,7 @@ Every setting Intune pushed, read from the MDM client's `PolicyManager` keys:
 - **Enrollment** — the MDM and the account that enrolled the PC, the last successful sync (and a failed attempt since), and the Management Extension's state
 - **Device scope** and **User scope** — each setting by area, with its value. A green dot is the value in force; an amber dot is a setting another provider (another MDM, a provisioning package) sets instead, with that provider's id
 - **Refresh** — reads it all again
-- **Sync now** — after a confirmation, starts the enrollment's own sync task (`PushLaunch`, the one behind **Sync** in Settings > Accounts > Access work or school). Windows may require Run as Administrator to start it; if so the tab says, and Sync in Settings does the same
+- **Sync now** — after a confirmation, starts the enrollment's own sync task (`PushLaunch`, the one behind **Sync** in Settings > Accounts > Access work or school). The task needs Run as Administrator, so when the app isn't elevated the button reads **Sync in Settings** and opens that Settings page instead, where Windows' own **Sync** works for a standard user
 
 ## Log Tab
 
@@ -358,7 +359,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 | `powershell` (Get-WinEvent, System log) | DNS Client registration failures (diagnostics + DNS registration tab) | 15s |
 | `ipconfig /registerdns` | Register in DNS (DNS registration tab) | 20s |
 | `cmdkey /list` | Names of saved Windows credentials (Credentials & Windows Hello) | 15s |
-| `powershell` (Start-ScheduledTask, `PushLaunch`) | Start an Intune sync (Intune policies tab, **Sync now**) | 30s |
+| `powershell` (Start-ScheduledTask, `PushLaunch`) | Start an Intune sync (Intune policies tab, **Sync now**, elevated only) | 30s |
 
 All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout; the same deadline covers a tool that exits but leaves its output pipe open.
 

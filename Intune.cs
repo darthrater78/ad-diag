@@ -71,7 +71,7 @@ static partial class Diagnostics
         var age = Age(success, nowUtc);
         string when = $"{success.ToLocalTime():g} ({FormatTimeSpan(age)} ago)";
         if (s.LastFailure is { } failure && failure > success)
-            return new(MdmSyncCheck, Status.Warn, $"Last attempt failed {failure.ToLocalTime():g}; last successful sync {when}");
+            return new(MdmSyncCheck, Status.Info, $"Last attempt failed {failure.ToLocalTime():g}; last successful sync {when}");
         return age <= SyncStale
             ? new(MdmSyncCheck, Status.Pass, $"Last successful sync {when}")
             : new(MdmSyncCheck, Status.Warn, $"Last successful sync {when}; over a week, so the PC has been off or can't reach Intune");

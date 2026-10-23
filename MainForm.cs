@@ -527,9 +527,11 @@ class MainForm : Form
         };
         var btnIntuneRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28), Location = new Point(10, 3) };
         btnIntuneRefresh.Click += (s, e) => RefreshIntuneTab();
-        _btnIntuneSync = new ThemedButton { Text = "Sync now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(90, 28), Location = new Point(100, 3), Enabled = false };
+        // Starting the sync task needs Administrator; unelevated, the button opens Settings, whose Sync doesn't
+        int syncW = _elevated ? 90 : 120;
+        _btnIntuneSync = new ThemedButton { Text = _elevated ? "Sync now" : "Sync in Settings", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(syncW, 28), Location = new Point(100, 3), Enabled = false };
         _btnIntuneSync.Click += BtnIntuneSync_Click;
-        _lblIntuneNote = new Label { Text = SyncNote, ForeColor = DimColor, BackColor = BgColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(200, 9) };
+        _lblIntuneNote = new Label { Text = _elevated ? SyncNote : SettingsSyncNote, ForeColor = DimColor, BackColor = BgColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, Location = new Point(110 + syncW, 9) };
         var intuneBtnPanel = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
         intuneBtnPanel.Controls.AddRange([btnIntuneRefresh, _btnIntuneSync, _lblIntuneNote]);
         _intunePanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
@@ -1458,6 +1460,7 @@ class MainForm : Form
     // ── Intune policies tab ─────────────────────────────────
 
     const string SyncNote = "Sync now asks first, then starts the same sync as Settings > Accounts > Access work or school > Sync";
+    const string SettingsSyncNote = "Opens Settings > Accounts > Access work or school: choose the account, then Info > Sync (no Administrator needed)";
     static readonly Font IntuneBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
     static readonly Font IntuneValueFont = new(MonoFamily, 8.5f);
 
@@ -1485,7 +1488,7 @@ class MainForm : Form
         if (IsDisposed) return;
 
         _intuneEnrollment = read.Enrollment;
-        _btnIntuneSync.Enabled = read.Enrollment != null && Diagnostics.SyncTaskPath(read.Enrollment) != null;
+        _btnIntuneSync.Enabled = read.Enrollment != null && (!_elevated || Diagnostics.SyncTaskPath(read.Enrollment) != null);
         _intuneBox.Clear();
         if (read.Error != null)
             AppendIntuneLine($"  Intune details not read: {read.Error}\n", FailColor);
@@ -1616,9 +1619,16 @@ class MainForm : Form
         AppendIntuneLine("\n\n", TextColor);
     }
 
-    // Starts the MDM client's own sync task, the one behind Sync in Settings (script and its result: Intune.cs)
+    // Starts the MDM client's own sync task, the one behind Sync in Settings (script and its result: Intune.cs). The
+    // task needs Administrator, so an app that isn't elevated opens that Settings page instead
     async void BtnIntuneSync_Click(object? sender, EventArgs e)
     {
+        if (!_elevated)
+        {
+            AppLog.Info("intune", "Opened Settings > Access work or school to sync");
+            OpenSettingsPage(WorkplaceSettings);
+            return;
+        }
         if (_intuneRunning || _intuneEnrollment is not { } enrollment || Diagnostics.SyncTaskPath(enrollment) is not { } task) return;
         var confirm = MessageBox.Show(
             $"This asks {enrollment.ProviderName} for new policies and apps now, the same as Sync in Settings > Accounts > Access work or school. "
@@ -4260,6 +4270,16 @@ class MainForm : Form
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps) return;
         string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
         try { Process.Start(new ProcessStartInfo(explorer, $"\"{uri.AbsoluteUri}\"") { UseShellExecute = false })?.Dispose(); }
+        catch { }
+    }
+
+    const string WorkplaceSettings = "ms-settings:workplace"; // Settings > Accounts > Access work or school
+
+    /// <summary>Opens a page of Settings by its fixed ms-settings: URI, through explorer.exe like <see cref="OpenUrl"/>.</summary>
+    static void OpenSettingsPage(string page)
+    {
+        string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        try { Process.Start(new ProcessStartInfo(explorer, page) { UseShellExecute = false })?.Dispose(); }
         catch { }
     }
 

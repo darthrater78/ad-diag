@@ -79,11 +79,12 @@ public class IntuneTests
     }
 
     [Fact]
-    public void FailureAfterLastSuccess_Warns()
+    public void FailureAfterLastSuccess_IsInfo()
     {
+        // One failed attempt after a recent success is routine (the next scheduled sync retries it)
         var entry = Entry(Diagnostics.TestIntune(Enrolled(lastFailure: "20261023T084500Z"), Now, TimeZoneInfo.Utc), "Last Sync");
 
-        Assert.Equal(Status.Warn, entry.Status);
+        Assert.Equal(Status.Info, entry.Status);
         Assert.StartsWith("Last attempt failed", entry.Detail);
     }
 
