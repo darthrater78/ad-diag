@@ -90,6 +90,8 @@ record TestEntry(string Name, Status Status = Status.Skip, string Detail = "")
 {
     /// <summary>The check was held back because the app isn't running as Administrator; the UI calls it out.</summary>
     public bool NeedsAdmin { get; init; }
+    /// <summary>How many tries the check took when it retries (the SMB test's Kerberos requests); 1 otherwise.</summary>
+    public int Tries { get; init; } = 1;
 }
 record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
 /// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>

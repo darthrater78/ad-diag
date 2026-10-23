@@ -84,7 +84,7 @@ partial class MainForm : Form
     static readonly Font GroupCountFont = new("Segoe UI", 8.5f);
     static readonly Font StatusFont = new("Segoe UI", 8.5f);
     static readonly Font TestNameFont = new("Segoe UI", 9f);
-    static readonly Font TestDetailFont = new(MonoFamily, 8.5f);
+    static readonly Font TestDetailFont = new("Segoe UI", 9f);
     static readonly Font PlaceholderFont = new("Segoe UI", 10f);
     static readonly Font ReadinessNameFont = new("Segoe UI", 9f, FontStyle.Bold);
     static readonly Font ResultsLinkFont = new("Segoe UI", 9f, FontStyle.Underline);
@@ -291,12 +291,18 @@ partial class MainForm : Form
 
         _txtDomain = MakeInput(configPanel, "Domain", 0, 0, out _lblDomain);
         _txtDc = MakeInput(configPanel, "Domain controller (optional)", 1, 0, out _);
-        // The SMB mode's field takes the DC's place; it isn't a domain control, so the Entra profile doesn't hide it
-        _txtSmbTarget = MakeInput(configPanel, "Server or share", 1, 0, out _lblSmbTarget);
-        _domainControls.Remove(_txtSmbTarget);
-        _domainControls.Remove(_lblSmbTarget);
-        _txtSmbTarget.Visible = _lblSmbTarget.Visible = false;
-        _txtSmbTarget.AccessibleName = "Server or share to test, as in \\\\files\\Finance";
+        // The SMB mode's fields share the DC's place; they aren't domain controls, so the Entra profile doesn't hide them
+        _txtSmbServer = MakeInput(configPanel, "File server", 2, 0, out _lblSmbServer);
+        _txtSmbShare = MakeInput(configPanel, "Share (optional)", 3, 0, out _lblSmbShare);
+        foreach (Control c in new Control[] { _txtSmbServer, _lblSmbServer, _txtSmbShare, _lblSmbShare })
+        {
+            _domainControls.Remove(c);
+            c.Visible = false;
+        }
+        _txtSmbServer.PlaceholderText = "files or files.contoso.com";
+        _txtSmbShare.PlaceholderText = "Finance";
+        _txtSmbServer.AccessibleName = "File server to test";
+        _txtSmbShare.AccessibleName = "Share on that server, optional";
 
         _chkDcSuffix = new CheckBox { Text = "Add domain suffix", ForeColor = TextColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = true, Location = new Point(0, 0) };
         configPanel.Controls.Add(_chkDcSuffix);
@@ -414,7 +420,7 @@ partial class MainForm : Form
         contentWrapper.Controls.Add(_historyPanel);
         contentWrapper.Controls.Add(tabBar);
 
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbBox, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbScroll, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             ThemeScrollbars(scrolling);
         return contentWrapper;
     }
@@ -484,6 +490,7 @@ partial class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             Visible = false,
+            DetectUrls = false, // paths and addresses are text to read; Windows would underline them as links that do nothing
         };
         _guideBox.MouseClick += (s, e) =>
         {
@@ -514,6 +521,7 @@ partial class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+            DetectUrls = false, // paths and addresses are text to read; Windows would underline them as links that do nothing
         };
         _btnGpRefresh = new ThemedButton { Text = "Refresh", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(80, 28) };
         _btnGpRefresh.Click += (s, e) => RefreshGpTab();
@@ -652,6 +660,16 @@ partial class MainForm : Form
                 });
             }
 
+            // An Entra joined PC has no domain of its own, but with Cloud Kerberos Trust it holds a TGT for the on-prem one
+            if (string.IsNullOrWhiteSpace(domain))
+            {
+                domain = await Task.Run(() =>
+                {
+                    try { return Parsers.OnPremTgtRealm(Probe.RunTool("klist", "", 5000, default)); }
+                    catch { return null; }
+                });
+            }
+
             if (string.IsNullOrWhiteSpace(domain))
             {
                 domain = await Task.Run(() =>
@@ -680,7 +698,13 @@ partial class MainForm : Form
     {
         int dark = Dark ? 1 : 0;
         try { DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref dark, sizeof(int)); } catch { }
+        // The window's 1px outer edge in the primary colour, so it stands out from what's behind it (Windows 11; older
+        // Windows ignores the attribute). DWM takes a COLORREF: 0x00BBGGRR
+        int border = AccentColor.R | AccentColor.G << 8 | AccentColor.B << 16;
+        try { DwmSetWindowAttribute(Handle, DwmwaBorderColor, ref border, sizeof(int)); } catch { }
     }
+
+    const int DwmwaBorderColor = 34;
 
     static string ThemeButtonText => Dark ? "Flashbang" : "Dark mode";
 
@@ -713,7 +737,7 @@ partial class MainForm : Form
         Retheme(this);
         _btnTheme.Text = ThemeButtonText;
         ApplyTitleBarTheme();
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbBox, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _smbScroll, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
         RerenderTextPanes();
         Invalidate(true);
@@ -890,7 +914,10 @@ partial class MainForm : Form
         int left = scale(14 + ProfileWidth + 14), gap = scale(16);
         int room = panelWidth - left - scale(14) - gap;
         int domainWidth = room * 2 / 5;
-        return col == 0 ? (left, domainWidth) : (left + domainWidth + gap, room - domainWidth);
+        if (col <= 1) return col == 0 ? (left, domainWidth) : (left + domainWidth + gap, room - domainWidth);
+        // SMB mode splits the DC's column: the file server, then the share
+        int x = left + domainWidth + gap, w = room - domainWidth, server = (w - gap) * 11 / 20;
+        return col == 2 ? (x, server) : (x + server + gap, w - server - gap);
     }
 
     TextBox MakeInput(Panel parent, string label, int col, int row, out Label labelControl)
@@ -960,7 +987,7 @@ partial class MainForm : Form
 
         _txtDomain.Text = "";
         _txtDc.Text = "";
-        _txtSmbTarget.Text = "";
+        _txtSmbServer.Text = _txtSmbShare.Text = "";
         ClearSmb();
         _profilePicked = false;
         SetProfile(_detectedProfile ?? JoinProfile.Domain);
@@ -1279,7 +1306,7 @@ partial class MainForm : Form
                 "  Fix: None arriving: check the device's and user's group assignments in the Intune admin center, then sync"),
 
             (SmbGuideTitle,
-                "Switch to SMB at the top, type a file server or share in Server or share (\\\\files\\Finance, or files.contoso.com) and click Test connection. The test follows the path a connection takes and stops at the first step that fails: Name, Port 445, Kerberos, Sign-in, Share. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked. It runs only when asked, never with Run diagnostics, and it is read only: no password is asked for or saved. Every step is in the Log tab, and with Debug ticked so is each lookup, query and SSPI status it made.\n\n" +
+                "Switch to SMB at the top, type the File server (files, or files.contoso.com) and, to test opening one, the Share, then click Test connection. A whole path such as \\\\files\\Finance pasted into File server works too. The test follows the path a connection takes and stops at the first step that fails: Name, Port 445, Kerberos, Sign-in, Share. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked. It runs only when asked, never with Run diagnostics, and it is read only: no password is asked for or saved. Every step is in the Log tab, and with Debug ticked so is each lookup, query and SSPI status it made.\n\n" +
                 "• Name — the server's name in DNS, after a short name gets the Domain field's domain, and its addresses. IPv6 only is a note: some networks and apps need IPv4. A server given by address skips Kerberos, which needs a name\n" +
                 "  Fix: Check the spelling and the server's A record. On an Entra joined PC, check the on-prem domain and that this PC's DNS servers (on a VPN, its DNS settings) can answer for it\n\n" +
                 "• Port 445 (SMB) — a TCP connection to the server on 445, IPv4 first\n" +
@@ -1292,7 +1319,7 @@ partial class MainForm : Form
                 "  Fix: Run 'nltest /dsregdns' on a DC, or restart its Netlogon service\n\n" +
                 "• SPN — the account in AD that holds cifs/<server> or HOST/<server> (HOST covers cifs), found by an LDAP search any user may make. None means Kerberos can't name the server; two accounts holding it makes Kerberos fail\n" +
                 "  Fix: 'setspn -S cifs/<server> <account>'; for a duplicate, 'setspn -Q cifs/<server>' lists the holders and 'setspn -D' removes one. Register an alias the users type, too\n\n" +
-                "• Service ticket — asks the KDC for a cifs/<server> ticket through Windows' own Kerberos, as a connection would. The reason it fails is read from its status number (KDC_ERR_S_PRINCIPAL_UNKNOWN, clock skew, no DC)\n" +
+                "• Service ticket — asks the KDC for a cifs/<server> ticket through Windows' own Kerberos, as a connection would. The reason it fails is read from its status number (KDC_ERR_S_PRINCIPAL_UNKNOWN, clock skew, no DC). A failure that can pass (no DC answered, no credentials yet, timed out) is tried up to 3 times, 2 seconds apart, since the first request after sign-in or over a VPN often is; the Kerberos step then reads \"Passed on try 2\" and the row says why the first failed. The TGT gets one more try the same way\n" +
                 "  Fix: As the reason says: the SPN, the clock, or reaching a DC\n\n" +
                 "• Ticket encryption — AES or RC4 on that ticket. RC4 breaks against DCs hardened to AES\n" +
                 "  Fix: Set the server's account to AES (msDS-SupportedEncryptionTypes), then purge tickets on the Kerberos tickets tab\n\n" +
@@ -1500,7 +1527,7 @@ partial class MainForm : Form
         if (_runHistory.Count == 0) ShowPreview();
         if (changed || detected)
             AppLog.Info("app", $"Profile: {ProfileName(profile)}{(detected ? " (detected)" : " (picked)")}");
-        if (!entra && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
+        if ((!entra || _mode == TestMode.Smb) && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
     }
 
     // How the PC is joined decides the profile; the domain is filled in afterwards where the profile has one
@@ -2153,6 +2180,7 @@ partial class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+            DetectUrls = false, // paths and addresses are text to read; Windows would underline them as links that do nothing
         };
         var register = new ThemedButton { Text = "Register now", BackColor = SurfaceColor, ForeColor = AccentColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Size = new Size(110, 28), Location = new Point(10, 3) };
         register.Click += BtnRegister_Click;
@@ -2391,6 +2419,7 @@ partial class MainForm : Form
             Dock = DockStyle.Fill,
             Font = new Font(MonoFamily, 8.5f),
             ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+            DetectUrls = false, // paths and addresses are text to read; Windows would underline them as links that do nothing
         };
         box.MouseClick += (s, e) =>
         {

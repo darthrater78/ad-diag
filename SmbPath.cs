@@ -65,7 +65,7 @@ static partial class Diagnostics
     public static (SmbTarget? Target, string? Error) ParseSmbTarget(string input, string domain)
     {
         string text = input.Trim().Replace('/', '\\').TrimStart('\\');
-        if (text.Length == 0) return (null, @"Type a server or share, as in \\files\Finance or files.contoso.com");
+        if (text.Length == 0) return (null, "Type a file server, as in files or files.contoso.com");
         string[] parts = text.Split('\\', StringSplitOptions.RemoveEmptyEntries);
         string server = parts[0].TrimEnd('.');
         string? share = parts.Length > 1 ? parts[1] : null;
@@ -81,6 +81,20 @@ static partial class Diagnostics
 
         string full = !address && !server.Contains('.') && domain.Length > 0 && DomainName.IsMatch(domain) ? $"{server}.{domain}" : server;
         return (new SmbTarget(full.ToLowerInvariant(), share, server), null);
+    }
+
+    /// <summary>
+    /// Reads the File server and Share fields. The server field may also hold a whole path ("\\files\Finance"),
+    /// pasted from Explorer, as long as the share isn't typed twice.
+    /// </summary>
+    public static (SmbTarget? Target, string? Error) ParseSmbTarget(string server, string share, string domain)
+    {
+        share = share.Trim().Trim('\\', '/');
+        var (target, error) = ParseSmbTarget(server, domain);
+        if (target == null || share.Length == 0) return (target, error);
+        if (target.Share != null) return (null, "The share is typed in both boxes; clear one of them");
+        if (share.IndexOfAny(['\\', '/']) >= 0) return (null, "Type only the share's name in Share, without a folder");
+        return ParseSmbTarget($@"\\{target.Typed}\{share}", domain);
     }
 
     /// <summary>
@@ -210,15 +224,19 @@ static partial class Diagnostics
 
         bool haveDomain = cfg.Domain.Length > 0 && DomainName.IsMatch(cfg.Domain);
         string noDomain = profile == JoinProfile.Entra ? "Not checked: type the on-prem domain" : "Not checked: no domain";
-        tests.Add(haveDomain ? TgtCheck(cfg, probe) with { Name = SmbTgtRow } : new(SmbTgtRow, Status.Skip, noDomain));
+        tests.Add(haveDomain ? TgtWithRetry(cfg, probe) : new(SmbTgtRow, Status.Skip, noDomain));
         if (profile != JoinProfile.Entra)
             tests.Add(haveDomain ? KpasswdEntry(cfg, probe) : new(SmbKpasswdRow, Status.Skip, noDomain));
         tests.Add(haveDomain ? SpnEntry(target, cfg, probe) : new(SmbSpnRow, Status.Skip, noDomain));
 
-        var ticket = probe.Authenticate("Kerberos", target.Spn, cfg.Cancel);
-        tests.Add(ticket.Succeeded
-            ? new(SmbTicketRow, Status.Pass, $"{target.Spn} issued")
-            : new(SmbTicketRow, Status.Warn, $"{target.Spn}: {SspiStatusText(ticket.Status)}"));
+        var (ticket, tries, first) = AuthenticateWithRetry(probe, "Kerberos", target.Spn, cfg.Cancel);
+        tests.Add((ticket.Succeeded
+            ? tries == 1
+                ? new TestEntry(SmbTicketRow, Status.Pass, $"{target.Spn} issued")
+                : new TestEntry(SmbTicketRow, Status.Info, $"{target.Spn} issued on try {tries}; the first failed: {SspiStatusText(first!.Status)}. "
+                    + "A slow first answer is common over a VPN, or just after sign-in while Windows fetches its ticket")
+            : new TestEntry(SmbTicketRow, Status.Warn, $"{target.Spn}: {SspiStatusText(ticket.Status)}"
+                + (tries > 1 ? $" ({tries} tries, {SmbRetryDelayMs / 1000} s apart)" : ""))) with { Tries = tries });
         tests.Add(ticket.Succeeded ? TicketEtypeEntry(target, cfg, probe) : new(SmbEncryptionRow, Status.Skip, "Not checked: no service ticket"));
         tests.Add(MaxTokenSizeEntry(probe));
         return new(SmbKerberos, tests);
@@ -358,6 +376,50 @@ static partial class Diagnostics
         }
     }
 
+    // ── Retrying Kerberos ──
+
+    /// <summary>The wait between tries of a Kerberos request; tests set it to 0.</summary>
+    internal static int SmbRetryDelayMs = 2000;
+    const int SmbTries = 3;
+    // A request that timed out, as an SSPI status: HRESULT_FROM_WIN32(ERROR_TIMEOUT)
+    const int SspiTimedOut = unchecked((int)0x800705B4);
+
+    // The first Kerberos request after sign-in, or over a VPN, can fail while Windows finds a DC or (on an Entra
+    // joined PC) trades its cloud TGT for an on-prem one, and then work a moment later. These are worth another try;
+    // the rest (no SPN, clock skew, no common encryption type) give the same answer every time
+    static bool IsTransient(int status) => unchecked((uint)status) is 0x80090311 or 0x8009030E or 0x800705B4 or 0x80090304;
+
+    /// <summary>
+    /// Runs an SSPI request, trying again after <see cref="SmbRetryDelayMs"/> while it fails for a reason that can
+    /// pass, up to <see cref="SmbTries"/> tries. A request that throws (a timeout) counts as a failed try, never as
+    /// the end of the test. Returns the last result, the tries it took and the first failure.
+    /// </summary>
+    static (SspiResult Result, int Tries, SspiResult? First) AuthenticateWithRetry(IProbe probe, string package, string spn, CancellationToken ct)
+    {
+        SspiResult? first = null;
+        for (int attempt = 1; ; attempt++)
+        {
+            SspiResult result;
+            try { result = probe.Authenticate(package, spn, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { result = new(SspiTimedOut, null); }
+            if (result.Succeeded || !IsTransient(result.Status) || attempt == SmbTries) return (result, attempt, first);
+            first ??= result;
+            if (ct.WaitHandle.WaitOne(SmbRetryDelayMs)) ct.ThrowIfCancellationRequested();
+        }
+    }
+
+    // The TGT check, once more after a pause if it failed: the same slow first answer as above
+    static TestEntry TgtWithRetry(DiagConfig cfg, IProbe probe)
+    {
+        var first = TgtCheck(cfg, probe) with { Name = SmbTgtRow };
+        if (first.Status != Status.Fail) return first;
+        if (cfg.Cancel.WaitHandle.WaitOne(SmbRetryDelayMs)) cfg.Cancel.ThrowIfCancellationRequested();
+        var second = TgtCheck(cfg, probe) with { Name = SmbTgtRow, Tries = 2 };
+        return second.Status == Status.Fail
+            ? second with { Detail = second.Detail + " (2 tries)" }
+            : second with { Status = Status.Info, Detail = $"{second.Detail}, on try 2; the first failed: {first.Detail}" };
+    }
+
     /// <summary>What an SSPI status means, by number: the text Windows gives is translated.</summary>
     internal static string SspiStatusText(int status) => unchecked((uint)status) switch
     {
@@ -373,6 +435,8 @@ static partial class Diagnostics
         0x8009030F => "the request failed (SEC_E_MESSAGE_ALTERED)",
         0x80090345 => "the server's account doesn't allow delegation (SEC_E_DELEGATION_REQUIRED)",
         0x80090346 => "the KDC refused the ticket's options (SEC_E_BAD_BINDINGS)",
+        0x800705B4 => "no answer in time (timed out)",
+        0x80090304 => "Windows' security subsystem failed (SEC_E_INTERNAL_ERROR)",
         _ => $"SSPI error 0x{status:X8}",
     };
 
@@ -385,7 +449,7 @@ static partial class Diagnostics
         var tests = new List<TestEntry>();
 
         // What Windows' own sign-in would do; a saved credential takes its place on the real connection
-        var negotiate = probe.Authenticate("Negotiate", target.Spn, cfg.Cancel);
+        var (negotiate, _, _) = AuthenticateWithRetry(probe, "Negotiate", target.Spn, cfg.Cancel);
         string package = negotiate.Package ?? "";
         string asSaved = saved.Entry.Status == Status.Info ? "; the connection uses the saved credential instead" : "";
         tests.Add(!negotiate.Succeeded
@@ -474,7 +538,7 @@ static partial class Diagnostics
     static TestGroup SmbShareStep(SmbTarget target, DiagConfig cfg, IProbe probe)
     {
         if (target.Share == null)
-            return new(SmbShare, [new(SmbShareRow, Status.Skip, $@"Not checked: no share given; type one, as in \\{target.Typed}\share")]);
+            return new(SmbShare, [new(SmbShareRow, Status.Skip, "Not checked: no share given; type one in Share to test opening it")]);
         ShareOpen open;
         try { open = probe.OpenShare(target.Unc, cfg.Cancel); }
         catch (Exception ex) when (ex is not OperationCanceledException)

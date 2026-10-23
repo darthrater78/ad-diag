@@ -152,7 +152,8 @@ Windows 11's own system values, so the app matches the OS around it.
 ## Typography
 
 - **Segoe UI** for everything a person reads as interface: 11pt bold title, 9.5pt bold group headings, 9pt body, 8.5pt captions.
-- **Cascadia Code, falling back to Consolas,** only for values copied from the system: hostnames, addresses, paths, tool output, tickets.
+- **Cascadia Code, falling back to Consolas,** only for values copied from the system that stand alone: the Domain and DC fields, tool output in the Log, tickets.
+- Result details (Results and the SMB pane) are Segoe UI 9pt in text colour: they mix sentences with values, and monospace made whole sentences read stark.
 - Sentence case everywhere. No all-caps labels.
 
 ## Layout
@@ -161,10 +162,14 @@ Windows 11's own system values, so the app matches the OS around it.
 - Results are a grid: status (mark + word) at 14px, test name at 100px, detail at 280px to the right edge. Rows are at least 24px with a 1px row line above each.
 - Each group heading carries its verdict pill and counts in a fixed column, and its Run button at the right edge: "9 checks · 1 warning".
 - At the top of the strip, under the header, a **Test** switch (a segmented control: Active Directory | SMB) picks the mode. The input row, the primary button, the summary and Runs bars, the tabs and the Results tab's content follow it; the Profile is shared.
-- The input row starts with the **Profile** picker, 255px; the Domain and DC fields share the rest two to three, so the DC label has room for the suffix box beside it. On the Entra joined profile the Domain and DC fields give way to a text-dim line saying the domain checks are hidden and how to show them. In SMB mode **Server or share** takes the DC field's place and the Domain field stays on every profile, labelled **On-prem domain** on the Entra joined one.
+- The input row starts with the **Profile** picker, 255px; the Domain and DC fields share the rest two to three, so the DC label has room for the suffix box beside it. On the Entra joined profile the Domain and DC fields give way to a text-dim line saying the domain checks are hidden and how to show them. In SMB mode **File server** and **Share (optional)** split the DC field's place, eleven to nine, each with example text and the Domain field stays on every profile, labelled **On-prem domain** on the Entra joined one.
 - Tabs sit left to right in a fixed order and close up around one the mode or profile hides: the mode's own tabs (Active Directory: Results, Group Policy, Kerberos tickets, DNS registration, Intune policies; SMB: Results, Kerberos tickets), a 1px border-colour divider, then Guide and Log, which serve both.
 - A tab's own actions (Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) sit in a 34px bar at the top of the tab, under the run strip, never at the bottom of the window.
 - Groups collapse to their heading. After a run every group is closed, unless "Expand all groups after a run" is ticked; a group the user opens or closes stays that way for that run, and a group run on its own opens (or stays open) to show its new results. The verdict pill and counts stay on a closed heading, so its state still reads.
+
+## Window
+
+The window's 1px outer border is primary (#005fb8, dark #4cc2ff), set through DWM on Windows 11 and following the theme switch; earlier Windows keeps its own.
 
 ## Elevation & Depth
 
@@ -181,7 +186,7 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 
 - **Button** (`ThemedButton`): surface fill, text colour label. Hover blends 7% toward text, pressed 14%, disabled fades toward the window. Focus draws the border in primary.
 - **Primary button:** one per mode, and it is the Enter-key default: Run diagnostics, or in SMB mode **Test connection** (a plain primary button, 156px, as wide as the split pair) in the same place. It is the left half of a split button: the right half is 26px, primary, with a white down chevron and a thin divider in a blend of the label colour, and opens its menu: "Run all sections", a rule, then each group by name. Only the pair's outer corners are rounded.
-- **Connection path** (SMB mode, top of the Results tab, on the panel): the five steps (Name, Port 445, Kerberos, Sign-in, Share) spread evenly, each a 24px circle with a 2px border and the step's status mark at its centre, its name in bold under it and a text-dim caption (Passed, Warning, Failed, Failed here, Not reached, Checking…). A step not yet reached has a border-colour ring and no mark; the step being checked, a primary ring open on one side. A passed or warned step's circle takes a 14% tint of its status colour, and the 2px line leading to it its status colour; otherwise the line is row-line colour. Under it, "See SMB in the Guide" in primary when there is a fix, then the pane: the target, the verdict line with its mark, a "Fix:" line as in the Guide, and each step as a heading (name, status word in its colour, counts) over rows in the results grid's three columns.
+- **Connection path** (SMB mode, top of the Results tab, on the panel): the five steps (Name, Port 445, Kerberos, Sign-in, Share) spread evenly, each a 24px circle with a 2px border and the step's status mark at its centre, its name in bold under it and a text-dim caption (Passed, Passed on try 2, Warning, Failed, Failed here, Failed after 3 tries, Not reached, No share given, Checking…). A step not yet reached has a border-colour ring and no mark; the step being checked, a primary ring open on one side. A passed or warned step's circle takes a 14% tint of its status colour, and the 2px line leading to it its status colour; otherwise the line is row-line colour. Above it, the tab's 34px action bar: **Open share** (a normal button) and, when there is a fix, "See SMB in the Guide" in primary. Under the strip, the pane, drawn like Results (not a rich edit box, whose tab stops Windows doesn't keep): the target, the verdict line with its mark, a "Fix:" line as in the Guide, and each step as a group heading (name, verdict pill, counts) over rows in the results grid's columns.
 - **Segmented control** (Log view: Sections | By time | Raw; the Test switch): buttons joined like the split button; the chosen one is primary with on-primary text, the other a normal surface button.
 - **Menu:** surface fill, 1px border, body text; the hovered item takes a 20% blend toward primary. No icons or image margin.
 - **Danger button:** a normal button with the label in fail colour (Reset all, Delete run).

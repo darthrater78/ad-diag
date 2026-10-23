@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Text;
@@ -11,22 +13,24 @@ using System.Windows.Forms;
 #nullable enable
 namespace AdDiag;
 
-// The Active Directory | SMB switch and everything the SMB mode shows: the strip's Server or share field and Test
+// The Active Directory | SMB switch and everything the SMB mode shows: the strip's File server and Share fields and Test
 // connection, the Results tab's path from this PC to the share, and its report. The checks are in SmbPath.cs.
 partial class MainForm
 {
     enum TestMode { Ad, Smb }
     TestMode _mode = TestMode.Ad;
-    ThemedButton _btnModeAd = null!, _btnModeSmb = null!, _btnSmbTest = null!;
-    TextBox _txtSmbTarget = null!;
-    Label _lblDomain = null!, _lblSmbTarget = null!;
+    ThemedButton _btnModeAd = null!, _btnModeSmb = null!, _btnSmbTest = null!, _btnOpenShare = null!;
+    TextBox _txtSmbServer = null!, _txtSmbShare = null!;
+    Label _lblDomain = null!, _lblSmbServer = null!, _lblSmbShare = null!;
     Panel _tabBar = null!;
     int _tabDividerX;
     string _tab = "results";
+    // Each mode keeps its own status line, so switching back shows what that mode last said
+    readonly Dictionary<TestMode, (string Text, Color Color)> _modeStatus = [];
 
     // The SMB pane, and the test on show
-    Panel _smbPanel = null!, _smbPath = null!;
-    RichTextBox _smbBox = null!;
+    Panel _smbPanel = null!, _smbPath = null!, _smbScroll = null!;
+    SmbCanvas _smbCanvas = null!;
     LinkLabel _lnkSmbGuide = null!;
     SmbTarget? _smbTarget;
     JoinProfile _smbProfile;
@@ -68,11 +72,17 @@ partial class MainForm
     void SetMode(TestMode mode)
     {
         if (_mode == mode) return;
+        _modeStatus[_mode] = (_lblStatus.Text, _lblStatus.ForeColor);
         _mode = mode;
         AppLog.Info("app", $"Mode: {(mode == TestMode.Smb ? "SMB" : "Active Directory")}");
         ApplyMode();
-        if (mode == TestMode.Smb) _txtSmbTarget.Focus();
-        else if (SelectedRun != null) ShowSelectedRun();
+        (_lblStatus.Text, _lblStatus.ForeColor) = _modeStatus.GetValueOrDefault(mode, ("", DimColor));
+        if (mode == TestMode.Smb)
+        {
+            _txtSmbServer.Focus();
+            // SMB needs the domain on every profile: for short names and the Kerberos checks
+            if (string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
+        }
     }
 
     /// <summary>
@@ -88,7 +98,7 @@ partial class MainForm
         // no domain of its own, so the user gives the on-prem one
         _lblDomain.Visible = _txtDomain.Visible = !entra || smb;
         _lblDomain.Text = smb && entra ? "On-prem domain" : "Domain";
-        _lblSmbTarget.Visible = _txtSmbTarget.Visible = smb;
+        _lblSmbServer.Visible = _txtSmbServer.Visible = _lblSmbShare.Visible = _txtSmbShare.Visible = smb;
         _lblProfileHint.Visible = entra && !smb;
 
         _btnRun.Visible = _btnRunMenu.Visible = !smb;
@@ -110,27 +120,43 @@ partial class MainForm
         _smbPath = new BufferedPanel { Height = 78, Dock = DockStyle.Top, BackColor = PanelColor, AccessibleRole = AccessibleRole.Graphic };
         _smbPath.Paint += PaintSmbPath;
         _smbPath.Resize += (s, e) => _smbPath.Invalidate();
-        _lnkSmbGuide = new LinkLabel { Text = "See SMB in the Guide", Font = new Font("Segoe UI", 8.5f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, BackColor = PanelColor, Visible = false };
+        // The tab's own actions, in a bar at its top as on the other tabs: open the server or share, and the Guide
+        _btnOpenShare = new ThemedButton { Text = "Open share", BackColor = SurfaceColor, ForeColor = TextColor, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f), Size = new Size(100, 28), Location = new Point(10, 3), AccessibleName = "Open the server or share in File Explorer" };
+        _btnOpenShare.Click += (s, e) => OpenSmbInExplorer();
+        _lnkSmbGuide = new LinkLabel { Text = "See SMB in the Guide", Font = new Font("Segoe UI", 8.5f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, BackColor = BgColor, Location = new Point(124, 9), Visible = false };
         _lnkSmbGuide.LinkClicked += (s, e) => ShowGuideSection(SmbGuideTitle);
-        var linkBar = new Panel { Height = 22, Dock = DockStyle.Top, BackColor = PanelColor };
-        linkBar.Controls.Add(_lnkSmbGuide);
-        linkBar.Resize += (s, e) => _lnkSmbGuide.Location = new Point(S(GridLeft) + S(4), S(2));
-        _smbBox = new RichTextBox
-        {
-            ReadOnly = true,
-            BackColor = PanelColor,
-            ForeColor = TextColor,
-            BorderStyle = BorderStyle.None,
-            Dock = DockStyle.Fill,
-            Font = new Font("Segoe UI", 9.5f),
-            ScrollBars = RichTextBoxScrollBars.ForcedVertical,
-            DetectUrls = false,
-        };
+        var actionBar = new Panel { Height = 34, Dock = DockStyle.Top, BackColor = BgColor };
+        actionBar.Controls.AddRange([_btnOpenShare, _lnkSmbGuide]);
+        // Drawn like the Results grid, not written into a rich edit box, so the columns and marks are exact
+        _smbScroll = new KeepScrollPanel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
+        _smbCanvas = new SmbCanvas { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "SMB test results" };
+        _smbCanvas.Paint += (s, e) => LayoutSmb(e.Graphics, _smbCanvas.Width);
+        _smbScroll.Controls.Add(_smbCanvas);
+        _smbScroll.Resize += (s, e) => SizeSmbCanvas();
         _smbPanel = new Panel { Dock = DockStyle.Fill, BackColor = PanelColor, Visible = false };
-        _smbPanel.Controls.Add(_smbBox);
-        _smbPanel.Controls.Add(linkBar);
+        _smbPanel.Controls.Add(_smbScroll);
         _smbPanel.Controls.Add(_smbPath);
+        _smbPanel.Controls.Add(actionBar);
+        // Docking runs from the back of the z-order: the action bar, then the strip, take the top; the results what's left
+        _smbScroll.BringToFront();
         RenderSmb();
+    }
+
+    // The results canvas: focusable, so the mouse wheel scrolls the panel it sits in
+    sealed class SmbCanvas : Panel
+    {
+        public SmbCanvas()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+        }
     }
 
     sealed class BufferedPanel : Panel
@@ -168,36 +194,22 @@ partial class MainForm
         {
             int cx = margin + slot * i;
             var state = StepState(_smbGroups.Find(gr => gr.Name == steps[i]));
-            Color tone = state switch
-            {
-                Status.Pass => PassColor, Status.Warn => WarnColor, Status.Fail => FailColor, Status.Skip => SkipColor, _ => BorderColor,
-            };
             if (i > 0)
             {
-                using var line = new Pen(state is Status.Pass or Status.Warn ? tone : RowLineColor, S(2));
+                using var line = new Pen(state is Status.Pass or Status.Warn ? ChipTone(state) : RowLineColor, S(2));
                 g.DrawLine(line, cx - slot + r + S(2), cy, cx - r - S(2), cy);
             }
-            var circle = new Rectangle(cx - r, cy - r, 2 * r, 2 * r);
-            using (var fill = new SolidBrush(state is Status.Pass or Status.Warn or Status.Fail ? Blend(PanelColor, tone, 0.14) : PanelColor))
-                g.FillEllipse(fill, circle);
-            if (i == running)
-            {
-                // The step being checked: a ring in primary, open on one side, like the running mark in Results
-                using var ring = new Pen(AccentColor, S(2));
-                g.DrawArc(ring, circle, -90, 280);
-            }
-            else
-            {
-                using var border = new Pen(state == null ? BorderColor : tone, S(2));
-                g.DrawEllipse(border, circle);
-                if (state is { } s) DrawStatusMark(g, new TestEntry("", s, "-"), cx - S(5), cy - S(5));
-            }
+            DrawChip(g, cx, cy, r, state, i == running);
 
+            // A step that needed more than one try says so, as the Kerberos request may
+            int tries = _smbGroups.Find(gr => gr.Name == steps[i])?.Tests.Max(t => t.Tries) ?? 1;
             string caption = i == running ? "Checking…"
+                : tries > 1 && state is Status.Pass or Status.Warn ? $"Passed on try {tries}"
+                : tries > 1 && state == Status.Fail ? $"Failed after {tries} tries"
                 : state switch
                 {
                     Status.Pass => "Passed", Status.Warn => "Warning", Status.Fail => steps[i] == stoppedAt ? "Failed here" : "Failed",
-                    Status.Skip => "Not reached", _ => "",
+                    Status.Skip => SkippedText(steps[i]), _ => "",
                 };
             var nameBox = new Rectangle(cx - slot / 2, cy + r + S(4), slot, S(18));
             TextRenderer.DrawText(g, steps[i], GpBoldFont, nameBox, state is null or Status.Skip ? DimColor : TextColor,
@@ -210,54 +222,140 @@ partial class MainForm
         _smbPath.AccessibleName = "Connection path. " + string.Join(", ", names);
     }
 
-    /// <summary>Writes the pane again: before a test what it does; after, the verdict and each step's rows.</summary>
+    /// <summary>Draws the pane again: before a test what it does; after, the verdict and each step's rows.</summary>
     void RenderSmb()
     {
-        if (_smbBox == null) return;
+        if (_smbCanvas == null) return;
         _smbPath.Invalidate();
         _lnkSmbGuide.Visible = _smbVerdict?.Fix != null;
-        _smbBox.Clear();
-        StepParagraph(_smbBox, row: false);
-        if (_smbTarget == null)
-        {
-            AppendRun(_smbBox, "\n  Type a file server or share in Server or share, then click Test connection. The test follows the path an SMB\n"
-                + "  connection takes from this PC and stops where it breaks: the server's name in DNS, TCP port 445, a Kerberos ticket\n"
-                + "  for the server, how Windows signs in, and opening the share. This PC's SMB client settings are listed under it.\n\n"
-                + "  A short name gets the Domain field's domain. On an Entra joined PC, give the on-prem domain for the Kerberos checks.\n"
-                + "  Everything is read only: nothing is written, and no password is asked for or saved.\n", DimColor);
-            return;
-        }
+        _smbCanvas.AccessibleDescription = BuildSmbReport() ?? "";
+        SizeSmbCanvas();
+        _smbCanvas.Invalidate();
+    }
 
-        string where = _smbDomain.Length > 0 ? $" · {_smbDomain}" : "";
-        AppendRun(_smbBox, $"\n  {_smbTarget.Unc}", TextColor, GpBoldFont);
-        AppendRun(_smbBox, $"   {ProfileName(_smbProfile)}{where} · {Clock(_smbAt)}\n", DimColor);
+    void SizeSmbCanvas()
+    {
+        int w = _smbScroll.ClientSize.Width;
+        if (w <= 0) return;
+        _smbCanvas.Width = w;
+        _smbCanvas.Height = LayoutSmb(null, w);
+    }
+
+    const string SmbExplainer =
+        "Type the File server, and the Share to test opening it, then click Test connection. The test follows the path an SMB "
+        + "connection takes from this PC and stops where it breaks: the server's name in DNS, TCP port 445, a Kerberos ticket "
+        + "for the server, how Windows signs in, and opening the share. This PC's SMB client settings are listed under it.\n\n"
+        + "A short name gets the domain. On an Entra joined PC, the on-prem domain is needed for the Kerberos checks.\n\n"
+        + "Everything is read only: nothing is written, and no password is asked for or saved.";
+
+    // A step that didn't run: never reached, or, for Share, no share was typed
+    string SkippedText(string step) => step == Diagnostics.SmbShare && _smbTarget?.Share == null ? "No share given" : "Not reached";
+
+    /// <summary>
+    /// Lays the SMB results out at <paramref name="width"/> and returns their height; with <paramref name="g"/> it
+    /// also draws them. The rows use the Results grid's columns, marks and fonts.
+    /// </summary>
+    int LayoutSmb(Graphics? g, int width)
+    {
+        int left = S(GridLeft), right = width - S(GridLeft), y = S(10);
+        int Para(string text, Font font, Color color, int x, int top)
+        {
+            var size = TextRenderer.MeasureText(text, font, new Size(Math.Max(right - x, S(80)), 0), DetailTextFlags);
+            if (g != null) TextRenderer.DrawText(g, text, font, new Rectangle(x, top, right - x, size.Height), color, DetailTextFlags);
+            return top + size.Height;
+        }
+        if (_smbTarget == null) return Para(SmbExplainer, GuideBodyFont, DimColor, left, y) + S(14);
+
+        const TextFormatFlags oneLine = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        int targetW = TextRenderer.MeasureText(_smbTarget.Unc, GroupHeaderFont, Size.Empty, oneLine).Width;
+        string meta = $"{ProfileName(_smbProfile)}{(_smbDomain.Length > 0 ? $" · {_smbDomain}" : "")} · {Clock(_smbAt)}";
+        if (g != null)
+        {
+            TextRenderer.DrawText(g, _smbTarget.Unc, GroupHeaderFont, new Point(left, y), TextColor, oneLine);
+            TextRenderer.DrawText(g, meta, GroupCountFont, new Point(left + targetW + S(10), y + S(2)), DimColor, oneLine);
+        }
+        y += S(26);
+
+        int indent = left + S(16);
         if (_smbVerdict is { } v)
         {
-            var (mark, color) = StatusMark(v.Status);
-            AppendRun(_smbBox, $"\n  {mark} ", color, GpBoldFont);
-            AppendRun(_smbBox, v.Text + "\n", TextColor, GpBoldFont);
+            if (g != null) DrawStatusMark(g, new TestEntry("", v.Status, "-"), left, y + S(4));
+            y = Para(v.Text, ReadinessNameFont, TextColor, indent, y);
             if (v.Fix != null)
             {
-                AppendRun(_smbBox, "     Fix: ", FixLabelColor, GuideFixLabelFont);
-                AppendRun(_smbBox, v.Fix + "\n", DimColor, GuideFixFont);
+                int labelW = TextRenderer.MeasureText("Fix:", GuideFixLabelFont, Size.Empty, oneLine).Width;
+                if (g != null) TextRenderer.DrawText(g, "Fix:", GuideFixLabelFont, new Point(indent, y + S(3)), FixLabelColor, oneLine);
+                y = Para(v.Fix, GuideFixFont, DimColor, indent + labelW + S(4), y + S(3));
             }
         }
         else if (_smbRunning)
-            AppendRun(_smbBox, "\n  Testing…\n", DimColor);
+            y = Para("Testing…", GuideBodyFont, DimColor, left, y);
 
+        int detailW = DetailWidth(width);
         foreach (var group in _smbGroups)
         {
-            StepParagraph(_smbBox, row: false);
+            y += S(14);
             var state = StepState(group) ?? Status.Skip;
-            var (_, tone) = StatusMark(state);
-            AppendRun(_smbBox, $"\n  {group.Name}", TextColor, GuideSectionFont);
-            AppendRun(_smbBox, state == Status.Skip ? "   NOT REACHED" : $"   {StatusWord(state).ToUpperInvariant()}", tone, BadgeFont);
-            AppendRun(_smbBox, state == Status.Skip ? "\n" : $"   {GroupCounts(group)}\n", DimColor, LogNoteFont);
+            string counts = state == Status.Skip ? SkippedText(group.Name) : GroupCounts(group);
+            if (g != null)
+            {
+                TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Rectangle(left, y + S(2), right - left - S(NoteColumn) - BadgeWidth(g) - S(16), S(20)), TextColor,
+                    oneLine | TextFormatFlags.EndEllipsis);
+                int noteX = right - S(NoteColumn);
+                DrawGroupBadge(g, state, noteX - S(8), y);
+                TextRenderer.DrawText(g, counts, GroupCountFont, new Point(noteX, y + S(5)), DimColor, oneLine);
+            }
+            y += S(26);
             foreach (var test in group.Tests)
-                AppendStepRow(_smbBox, test, StatusWord(test.Status));
+            {
+                var size = TextRenderer.MeasureText(test.Detail, TestDetailFont, new Size(detailW, 0), DetailTextFlags);
+                int rowHeight = Math.Max(S(20), size.Height + S(4));
+                if (g != null)
+                {
+                    var (word, color) = StatusLook(test);
+                    g.DrawLine(RowLinePen, left, y, right, y);
+                    DrawStatusMark(g, test, left, y + S(8));
+                    TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(5)), color, TextFormatFlags.NoPrefix);
+                    TextRenderer.DrawText(g, test.Name, TestNameFont, new Rectangle(S(NameX), y + S(4), S(DetailX - NameX - 6), S(18)), TextColor,
+                        TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                    TextRenderer.DrawText(g, test.Detail, TestDetailFont, new Rectangle(S(DetailX), y + S(5), detailW, size.Height),
+                        test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
+                }
+                y += S(4) + rowHeight;
+            }
+            g?.DrawLine(RowLinePen, left, y, right, y);
         }
-        _smbBox.SelectionStart = 0;
-        _smbBox.ScrollToCaret();
+        return y + S(14);
+    }
+
+    /// <summary>
+    /// Opens the server (its list of shares) or the share in File Explorer, through explorer.exe so it runs at the
+    /// desktop's level even when this app is elevated. Only a path built from the validated fields is passed, and a
+    /// validated server and share can't hold a quote.
+    /// </summary>
+    void OpenSmbInExplorer()
+    {
+        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, _txtDomain.Text.Trim());
+        if (target == null)
+        {
+            _lblStatus.ForeColor = WarnColor;
+            _lblStatus.Text = error;
+            return;
+        }
+        string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        try
+        {
+            Process.Start(new ProcessStartInfo(explorer, $"\"{target.Unc}\"") { UseShellExecute = false })?.Dispose();
+            AppLog.Info("smb", $"Opened {target.Unc} in File Explorer");
+            _lblStatus.ForeColor = DimColor;
+            _lblStatus.Text = $"Opened {target.Unc} in File Explorer";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info("smb", $"Could not open {target.Unc} in File Explorer: {ex.Message}");
+            _lblStatus.ForeColor = WarnColor;
+            _lblStatus.Text = $"Couldn't open {target.Unc}: {ex.Message}";
+        }
     }
 
     // ── Running ──
@@ -266,12 +364,12 @@ partial class MainForm
     {
         if (_smbRunning) return;
         string domain = _txtDomain.Text.Trim();
-        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbTarget.Text, domain);
+        var (target, error) = Diagnostics.ParseSmbTarget(_txtSmbServer.Text, _txtSmbShare.Text, domain);
         if (target == null)
         {
             _lblStatus.ForeColor = WarnColor;
             _lblStatus.Text = error;
-            _txtSmbTarget.Focus();
+            (error?.Contains("Share") == true ? _txtSmbShare : _txtSmbServer).Focus();
             return;
         }
 

@@ -132,7 +132,8 @@ static class Shots
         // The SMB mode: a file share reached, but with NTLM, since the server's SPN is missing
         var modeType = typeof(MainForm).GetNestedType("TestMode", BindingFlags.NonPublic)!;
         Call(form, "SetMode", Enum.Parse(modeType, "Smb"));
-        Get<TextBox>(form, "_txtSmbTarget").Text = @"\\files\Finance$";
+        Get<TextBox>(form, "_txtSmbServer").Text = "files";
+        Get<TextBox>(form, "_txtSmbShare").Text = "Finance$";
         var smbTarget = Diagnostics.ParseSmbTarget(@"\\files\Finance$", "contoso.com").Target!;
         Set(form, "_smbTarget", smbTarget);
         Set(form, "_smbProfile", JoinProfile.Hybrid);

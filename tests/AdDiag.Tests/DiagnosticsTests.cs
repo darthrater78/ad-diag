@@ -139,8 +139,21 @@ public class DiagnosticsTests
         public int? TpmVersion() => Tpm;
         // SSPI: keyed by "package spn"; anything not listed succeeds, Negotiate choosing Kerberos
         public Dictionary<string, SspiResult> Sspi = new(StringComparer.OrdinalIgnoreCase);
-        public SspiResult Authenticate(string package, string spn, CancellationToken ct) =>
-            Sspi.TryGetValue($"{package} {spn}", out var r) ? r : new(SspiResult.ContinueNeeded, package == "Negotiate" ? "Kerberos" : null);
+        // Answers given in turn, one per call, before Sspi applies; an exception in the queue is thrown
+        public Dictionary<string, Queue<object>> SspiQueue = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> SspiCalls = [];
+        public SspiResult Authenticate(string package, string spn, CancellationToken ct)
+        {
+            string key = $"{package} {spn}";
+            SspiCalls.Add(key);
+            if (SspiQueue.TryGetValue(key, out var queue) && queue.Count > 0)
+            {
+                object next = queue.Dequeue();
+                if (next is Exception ex) throw ex;
+                return (SspiResult)next;
+            }
+            return Sspi.TryGetValue(key, out var r) ? r : new(SspiResult.ContinueNeeded, package == "Negotiate" ? "Kerberos" : null);
+        }
         public string Spn = "SPN|FILES$|cifs/files.contoso.com";
         public Func<string, ShareOpen> Shares = _ => new(14, 0, "");
         public ShareOpen OpenShare(string unc, CancellationToken ct)

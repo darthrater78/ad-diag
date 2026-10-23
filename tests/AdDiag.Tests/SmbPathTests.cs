@@ -7,6 +7,9 @@ namespace AdDiag.Tests;
 // The SMB tab: each connection point's verdicts on each profile, where the path stops, and the fix it names.
 public class SmbPathTests
 {
+    // Retries don't wait in tests
+    public SmbPathTests() => Diagnostics.SmbRetryDelayMs = 0;
+
     const string Server = "files.contoso.com";
     static readonly IPAddress FilesIp = IPAddress.Parse("10.20.5.40");
 
@@ -116,10 +119,52 @@ public class SmbPathTests
         Assert.NotNull(error);
     }
 
+    [Theory]
+    [InlineData("files", "Finance$", "files.contoso.com", "Finance$")]
+    [InlineData(@"\\files", @"\Finance$\", "files.contoso.com", "Finance$")]
+    [InlineData(@"\\files\Finance$", "", "files.contoso.com", "Finance$")]
+    [InlineData("files.corp.contoso.com", "", "files.corp.contoso.com", null)]
+    public void ReadsTheTwoBoxes(string server, string share, string expectedServer, string? expectedShare)
+    {
+        var (target, error) = Diagnostics.ParseSmbTarget(server, share, "contoso.com");
+        Assert.Null(error);
+        Assert.Equal(expectedServer, target!.Server);
+        Assert.Equal(expectedShare, target.Share);
+        Assert.Equal("files", target.Typed.Split('.')[0]);
+    }
+
+    [Theory]
+    [InlineData(@"\\files\Finance$", "Other", "both boxes")]
+    [InlineData("files", @"Finance$\2026", "without a folder")]
+    [InlineData("", "Finance$", "file server")]
+    public void TheTwoBoxesRefuseWhatDoesntFit(string server, string share, string expected)
+    {
+        var (target, error) = Diagnostics.ParseSmbTarget(server, share, "contoso.com");
+        Assert.Null(target);
+        Assert.Contains(expected, error);
+    }
+
     [Fact]
     public void AShortNameStaysShortWithNoDomain()
     {
         Assert.Equal("files", Diagnostics.ParseSmbTarget("files", "").Target!.Server);
+    }
+
+    [Fact]
+    public void TheOnPremDomainComesFromACachedTgt()
+    {
+        Assert.Equal("CONTOSO.COM", Parsers.OnPremTgtRealm(Klist()));
+        Assert.Null(Parsers.OnPremTgtRealm("""
+
+            Current LogonId is 0:0x3e7a1
+
+            Cached Tickets: (1)
+
+            #0>	Client: jdoe @ KERBEROS.MICROSOFTONLINE.COM
+            	Server: krbtgt/KERBEROS.MICROSOFTONLINE.COM @ KERBEROS.MICROSOFTONLINE.COM
+            	KerbTicket Encryption Type: AES-256-CTS-HMAC-SHA1-96
+            """));
+        Assert.Null(Parsers.OnPremTgtRealm(""));
     }
 
     // ── The whole path ──
@@ -352,6 +397,54 @@ public class SmbPathTests
         Assert.Equal(Status.Info, Row(groups, Diagnostics.SmbNameRow).Status);
         Assert.Equal(Status.Skip, Row(groups, Diagnostics.SmbTicketRow).Status);
         Assert.Equal(Status.Info, Row(groups, Diagnostics.SmbNegotiationRow).Status);
+        Assert.Equal(Status.Pass, Row(groups, Diagnostics.SmbShareRow).Status);
+    }
+
+    [Fact]
+    public void AKerberosRequestThatFailsOnceIsTriedAgain()
+    {
+        var probe = Machine();
+        probe.SspiQueue[$"Kerberos cifs/{Server}"] = new([new SspiResult(unchecked((int)0x80090311), null)]);
+        var row = Row(Run(probe), Diagnostics.SmbTicketRow);
+
+        Assert.Equal(Status.Info, row.Status);
+        Assert.Equal(2, row.Tries);
+        Assert.Contains("issued on try 2", row.Detail);
+        Assert.Contains("no domain controller answered", row.Detail);
+    }
+
+    [Fact]
+    public void AKerberosRequestStopsAfterThreeTries()
+    {
+        var probe = Machine();
+        var noDc = new SspiResult(unchecked((int)0x80090311), null);
+        probe.Sspi[$"Kerberos cifs/{Server}"] = noDc;
+        var row = Row(Run(probe), Diagnostics.SmbTicketRow);
+
+        Assert.Equal(Status.Warn, row.Status);
+        Assert.Equal(3, row.Tries);
+        Assert.Equal(3, probe.SspiCalls.Count(c => c.StartsWith("Kerberos")));
+    }
+
+    [Fact]
+    public void AMissingSpnIsNotTriedAgain()
+    {
+        var probe = NoSpn(Machine());
+        var row = Row(Run(probe), Diagnostics.SmbTicketRow);
+        Assert.Equal(1, row.Tries);
+        Assert.Single(probe.SspiCalls, c => c.StartsWith("Kerberos"));
+    }
+
+    [Fact]
+    public void ARequestThatTimesOutIsAFailedTryNotACrash()
+    {
+        var probe = Machine();
+        probe.SspiQueue[$"Kerberos cifs/{Server}"] = new([new TimeoutException("Kerberos sign-in to cifs/files timed out after 15s")]);
+        var groups = Run(probe);
+
+        var row = Row(groups, Diagnostics.SmbTicketRow);
+        Assert.Equal(Status.Info, row.Status);
+        Assert.Contains("timed out", row.Detail);
         Assert.Equal(Status.Pass, Row(groups, Diagnostics.SmbShareRow).Status);
     }
 

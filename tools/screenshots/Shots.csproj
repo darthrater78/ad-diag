@@ -19,6 +19,7 @@
   <ItemGroup>
     <Compile Include="../../MainForm.cs" />
     <Compile Include="../../MainForm.Smb.cs" />
+    <Compile Include="../../MainForm.Chips.cs" />
     <Compile Include="../../Parsers.cs" />
     <Compile Include="../../Runner.cs" />
     <Compile Include="../../Diagnostics.cs" />

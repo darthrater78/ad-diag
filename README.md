@@ -37,7 +37,7 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
 
    ![Results on an Entra joined PC: only Dynamic DNS Registration, Entra Seamless Single Sign-On and Intune](docs/screenshots/results-entra.png)
 
-   On the other profiles the app auto-detects the current domain (from `USERDNSDOMAIN`, `dsregcmd /status`, or the machine's DNS domain suffix) and pre-fills the **Domain** field. Enter target details:
+   On the other profiles, and in SMB mode on every profile, the app auto-detects the current domain (from `USERDNSDOMAIN`, `dsregcmd /status`, the realm of a cached on-prem Kerberos ticket, or the machine's DNS domain suffix) and pre-fills the **Domain** field. Enter target details:
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
 3. Before a run, **Results** lists every group the profile runs, each with its own **Run** button. Open a group to see the checks it will make; when the app isn't running as Administrator, the groups with checks that need it say **Needs admin**:
@@ -83,7 +83,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. The SMB field's server must be a plain DNS name (labels of letters, digits and hyphens) or an IP address, and its share may hold none of `"/\[]:|<>+=;,?*` or control characters; a path below the share is dropped. Only a server name that passed goes into the SPN search, and no user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
 - **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `secur32`, `tbs`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
-- **Links open unelevated.** The GitHub and Release Notes links accept only `https` URLs and open through `explorer.exe`, so the browser runs at the desktop's integrity level, never with the app's admin token.
+- **Links open unelevated.** The GitHub and Release Notes links accept only `https` URLs and open through `explorer.exe`, so the browser runs at the desktop's integrity level, never with the app's admin token. **Open share** does the same with a `\\server\share` path built only from the validated SMB fields, quoted, which can't hold a quote of its own.
 
 ### Changes
 
@@ -266,7 +266,7 @@ Reading the sync times or policy settings may need Run as Administrator; without
 
 ![The SMB test: a share reached, but with NTLM, because the server's SPN is missing](docs/screenshots/smb.png)
 
-Switch **Test** to **SMB**, type a file server or share in **Server or share** (`\\files\Finance`, `files\Finance`, `files.contoso.com`, or an IP address) and click **Test connection** or press Enter. A short name gets the **Domain** field's domain. It runs only when you ask, never with Run diagnostics.
+Switch **Test** to **SMB**, type the **File server** (`files`, `files.contoso.com`, or an IP address) and, to test opening one, the **Share** (`Finance`), then click **Test connection** or press Enter. A whole path such as `\\files\Finance`, pasted into File server, works too. A short name gets the **Domain** field's domain. It runs only when you ask, never with Run diagnostics.
 
 The test follows the path a connection takes, and the strip at the top lights each connection point as it passes. It stops at the first step that fails, and the line under the strip says where it stopped and what to do. Kerberos failing alone doesn't stop it, since Windows can still sign in with NTLM; the Share step shows whether that worked.
 
@@ -274,7 +274,7 @@ The test follows the path a connection takes, and the strip at the top lights ea
 |---|---|
 | **Name** | The name in DNS and its addresses (IPv6 only is a note). An IP address skips Kerberos, which needs a name |
 | **Port 445** | A TCP connection on 445, IPv4 first |
-| **Kerberos** | Cloud Kerberos Trust (see below); the ticket-granting ticket; the `_kpasswd._tcp` SRV record (domain and hybrid joined); the account holding `cifs/<server>` or `HOST/<server>` in AD, and a duplicate; a `cifs/<server>` service ticket from the KDC and why it failed, read by status number; the ticket's encryption; Max Token Size |
+| **Kerberos** | Cloud Kerberos Trust (see below); the ticket-granting ticket; the `_kpasswd._tcp` SRV record (domain and hybrid joined); the account holding `cifs/<server>` or `HOST/<server>` in AD, and a duplicate; a `cifs/<server>` service ticket from the KDC and why it failed, read by status number, tried up to 3 times, 2 seconds apart, when the failure can pass (no DC answered, no credentials yet, timed out), since the first request after sign-in or over a VPN often fails; the strip then shows "Passed on try 2"; the ticket's encryption; Max Token Size |
 | **Sign-in** | What Windows' Negotiate picks for the server: Kerberos, or NTLM and why; the LAN Manager authentication level; a saved credential in Credential Manager that replaces your own sign-in |
 | **Share** | Opens the share and counts its root's entries; errors are read by number (access denied, no such share, sign-in refused, guest only, already connected as someone else) |
 | *This PC's SMB settings* | Signing required, the SMBv1 client driver, insecure guest logons (Group Policy first). Listed under the path, since none stops a connection on its own |
@@ -283,10 +283,12 @@ The **Profile** changes what the steps check:
 
 | | Domain joined | Microsoft Entra hybrid joined | Microsoft Entra joined |
 |---|---|---|---|
-| Domain | The Domain field | The Domain field | An **On-prem domain** field, since the PC has no domain of its own; needed for short names and the Kerberos checks |
+| Domain | The Domain field | The Domain field | An **On-prem domain** field, since the PC has no domain of its own; needed for short names and the Kerberos checks. Filled in from `USERDNSDOMAIN` or the realm of the on-prem ticket Cloud Kerberos Trust gives, when there is one |
 | Cloud Kerberos Trust row | — | Only with Windows Hello set up; missing OnPremTgt warns, since a Hello sign-in then falls back to NTLM | Always; missing OnPremTgt fails, since there's no other way to an on-prem ticket |
 | `_kpasswd._tcp` SRV | Checked | Checked | Not checked |
 | NTLM | Used when Kerberos fails | Used when Kerberos fails | The LAN Manager row adds that a Windows Hello sign-in leaves no password hash for NTLM, so Kerberos must work |
+
+**Open share**, at the top of the Results tab, opens what the fields name in File Explorer: the share, or with no share the server's list of shares. It runs through `explorer.exe`, so Explorer opens unelevated even when the app is running as Administrator, and Explorer signs in as it always does.
 
 In SMB mode the tabs are **Results** (the path and its steps), **Kerberos tickets** (with the tested server's ticket first), **Guide** (it opens at the SMB section) and **Log**. **Export results** and **Copy results** give the test as text. Every step and result is in the Log, and with **Debug** ticked so is each lookup, query and SSPI status the test made.
 
@@ -387,7 +389,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 | `nltest /dsgetdc` | DC locator | 8s |
 | `nltest /domain_trusts` | Trust enumeration | 8s |
 | `gpupdate` / `gpupdate /force` | Manual policy refresh (Group Policy tab) | 90s |
-| `klist` | Kerberos ticket cache (diagnostics + tab) | 5s |
+| `klist` | Kerberos ticket cache (diagnostics + tab); the on-prem realm when detecting the domain | 5s |
 | `klist get krbtgt/REALM` | Request a TGT when none is cached | 10s |
 | `klist get HTTP/autologon.microsoftazuread-sso.com` | Request the Seamless SSO ticket (domain-joined and hybrid joined PCs) | 10s |
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
@@ -436,8 +438,12 @@ Newest first. Each version's section is its GitHub release notes: the release wo
 ### Unreleased
 
 #### New
-- **SMB connection test**: a **Test** switch at the top picks Active Directory or SMB. Type a server or share and the test follows the path to it (name, port 445, Kerberos, sign-in, share), lights each step as it passes, and says where it stopped and how to fix it. Each profile gets its own checks; brought over from smb-diag, with fixes to its SMBv1, guest logon, signing and Kerberos-or-NTLM checks.
+- **SMB connection test**: a **Test** switch at the top picks Active Directory or SMB. Type a file server, and a share if you like, and the test follows the path to it (name, port 445, Kerberos, sign-in, share), lights each step as it passes, and says where it stopped and how to fix it. Each profile gets its own checks; brought over from smb-diag, with fixes to its SMBv1, guest logon, signing and Kerberos-or-NTLM checks.
 - Every SMB test is in the Log, step by step, with Debug detail.
+
+#### Results
+- Result details are set in Segoe UI, like the rest of the window, instead of a monospace font.
+- SMB results are drawn like the Results grid.
 
 #### Tabs
 - The tabs follow the switch: the mode's own tabs, a divider, then Guide and Log. Guide moves from second place to the end.
