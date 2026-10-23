@@ -75,8 +75,55 @@ public class DnsRegistrationTests
         var group = Run(probe);
         Assert.Equal(Status.Warn, StatusOf(group, "Registration Name"));
         string detail = DetailOf(group, "Registration Name");
-        Assert.Contains("IOT (nscriven.net), Island Private Access (scrivtech.com, registration off)", detail);
-        Assert.Contains("Use this connection's DNS suffix in DNS registration", detail);
+        Assert.StartsWith("Nothing is registered: PROX-ENTRA has no primary DNS suffix", detail);
+        Assert.Contains("\nIOT: nscriven.net — \"Use this connection's DNS suffix in DNS registration\" is off", detail);
+        Assert.Contains("\nIsland Private Access: scrivtech.com — \"Register this connection's addresses in DNS\" is off", detail);
+        // Nothing is registered, so the adapter list is not a pass
+        Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
+        Assert.Equal($"No registration name. Once there is one, these addresses are registered:\nIOT: {ClientIp}", DetailOf(group, "Registering Adapters"));
+        Assert.EndsWith("(with no name, Windows attempts no registration)", DetailOf(group, "Registration Errors"));
+    }
+
+    [Fact]
+    public void UsersPc_ClientAndLanBothRegister_NoContradictions()
+    {
+        // The report's screenshot: both adapters register addresses, neither registers its suffix, and Island has an
+        // address-less second interface that used to print "Island adapter" twice
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+            [IPAddress.Parse("3fff::"), IPAddress.Parse("172.16.50.5")], [IPAddress.Parse("127.73.83.76")], PointToPoint: true, DnsSuffix: "scrivtech.com");
+        var filter = new NetAdapter("Island Private Access-WFP Native MAC Layer LightWeight Filter-0000", "Island Private Access", false, false, [], []);
+        var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp], DnsSuffix: "nscriven.net");
+        var probe = Healthy();
+        probe.Identity = ("PROX-ENTRA", "");
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([island, filter, iot]);
+        var group = Run(probe);
+
+        Assert.Equal(Status.Info, StatusOf(group, "ZTNA / VPN Client"));
+        Assert.Equal("Island adapter (3fff::, 172.16.50.5); DNS answered by its local proxy (127.73.83.76)", DetailOf(group, "ZTNA / VPN Client"));
+        Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
+        Assert.DoesNotContain("Behind the ZTNA client", DetailOf(group, "Registering Adapters"));
+        Assert.DoesNotContain(group.Tests, t => t.Status == Status.Pass && t.Name != "Registration Errors");
+    }
+
+    [Fact]
+    public void ClientAndLanBothRegisterWithAName_IsANoteNamingTheLanAdapter()
+    {
+        var island = new NetAdapter("Island Private Access", "Wintun Userspace Tunnel", false, true,
+            [IPAddress.Parse("172.16.50.5")], [DcIp], PointToPoint: true);
+        var iot = new NetAdapter("IOT", "Red Hat VirtIO Ethernet Adapter", false, true, [ClientIp], [DcIp]);
+        var probe = Healthy();
+        probe.NetAdapters.Clear();
+        probe.NetAdapters.AddRange([island, iot]);
+        var group = Run(probe);
+        Assert.Equal(Status.Info, StatusOf(group, "Registering Adapters"));
+        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", DetailOf(group, "Registering Adapters"));
+
+        probe.NetAdapters.Remove(iot);
+        group = Run(probe);
+        Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
+        Assert.EndsWith("Island Private Access is the client's own adapter, so DNS gets the address servers reach this machine through",
+            DetailOf(group, "Registering Adapters"));
     }
 
     [Fact]
@@ -122,8 +169,8 @@ public class DnsRegistrationTests
     public void Ztna_DetectedByAdapterNameAndItsDnsProxy_IsInformational()
     {
         var group = Run(BehindZtna());
-        Assert.Equal(Status.Pass, StatusOf(group, "ZTNA / VPN Client"));
-        Assert.Equal("Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)", DetailOf(group, "ZTNA / VPN Client"));
+        Assert.Equal(Status.Info, StatusOf(group, "ZTNA / VPN Client"));
+        Assert.Equal("Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2)", DetailOf(group, "ZTNA / VPN Client"));
         // The home address is what gets registered; that is worth saying but is how ZTNA clients work
         Assert.Equal(Status.Pass, StatusOf(group, "Registering Adapters"));
         Assert.StartsWith("Wi-Fi: 192.168.1.50\nBehind the ZTNA client", DetailOf(group, "Registering Adapters"));

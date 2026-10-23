@@ -195,7 +195,7 @@ static class Shots
     static List<TestEntry> MockDnsTrace() =>
     [
         new("Registration Name", Status.Pass, "PC042.contoso.com with 192.168.1.50"),
-        new("ZTNA / VPN Client", Status.Pass, "Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2) (informational)"),
+        new("ZTNA / VPN Client", Status.Info, "Zscaler adapter (100.64.0.7); DNS answered by its local proxy (100.64.0.2)"),
         new("Zone Primary Server", Status.Pass, "contoso.com -> dc01.contoso.com (10.20.0.11), answered by 100.64.0.2 (DNS server of Wi-Fi)"),
         new("Record Before", Status.Warn, "dc01.contoso.com holds 10.20.4.18; this machine has 192.168.1.50 — the record is stale"),
         new("Send", Status.Pass, "ipconfig /registerdns ran: Windows IP Configuration Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer in 15 minutes."),

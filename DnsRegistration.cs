@@ -42,8 +42,9 @@ static partial class Diagnostics
         ("anyconnect", "Cisco AnyConnect"), ("cisco secure client", "Cisco Secure Client"),
         ("fortinet", "FortiClient"), ("citrix secure access", "Citrix Secure Access"), ("appgate", "Appgate"),
         ("cato networks", "Cato"), ("check point", "Check Point"), ("banyan", "Banyan"), ("ip-https", "DirectAccess"),
-        ("wireguard", "WireGuard"), ("openvpn", "OpenVPN"), ("tap-windows", "OpenVPN"), ("wintun", "Wintun"),
         ("island private access", "Island"),
+        // Generic tunnel drivers other clients build on (Island runs on Wintun), so a product name above wins
+        ("wireguard", "WireGuard"), ("openvpn", "OpenVPN"), ("tap-windows", "OpenVPN"), ("wintun", "Wintun"),
     ];
 
     // Software adapters that belong to this machine's own hypervisor or radios, not to a ZTNA or VPN client
@@ -96,7 +97,11 @@ static partial class Diagnostics
                 : $"{(tunnel ? "tunnel " : software ? "virtual " : "")}adapter \"{adapter.Name}\"";
             found.Add((adapter, kind + (addresses.Length > 0 ? $" ({Join(addresses)})" : "") + (tagged ? ", tagged by you" : "")));
         }
-        return found;
+        // A client's second, address-less interface (a filter binding named "<adapter>-…") adds nothing but its name again
+        return found.Where(f => !found.Any(o => !ReferenceEquals(o.Item1, f.Item1) && o.Item1.Addresses.Any(IsRegistrable)
+            && !f.Item1.Addresses.Any(IsRegistrable) && f.Item1.Name != tag
+            && (o.Item2.StartsWith(f.Item2 + " (", StringComparison.Ordinal) || f.Item1.Name.StartsWith(o.Item1.Name + "-", StringComparison.OrdinalIgnoreCase))))
+            .ToList();
     }
 
     /// <summary>
@@ -274,17 +279,21 @@ static partial class Diagnostics
         var adapterTests = new List<TestEntry>();
         var (adapters, ztna) = CheckAdapters(cfg, probe, adapterTests.Add);
         string? fqdn = CheckName(probe, adapters, tests.Add);
-        tests.AddRange(adapterTests);
         if (fqdn != null)
         {
+            tests.AddRange(adapterTests);
             CheckServer(probe, fqdn, adapters, ztna, cfg.Cancel, tests.Add);
         }
         else
         {
+            // With no name nothing is registered, so the adapter list is only what would register once there is one
+            tests.AddRange(adapterTests.Select(t => t.Name == RegAdapters && t.Status != Status.Skip ? WithoutName(adapters) : t));
             foreach (string name in new[] { RegZone, RegPath, RegRecord })
                 tests.Add(new(name, Status.Skip, "No registration name"));
         }
-        tests.Add(CheckErrors(probe, cfg.Cancel));
+        var errors = CheckErrors(probe, cfg.Cancel);
+        tests.Add(fqdn == null && errors.Status == Status.Pass
+            ? errors with { Detail = errors.Detail + " (with no name, Windows attempts no registration)" } : errors);
         return new("Dynamic DNS Registration", tests);
     }
 
@@ -325,15 +334,30 @@ static partial class Diagnostics
         return names;
     }
 
-    // Why nothing is registered: no primary suffix, and any adapter suffix isn't used for registration
+    // Why nothing is registered: no primary suffix, and no adapter registers under its own suffix. Windows has two
+    // separate switches per adapter, and "Register this connection's addresses in DNS" being on is easy to read as
+    // registration working, so each adapter says which of the two is off.
     static string NoNameReason(string host, List<NetAdapter> adapters)
     {
-        var unused = adapters.Where(a => a.DnsSuffix.Trim('.').Length > 0).ToList();
-        if (unused.Count == 0)
-            return $"{host} has no primary DNS suffix and no adapter has a DNS suffix, so Windows registers no name for it";
-        string list = string.Join(", ", unused.Select(a => $"{a.Name} ({a.DnsSuffix.Trim('.')}{(a.RegistersInDns ? "" : ", registration off")})"));
-        return $"{host} has no primary DNS suffix, so Windows registers no name for it. {list}: the suffix is used for lookups only; "
-            + "to register with it, turn on \"Use this connection's DNS suffix in DNS registration\" (adapter > IPv4 > Advanced > DNS)";
+        var suffixed = adapters.Where(a => a.DnsSuffix.Trim('.').Length > 0).ToList();
+        if (suffixed.Count == 0)
+            return $"Nothing is registered: {host} has no primary DNS suffix and no adapter has a DNS suffix, so there is no name to register";
+        string lines = string.Join("\n", suffixed.Select(a => $"{a.Name}: {a.DnsSuffix.Trim('.')} — "
+            + (a.RegistersInDns ? "\"Use this connection's DNS suffix in DNS registration\" is off, so the suffix is used for lookups only"
+                : "\"Register this connection's addresses in DNS\" is off")));
+        return $"Nothing is registered: {host} has no primary DNS suffix, and no adapter registers under its own suffix\n{lines}\n"
+            + $"To register as {host}.<suffix>, turn both on for the adapter servers should reach this machine through "
+            + "(adapter > IPv4 > Advanced > DNS), or set a primary DNS suffix";
+    }
+
+    // The Registering Adapters row when there is no name: not a pass, since nothing gets registered
+    static TestEntry WithoutName(List<NetAdapter> adapters)
+    {
+        var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
+        if (registering.Count == 0)
+            return new(RegAdapters, Status.Skip, "No registration name, and no connected adapter has \"Register this connection's addresses in DNS\" on");
+        return new(RegAdapters, Status.Skip, "No registration name. Once there is one, these addresses are registered:\n"
+            + string.Join("\n", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}")));
     }
 
     static (List<NetAdapter> Adapters, string? Ztna) CheckAdapters(DiagConfig cfg, IProbe probe, Action<TestEntry> report)
@@ -342,8 +366,9 @@ static partial class Diagnostics
         {
             var adapters = probe.Adapters();
             string? ztna = DescribeZtna(adapters, cfg.ZtnaAdapter);
-            report(new(RegZtna, Status.Pass, ztna != null ? $"{ztna} (informational)"
-                : cfg.ZtnaAdapter == "" ? "None, as set by you" : "No ZTNA or VPN adapter detected"));
+            // Information, not a verdict: the checks below say what the client changes
+            report(ztna != null ? new(RegZtna, Status.Info, ztna)
+                : new(RegZtna, Status.Pass, cfg.ZtnaAdapter == "" ? "None, as set by you" : "No ZTNA or VPN adapter detected"));
             report(RegisteringAdaptersEntry(adapters, ztna, cfg.ZtnaAdapter));
             return (adapters, ztna);
         }
@@ -367,6 +392,20 @@ static partial class Diagnostics
             return new(RegAdapters, Status.Warn, $"{list}\n{Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to");
         if (ztna == null)
             return new(RegAdapters, Status.Pass, list);
+        // The client's own adapter registers: say whether the local network's address goes into DNS beside it
+        var clients = ClientAdapters(adapters, tag).Select(c => c.Adapter).ToList();
+        var registeringClients = registering.Where(clients.Contains).ToList();
+        if (registeringClients.Count > 0)
+        {
+            string clientNames = string.Join(", ", registeringClients.Select(a => a.Name));
+            var others = registering.Except(registeringClients).ToList();
+            if (others.Count == 0)
+                return new(RegAdapters, Status.Pass, $"{list}\n{clientNames} is the client's own adapter, so DNS gets the address servers reach this machine through");
+            string otherNames = string.Join(", ", others.Select(a => a.Name));
+            return new(RegAdapters, Status.Info, $"{list}\nBoth the client's adapter ({clientNames}) and {otherNames} register, so DNS holds both; "
+                + $"servers that reach this machine through the client cannot use {otherNames}'s address. To register only the client's, "
+                + $"turn off \"Register this connection's addresses in DNS\" on {otherNames}");
+        }
         if (UnregisteredClientAddresses(adapters, tag) is { Length: > 0 } unregistered)
         {
             string names = string.Join(", ", UnregisteredClients(adapters, tag).Select(a => a.Name));
@@ -534,7 +573,7 @@ static partial class Diagnostics
         var reg = new Registration(fqdn, adapters, RegisteringAddresses(adapters), DescribeZtna(adapters, cfg.ZtnaAdapter));
         report(new(RegName, Status.Pass, fqdn + (reg.Local.Length > 0 ? $" with {Join(reg.Local)}" : " — no adapter has DNS registration turned on")));
         if (reg.Ztna != null)
-            report(new(RegZtna, Status.Pass, $"{reg.Ztna} (informational)"));
+            report(new(RegZtna, Status.Info, reg.Ztna));
         return reg;
     }
 
