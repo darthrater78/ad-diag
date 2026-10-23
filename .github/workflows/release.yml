@@ -28,12 +28,20 @@ jobs:
       SHA: ${{ github.sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      # Only publish what was merged and passed CI. Prerelease tags (v1.2.3-rc1) may come from a branch, but still
-      # need a green CI run on that commit.
+      # Versions are dates: v2026.10.23, then v2026.10.23-2 for a second release that day. A prerelease is a
+      # suffix with a letter in it (v2026.10.23-rc1), so a numeric revision is a full release, not a prerelease.
+      - name: Classify tag
+        shell: pwsh
+        run: |
+          $pre = if ($env:REF_NAME -match '-[0-9A-Za-z.]*[A-Za-z]') { 'true' } else { 'false' }
+          "PRERELEASE=$pre" >> $env:GITHUB_ENV
+
+      # Only publish what was merged and passed CI. Prerelease tags may come from a branch, but still need a green
+      # CI run on that commit.
       - name: Verify tagged commit is on main and passed CI
         shell: pwsh
         run: |
-          if ($env:REF_NAME -notmatch '-') {
+          if ($env:PRERELEASE -ne 'true') {
             $status = gh api "repos/$env:REPO/compare/main...$env:SHA" --jq .status
             if ($status -notin 'identical', 'behind') { throw "Tagged commit $env:SHA is not on main (compare: $status)" }
           }
@@ -53,8 +61,10 @@ jobs:
       - name: Derive version from tag
         shell: pwsh
         run: |
-          if ($env:REF_NAME -notmatch '^v((\d+\.\d+\.\d+)(-[0-9A-Za-z.]+)?)$') {
-            throw "Tag '$env:REF_NAME' is not of the form vMAJOR.MINOR.PATCH[-prerelease]"
+          # The declared <Version> is the tag without a prerelease suffix: 2026.10.23-2 for v2026.10.23-2, 2026.10.23
+          # for v2026.10.23-rc1
+          if ($env:REF_NAME -notmatch '^v((\d+\.\d+\.\d+(?:-\d+)?)(-[0-9A-Za-z.]*[A-Za-z][0-9A-Za-z.]*)?)$') {
+            throw "Tag '$env:REF_NAME' is not of the form vYYYY.MM.DD[-N][-prerelease]"
           }
           $version, $release = $Matches[1], $Matches[2]
           $declared = ([xml](Get-Content AdDiag.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
@@ -67,7 +77,7 @@ jobs:
         id: notes
         shell: pwsh
         run: |
-          if ($env:REF_NAME -match '-') { exit 0 }
+          if ($env:PRERELEASE -eq 'true') { exit 0 }
           $row = Get-Content -Encoding utf8 README.md |
             Where-Object { $_ -match "^\|\s*$([regex]::Escape($env:REF_NAME))\s*\|" } | Select-Object -First 1
           if (-not $row) { throw "README.md Version History has no row for $env:REF_NAME" }
@@ -100,7 +110,7 @@ jobs:
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ env.PRERELEASE == 'true' }}
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
 

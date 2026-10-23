@@ -2130,7 +2130,20 @@ class MainForm : Form
         DnsParagraph(row: true);
         AppendRun(_dnsBox, $"  {mark} {StepWord(step)}", color);
         AppendRun(_dnsBox, $"\t{step.Name}", TextColor, GpBoldFont);
-        AppendRun(_dnsBox, $"\t{step.Detail}\n", step.Status == Status.Skip ? DimColor : TextColor);
+        var detailColor = step.Status == Status.Skip ? DimColor : TextColor;
+        string[] lines = step.Detail.Split('\n');
+        AppendRun(_dnsBox, $"\t{lines[0]}\n", detailColor);
+        // A detail on several lines (an event's settings) keeps its later lines under the detail column
+        foreach (string line in lines.Skip(1))
+        {
+            _dnsBox.SelectionStart = _dnsBox.TextLength;
+            _dnsBox.SelectionTabs = [];
+            _dnsBox.SelectionIndent = S(270);
+            _dnsBox.SelectionHangingIndent = 0;
+            AppendRun(_dnsBox, line + "\n", detailColor);
+        }
+        _dnsBox.SelectionStart = _dnsBox.TextLength;
+        _dnsBox.SelectionIndent = 0;
         _dnsBox.ScrollToCaret();
     }
 
