@@ -187,6 +187,8 @@ Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same 
 
 ### 8. Dynamic DNS Registration
 
+![Dynamic DNS Registration behind a ZTNA client: both adapters register, the client's 3fff:: placeholder warns, and the refused update is shown one setting per line](docs/screenshots/results-dns.png)
+
 Checks whether this machine's own host record can reach, and is right on, the DNS server that owns its zone. These checks only read. SOA and host records are queried with the Windows DNS API on the wire, never from the resolver cache or the machine's own knowledge of its name.
 
 - **Registration Name** — the name Windows registers: host name plus primary DNS suffix, and host name plus an adapter's own DNS suffix where "Use this connection's DNS suffix in DNS registration" is on. With neither, nothing is registered: it lists each adapter's suffix and which of its two switches is off ("Register this connection's addresses in DNS", "Use this connection's DNS suffix in DNS registration"), and the checks that need a name are skipped

@@ -160,6 +160,26 @@ static class Shots
         Pump(500);
         Capture(form, outDir, "results-entra.png");
 
+        // Dynamic DNS Registration behind a ZTNA client, opened: the adapters, the client's placeholder address and
+        // a failure event one setting per line
+        var dnsRun = new DiagRun(DateTime.Now, "", "",
+            MockEntraResults(DateTime.Now).Select(g => g.Name == "Dynamic DNS Registration" ? MockZtnaRegistration(DateTime.Now) : g).ToList())
+            { Profile = JoinProfile.Entra };
+        dnsRun.Open["Dynamic DNS Registration"] = true;
+        entraHistory.Insert(0, dnsRun);
+        Set(form, "_selectedRunIndex", 0);
+        form.Height = 1000;
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(500);
+        Capture(form, outDir, "results-dns.png");
+        form.Height = 900;
+        entraHistory.RemoveAt(0);
+        Set(form, "_selectedRunIndex", 0);
+        Call(form, "ShowSelectedRun");
+        Call(form, "RebuildHistoryBar");
+        Pump(300);
+
         Call(form, "SwitchTab", "intune");
         FrontFill(Get<Panel>(form, "_intunePanel"));
         var intune = Get<RichTextBox>(form, "_intuneBox");
@@ -399,6 +419,26 @@ static class Shots
             ]),
         ];
     }
+
+    // An Entra joined laptop behind Island: both adapters register, the client's adapter with its 3fff:: placeholder,
+    // and the DNS server refuses the update. The texts are the app's own, as DnsRegistration.cs writes them.
+    static TestGroup MockZtnaRegistration(DateTime now) => new("Dynamic DNS Registration",
+    [
+        new("Registration Name", Status.Pass, "LT-0417.contoso.com (Ethernet)"),
+        new("ZTNA / VPN Client", Status.Info, "Island adapter (3fff::, 172.16.50.3); DNS answered by its local proxy (127.73.83.76)"),
+        new("Registering Adapters", Status.Warn, "Island Private Access: 3fff::, 172.16.50.3\nEthernet: 10.20.4.18\n"
+            + "Both the client's adapter (Island Private Access) and Ethernet register, so DNS holds both; servers that reach this machine "
+            + "through the client cannot use Ethernet's address. To register only the client's, turn off \"Register this connection's "
+            + "addresses in DNS\" on Ethernet\n3fff:: is in a range reserved for documentation (a client's placeholder), which other hosts cannot route to"),
+        new("Zone Primary Server", Status.Pass, "contoso.com -> dc01.contoso.com (10.20.0.11), answered by 127.73.83.76 (DNS server of Island Private Access)"),
+        new("Update Path (Port 53)", Status.Pass, "dc01.contoso.com (10.20.0.11) reachable over TCP"),
+        new("Registered Record", Status.Pass, "dc01.contoso.com holds 10.20.4.18"),
+        new("Registration Errors", Status.Warn, $"3 in the last 24 hours; latest: event 8015 at {now.AddMinutes(-42):g}\n"
+            + "The system failed to register host (A or AAAA) resource records (RRs) for network adapter with settings:\n"
+            + "Adapter: Island Private Access ({7C1D44E2-0B9A-4C6F-8E21-5A3F9B60D218})\nHost name: LT-0417\nDNS suffix: contoso.com\n"
+            + "DNS servers: 127.73.83.76\nSent update to: 10.20.0.11:53\nAddresses: 3fff::, 172.16.50.3\nError code: 9005 (refused)\n"
+            + "The reason the system could not register these RRs was because the DNS server contacted refused the update request."),
+    ]);
 
     // An Entra joined laptop: only the sections that apply to it
     static List<TestGroup> MockEntraResults(DateTime now) =>
