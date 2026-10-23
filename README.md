@@ -392,16 +392,75 @@ The README screenshots are generated from mock data by `tools/screenshots/run.sh
 
 ## Releasing
 
-Bump `<Version>` in `AdDiag.csproj` and add a row to [Version History](#version-history), merge to `main`, then push a tag of the form `vYYYY.MM.DD`, the UTC date of the bump; a second release that day is `vYYYY.MM.DD-2`, then `-3` (a suffix with a letter, such as `-rc1`, is a prerelease). Releases up to v1.3.0 used semver. The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History row as the release notes. A final release with no row fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
+Bump `<Version>` in `AdDiag.csproj` and add a `### v<version> — <date>` section at the top of [Version History](#version-history), merge to `main`, then push a tag of the form `vYYYY.MM.DD`, the UTC date of the bump; a second release that day is `vYYYY.MM.DD-2`, then `-3` (a suffix with a letter, such as `-rc1`, is a prerelease). Releases up to v1.3.0 used semver. The release workflow refuses a tag that isn't on `main` (prereleases excepted), hasn't passed CI, or doesn't match `<Version>`. It builds with the version from the tag, so the in-app badge and file version always match it, and uses the tag's Version History section as the release notes. A final release with no section, or an empty one, fails before building; prereleases get GitHub's generated notes only. CI builds every push to any branch (and pull requests from forks), and attaches the built `ad-diag.exe` to the run (kept 14 days) for testing before a release; a change that touches only documentation (Markdown, `docs/`, screenshots) skips the build. Those builds are not release builds: they have no checksum file or provenance attestation, and they report the version in `AdDiag.csproj`. CI also runs the unit tests (parsers, the diagnostic groups and the DNS registration trace against a faked machine, the log, and the process and network runner that enforces the deadlines) and builds the screenshot harness. Pull requests also run CodeQL, dependency review (fails on a High or Critical advisory), and actionlint when workflows change.
 
 ## Version History
 
-| Version | Date | Changes |
-|---|---|---|
-| v2026.10.23 | 2026-10-23 | Versions are now the release date (`vYYYY.MM.DD`) instead of semver. **Join profiles**: Domain joined, Microsoft Entra hybrid joined or Microsoft Entra joined, detected and changeable; an Entra joined PC hides the domain checks and lists the profile's groups before a run. Three new test groups: **Entra Seamless Single Sign-On** (join type, device auth, the Primary Refresh Token judged first on joined PCs, the Seamless SSO ticket and Local intranet zone settings on domain-joined ones, cloud and on-premises Kerberos, cloud trust groups that block cloud Kerberos trust, Seamless SSO and `krbtgt_AzureAD` key age, and the Entra endpoints); **Credentials & Windows Hello** (Hello, its trust type and sign-in methods, the TPM, RC4 tickets and saved credentials); and **Intune** (enrollment, last sync, the Management Extension and device policies, with Windows' built-in enrollments ignored). New **Intune policies** tab: enrollment, device and user settings by area, and the MSI apps Intune pushed, one row per app, with **Sync now** (or **Sync in Settings** when not elevated). Results: each group folds, shows its verdict, has a **Run again** button and a **Needs admin** capsule for checks held back without Administrator; notes are counted apart from warnings; the Runs strip stays above every tab; groups can be opened before a run to see what they check. The Log and Guide fold by section, the Log has a **Raw** view, and the saved log matches the screen. Dynamic DNS Registration: the registration name uses an adapter's own suffix where Windows does, and with no name says which adapter switch is off and skips what needs one; adapters show one per line; a ZTNA client's adapter registering beside the local network's is noted; a documentation-range placeholder such as Island's `3fff::` warns like a `100.64.0.0/10` address; and DNS Client failure events show one setting per line, from the event's own fields. Fixed: a crash in the Seamless SSO zone check |
-| v1.3.0 | 2026-10-06 | New test group, **Dynamic DNS Registration**: the name Windows registers, the adapters that register it, the zone's primary server (found by SOA through the registering adapters' own DNS servers, with the answering server named), TCP 53 to it, the record it holds compared with the machine's addresses, and DNS Client registration errors from the last 24 hours. A primary server with a public or synthetic `100.64.0.0/10` address warns. New **DNS registration** tab: **Register now** runs `ipconfig /registerdns` after a confirmation (Administrator only) and traces the outcome on the primary server and in the DNS Client's failure events; **Check again** repeats the read-only checks. ZTNA and VPN clients are detected by name, tunnel type, virtual adapter, a `/32` address with no gateway, `100.64.0.0/10` addresses or a local DNS proxy, and the failure details say what the client changes; a **ZTNA adapter** picker tags one by hand or overrides a false detection. New **Log** tab: runs, results, registration steps and failures, plus commands, queries, timings and raw output with **Debug** ticked; copy, save or clear it. The log is held in memory and nothing is written unless you save it |
-| v1.2.0 | 2026-10-05 | No more hangs when the domain is unreachable: DNS, SRV, port and share checks all have deadlines, and SYSVOL/NETLOGON are opened only after port 445 answers. Closing the app or clearing results cancels the run, tools can no longer outlive the app (kill-on-close job object), and `ad-diag.exe` no longer lingers after its window closes. New look: native Windows styling with a Dark mode / Flashbang (light) switch that starts from the Windows setting, a results grid whose status marks differ by shape as well as colour, plain-text details, per-group counts, and DPI scaling. New **Copy results** button; Enter starts a run; each result row is exposed to screen readers. Fixed `&` missing from group headers and overlapping text in the header and summary. Moved to .NET 10. CI builds every branch, skips docs-only changes, and tests the process and network runner |
-| v1.1.0 | 2026-09-27 | Works on non-English Windows: Group Policy is read from RSoP (WMI) instead of `gpresult` text, SRV records via `DnsQuery`, and `nltest`/`klist`/`w32tm` output parsed by structure and status codes, not English labels; a broken secure channel no longer passes on localized Windows. TGT Present requests a ticket when none is cached (elevated sessions); Computer Password Age queries the computer's own domain; DNS and port checks support IPv6-only DCs. Tool timeouts are reported as failures, prompting tools no longer hang, and running tools are killed on exit. Trust enumeration excludes the machine's own domain and warns when `nltest` fails. Windows tools are launched by full System32 path and native DLLs load only from System32, so copies planted next to the exe are never run; header links open unelevated, and Release Notes links to this version's notes. Release pipeline: CI with parser tests, SHA-pinned actions, checksum and provenance attestation, CodeQL and dependency review |
-| v1.0.2 | 2026-07-16 | Release asset is now a single self-contained exe (no zip); native libraries are bundled into the single file; fixed the in-app version badge, which was hardcoded and had gone stale |
-| v1.0.1 | 2026-07-16 | Fixed 10 correctness bugs: wrong rows shown as running, crash or corrupted history when deleting a run mid-flight, Clear Results not stopping the run, `klist` Client and Ticket Flags fields dropped, Group Policy and Results tabs disagreeing on GPO counts, gpupdate garbling the Group Policy tab, a stuck Group Policy guard, a faulted test group crashing the app, and unobserved exceptions from abandoned TCP connects |
-| v1.0.0 | 2026-07-14 | Initial release — domain membership (including computer password age from AD), DC discovery with 8 port checks (LDAP, LDAPS, Kerberos, SMB, RPC, Kpasswd, DNS, Global Catalog), AD DNS SRV records and suffix search list, SYSVOL/NETLOGON share access, Group Policy status, trust relationships, Kerberos ticket and time sync diagnostics; Group Policy tab with Computer/User scope breakdown and in-app gpupdate; Kerberos Tickets tab with full ticket cache viewer, purge, and explainer; auto-detects domain on startup; elevation-aware warnings |
+Newest first. Each version's section is its GitHub release notes: the release workflow publishes everything between its heading and the next.
+
+### v2026.10.23 — 2026-10-23
+
+Versions are now the release date (`vYYYY.MM.DD`) instead of semver.
+
+#### New
+- **Join profiles**: Domain joined, Microsoft Entra hybrid joined or Microsoft Entra joined, detected and changeable. An Entra joined PC hides the domain checks and lists the profile's groups before a run.
+- **Entra Seamless Single Sign-On** group: join type, device auth, the Primary Refresh Token (judged first on joined PCs), the Seamless SSO ticket and Local intranet zone settings (domain-joined PCs), cloud and on-premises Kerberos, cloud trust groups that block cloud Kerberos trust, Seamless SSO and `krbtgt_AzureAD` key age, and the Entra endpoints.
+- **Credentials & Windows Hello** group: Hello, its trust type and sign-in methods, the TPM, RC4 tickets and saved credentials.
+- **Intune** group: enrollment, last sync, the Management Extension and device policies; Windows' built-in enrollments are ignored.
+- **Intune policies** tab: enrollment, device and user settings by area, and the MSI apps Intune pushed, one row per app, with **Sync now** (**Sync in Settings** when not elevated).
+
+#### Results
+- Each group folds, shows its verdict, and has a **Run again** button and a **Needs admin** capsule for checks held back without Administrator.
+- Notes are counted apart from warnings.
+- Groups can be opened before a run to see what they check; the Runs strip stays above every tab.
+- The Log and Guide fold by section, the Log has a **Raw** view, and the saved log matches the screen.
+
+#### Dynamic DNS Registration
+- The registration name uses an adapter's own suffix where Windows does. With no name, it says which adapter switch is off and skips the checks that need a name.
+- Registering adapters show one per line, and a ZTNA client's adapter registering beside the local network's is noted.
+- A documentation-range placeholder such as Island's `3fff::` warns like a `100.64.0.0/10` address.
+- DNS Client failure events show one setting per line, read from the event's own fields.
+
+#### Fixed
+- A crash in the Seamless SSO zone check.
+
+### v1.3.0 — 2026-10-06
+
+#### New
+- **Dynamic DNS Registration** group: the name Windows registers, the adapters that register it, the zone's primary server (found by SOA through the registering adapters' own DNS servers, with the answering server named), TCP 53 to it, the record it holds compared with the machine's addresses, and DNS Client registration errors from the last 24 hours. A primary server with a public or synthetic `100.64.0.0/10` address warns.
+- **DNS registration** tab: **Register now** runs `ipconfig /registerdns` after a confirmation (Administrator only) and traces the outcome on the primary server and in the DNS Client's failure events; **Check again** repeats the read-only checks.
+- ZTNA and VPN clients are detected by name, tunnel type, virtual adapter, a `/32` address with no gateway, `100.64.0.0/10` addresses or a local DNS proxy, and the failure details say what the client changes. A **ZTNA adapter** picker tags one by hand or overrides a false detection.
+- **Log** tab: runs, results, registration steps and failures, plus commands, queries, timings and raw output with **Debug** ticked; copy, save or clear it. The log is held in memory and nothing is written unless you save it.
+
+### v1.2.0 — 2026-10-05
+
+- No more hangs when the domain is unreachable: DNS, SRV, port and share checks all have deadlines, and SYSVOL/NETLOGON are opened only after port 445 answers.
+- Closing the app or clearing results cancels the run, tools can no longer outlive the app (kill-on-close job object), and `ad-diag.exe` no longer lingers after its window closes.
+- New look: native Windows styling with a Dark mode / Flashbang (light) switch that starts from the Windows setting, a results grid whose status marks differ by shape as well as colour, plain-text details, per-group counts, and DPI scaling.
+- New **Copy results** button; Enter starts a run; each result row is exposed to screen readers.
+- Fixed `&` missing from group headers and overlapping text in the header and summary.
+- Moved to .NET 10. CI builds every branch, skips docs-only changes, and tests the process and network runner.
+
+### v1.1.0 — 2026-09-27
+
+- Works on non-English Windows: Group Policy is read from RSoP (WMI) instead of `gpresult` text, SRV records via `DnsQuery`, and `nltest`/`klist`/`w32tm` output parsed by structure and status codes, not English labels; a broken secure channel no longer passes on localized Windows.
+- TGT Present requests a ticket when none is cached (elevated sessions); Computer Password Age queries the computer's own domain; DNS and port checks support IPv6-only DCs.
+- Tool timeouts are reported as failures, prompting tools no longer hang, and running tools are killed on exit.
+- Trust enumeration excludes the machine's own domain and warns when `nltest` fails.
+- Windows tools are launched by full System32 path and native DLLs load only from System32, so copies planted next to the exe are never run; header links open unelevated, and Release Notes links to this version's notes.
+- Release pipeline: CI with parser tests, SHA-pinned actions, checksum and provenance attestation, CodeQL and dependency review.
+
+### v1.0.2 — 2026-07-16
+
+- The release asset is now a single self-contained exe (no zip); native libraries are bundled into the single file.
+- Fixed the in-app version badge, which was hardcoded and had gone stale.
+
+### v1.0.1 — 2026-07-16
+
+- Fixed 10 correctness bugs: wrong rows shown as running, crash or corrupted history when deleting a run mid-flight, Clear Results not stopping the run, `klist` Client and Ticket Flags fields dropped, Group Policy and Results tabs disagreeing on GPO counts, gpupdate garbling the Group Policy tab, a stuck Group Policy guard, a faulted test group crashing the app, and unobserved exceptions from abandoned TCP connects.
+
+### v1.0.0 — 2026-07-14
+
+- Initial release: domain membership (including computer password age from AD), DC discovery with 8 port checks (LDAP, LDAPS, Kerberos, SMB, RPC, Kpasswd, DNS, Global Catalog), AD DNS SRV records and suffix search list, SYSVOL/NETLOGON share access, Group Policy status, trust relationships, Kerberos ticket and time sync diagnostics.
+- Group Policy tab with Computer/User scope breakdown and in-app gpupdate; Kerberos Tickets tab with full ticket cache viewer, purge, and explainer.
+- Auto-detects the domain on startup; elevation-aware warnings.
