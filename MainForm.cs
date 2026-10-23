@@ -101,37 +101,37 @@ class MainForm : Form
     static readonly Font HistoryFont = new("Segoe UI", 7.5f);
     static readonly Font HistoryFontBold = new("Segoe UI", 7.5f, FontStyle.Bold);
 
-    readonly TextBox _txtDomain, _txtDc;
-    readonly CheckBox _chkDcSuffix;
-    readonly Button _btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, _btnTheme;
-    readonly ThemedButton _btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune, _btnTabLog;
-    readonly ThemedButton[] _tabs;
+    TextBox _txtDomain = null!, _txtDc = null!;
+    CheckBox _chkDcSuffix = null!;
+    Button _btnRun = null!, _btnRunMenu = null!, _btnExport = null!, _btnCopy = null!, _btnClear = null!, _btnTheme = null!;
+    ThemedButton _btnTabResults = null!, _btnTabGuide = null!, _btnTabGp = null!, _btnTabTickets = null!, _btnTabDns = null!, _btnTabIntune = null!, _btnTabLog = null!;
+    ThemedButton[] _tabs = null!;
     // Intune policies tab
-    readonly Panel _intunePanel;
-    readonly RichTextBox _intuneBox;
-    readonly ThemedButton _btnIntuneSync;
-    readonly Label _lblIntuneNote;
-    bool _intuneRunning;
+    Panel _intunePanel = null!;
+    RichTextBox _intuneBox = null!;
+    ThemedButton _btnIntuneSync = null!;
+    Label _lblIntuneNote = null!;
+    bool _intuneRunning, _intuneLoaded;
     MdmEnrollment? _intuneEnrollment;
-    readonly Button _btnGpRefresh, _btnGpUpdate, _btnPurgeTickets, _btnRegister, _btnDnsCheck;
-    readonly CheckBox _chkGpForce, _chkDebug;
-    readonly ComboBox _cmbZtna;
+    Button _btnGpRefresh = null!, _btnGpUpdate = null!, _btnPurgeTickets = null!, _btnRegister = null!, _btnDnsCheck = null!;
+    CheckBox _chkGpForce = null!, _chkDebug = null!;
+    ComboBox _cmbZtna = null!;
     // How the PC is joined decides which sections run and show; detected at start-up, the user can pick another
-    readonly ComboBox _cmbProfile;
-    readonly Label _lblProfileHint;
+    ComboBox _cmbProfile = null!;
+    Label _lblProfileHint = null!;
     readonly List<Control> _domainControls = [];
     JoinProfile _profile = JoinProfile.Domain;
     JoinProfile? _detectedProfile;
     const int ProfileWidth = 255;
-    readonly Label _lblStatus, _lblPassCount, _lblFailCount, _lblWarnCount, _lblWarnCaption, _lblInfoCount, _lblInfoCaption;
-    readonly ResultsCanvas _resultsCanvas;
-    readonly CheckBox _chkExpandAll;
+    Label _lblStatus = null!, _lblPassCount = null!, _lblFailCount = null!, _lblWarnCount = null!, _lblWarnCaption = null!, _lblInfoCount = null!, _lblInfoCaption = null!;
+    ResultsCanvas _resultsCanvas = null!;
+    CheckBox _chkExpandAll = null!;
     bool _expandAll; // "Expand all groups after a run"; never saved
     readonly Dictionary<string, int> _guideAnchors = []; // Guide section title -> its position in the Guide
     readonly List<(int Start, int End, string Title)> _guideHeadings = []; // where each section title sits, to fold it
     HashSet<string>? _guideOpen;                         // the Guide sections the reader opened; all start folded
-    readonly Panel _summaryPanel, _resultsArea, _resultsBar, _resultsScrollPanel, _historyPanel, _gpPanel, _ticketsPanel, _dnsPanel, _logPanel;
-    readonly RichTextBox _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox;
+    Panel _summaryPanel = null!, _resultsArea = null!, _resultsBar = null!, _resultsScrollPanel = null!, _historyPanel = null!, _gpPanel = null!, _ticketsPanel = null!, _dnsPanel = null!, _logPanel = null!;
+    RichTextBox _guideBox = null!, _gpBox = null!, _ticketsBox = null!, _dnsBox = null!, _logBox = null!;
     bool _gpRunning, _gpLoaded, _ticketsLoaded;
     bool _showingExplainer;
     bool _ticketsRunning;
@@ -164,6 +164,35 @@ class MainForm : Form
 
     public MainForm()
     {
+        ConfigureWindow();
+        string appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
+        var layout = BuildLayout();
+        layout.Controls.Add(BuildHeader(appVersion), 0, 0);
+        layout.Controls.Add(BuildConfigPanel(), 0, 1);
+        layout.Controls.Add(BuildActionsPanel(), 0, 2);
+        layout.Controls.Add(BuildSummaryPanel(), 0, 3);
+        layout.Controls.Add(BuildContent(), 0, 4);
+
+        var mainPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = Padding.Empty };
+        mainPanel.Controls.Add(layout);
+        Controls.Add(mainPanel);
+        AcceptButton = _btnRun; // Enter in the domain or DC field starts a run
+
+        // Everything above is laid out for 96 DPI; this scales it once to the display's DPI. Code that
+        // positions or draws afterwards scales its own pixel values with S().
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
+        _placeholderText = PlaceholderText;
+        WireLifecycle();
+        bool elevated = false;
+        try { elevated = Probe.IsElevated(); } catch { }
+        AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
+        _ = DetectStartupAsync();
+    }
+
+    void ConfigureWindow()
+    {
         Text = "AD Diagnostics";
         Size = new Size(820, 900);
         MinimumSize = new Size(660, 500);
@@ -175,8 +204,11 @@ class MainForm : Form
         var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
         var extracted = Icon.ExtractAssociatedIcon(exePath);
         if (extracted != null) Icon = extracted;
+    }
 
-        var mainPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = Padding.Empty };
+    // Header, inputs, actions and counts take their own height; the tabs take the rest
+    static TableLayoutPanel BuildLayout()
+    {
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -192,12 +224,15 @@ class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // summary
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // content
         layout.RowCount = 5;
+        return layout;
+    }
 
+    Panel BuildHeader(string appVersion)
+    {
         // Header
         var header = new Panel { Height = 34, Dock = DockStyle.Fill };
         header.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, header.Height - 1, header.Width, header.Height - 1);
         var lblTitle = new Label { Text = "AD Diagnostics", ForeColor = TextColor, Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(10, 6) };
-        var appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
         var lblTag = new Label { Text = appVersion, ForeColor = DimColor, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(148, 9) };
         var lnkGithub = new LinkLabel { Text = "GitHub", Font = new Font("Segoe UI", 8f), AutoSize = true, LinkColor = AccentColor, ActiveLinkColor = AccentColor, VisitedLinkColor = AccentColor, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         lnkGithub.LinkClicked += (s, e) => OpenUrl("https://github.com/darthrater78/ad-diag");
@@ -214,8 +249,11 @@ class MainForm : Form
             lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
             _btnTheme.Left = lnkGithub.Left - _btnTheme.Width - S(14);
         };
-        layout.Controls.Add(header, 0, 0);
+        return header;
+    }
 
+    Panel BuildConfigPanel()
+    {
         // Config
         var configPanel = new Panel { Height = 50, Dock = DockStyle.Fill };
         configPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, configPanel.Height - 1, configPanel.Width, configPanel.Height - 1);
@@ -238,8 +276,11 @@ class MainForm : Form
             _chkDcSuffix.Location = new Point(_txtDc.Right - _chkDcSuffix.Width, _txtDc.Top - _chkDcSuffix.Height - S(1));
         };
 
-        layout.Controls.Add(configPanel, 0, 1);
+        return configPanel;
+    }
 
+    Panel BuildActionsPanel()
+    {
         // Actions
         var actionsPanel = new Panel { Height = 36, Dock = DockStyle.Fill };
         actionsPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, actionsPanel.Height - 1, actionsPanel.Width, actionsPanel.Height - 1);
@@ -258,8 +299,11 @@ class MainForm : Form
         btnReset.Click += BtnReset_Click;
         _lblStatus = new Label { ForeColor = DimColor, Font = new Font("Segoe UI", 8.5f), AutoSize = false, Location = new Point(591, 4), Size = new Size(209, 28), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
         actionsPanel.Controls.AddRange([_btnRun, _btnRunMenu, _btnExport, _btnCopy, _btnClear, btnReset, _lblStatus]);
-        layout.Controls.Add(actionsPanel, 0, 2);
+        return actionsPanel;
+    }
 
+    Panel BuildSummaryPanel()
+    {
         // Summary bar
         _summaryPanel = new Panel { Height = 26, Dock = DockStyle.Fill, Visible = false };
         _summaryPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _summaryPanel.Height - 1, _summaryPanel.Width, _summaryPanel.Height - 1);
@@ -275,11 +319,11 @@ class MainForm : Form
         _lblInfoCaption = Caption("notes");
         summaryFlow.Controls.AddRange([_lblPassCount, Caption("passed"), _lblFailCount, Caption("failed"), _lblWarnCount, _lblWarnCaption, _lblInfoCount, _lblInfoCaption]);
         _summaryPanel.Controls.Add(summaryFlow);
-        layout.Controls.Add(_summaryPanel, 0, 3);
+        return _summaryPanel;
+    }
 
-        // Content area with tab bar
-        var contentWrapper = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
-
+    Panel BuildTabBar()
+    {
         var tabBar = new Panel { Height = 30, Dock = DockStyle.Top, BackColor = BgColor };
         tabBar.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, tabBar.Height - 1, tabBar.Width, tabBar.Height - 1);
         _btnTabResults = new ThemedButton { Text = "Results", IsTab = true, Selected = true, BackColor = BgColor, Font = TabFontInactive, Size = new Size(80, 26), Location = new Point(10, 2) };
@@ -298,7 +342,46 @@ class MainForm : Form
         _btnTabLog.Click += (s, e) => SwitchTab("log");
         _tabs = [_btnTabResults, _btnTabGuide, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune, _btnTabLog];
         tabBar.Controls.AddRange(_tabs);
+        return tabBar;
+    }
 
+    Panel BuildContent()
+    {
+        // Content area with tab bar
+        var contentWrapper = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
+        var tabBar = BuildTabBar();
+        BuildResultsArea();
+        BuildGuideBox();
+        BuildGpTab();
+        BuildIntuneTab();
+        BuildTicketsTab();
+        (_dnsPanel, _dnsBox, _btnRegister, _btnDnsCheck, _cmbZtna) = BuildDnsTab();
+        FillZtnaChoices([]);
+        RenderDnsBox();
+
+        (_logPanel, _logBox, _chkDebug) = BuildLogTab();
+        // The log is written from worker threads; the pane catches up on a timer, and only while it is on show
+        _logTimer.Tick += (s, e) => RefreshLog();
+        _logTimer.Start();
+
+        _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
+        _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
+
+        // The tabs share one host under the Runs strip. Docked straight into the wrapper, a tab's place depended on
+        // the wrapper's child order, which WinForms can change once the strip appears, leaving tabs under it
+        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
+        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _intunePanel, _logPanel]);
+        contentWrapper.Controls.Add(tabHost);
+        contentWrapper.Controls.Add(_historyPanel);
+        contentWrapper.Controls.Add(tabBar);
+
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
+            ThemeScrollbars(scrolling);
+        return contentWrapper;
+    }
+
+    void BuildResultsArea()
+    {
         // Results canvas (owner-drawn)
         _resultsScrollPanel = new KeepScrollPanel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = PanelColor };
         _resultsCanvas = new ResultsCanvas { Location = Point.Empty, BackColor = PanelColor, Height = 100, AccessibleName = "Diagnostic results" };
@@ -306,6 +389,25 @@ class MainForm : Form
         _resultsCanvas.Activated += ActivateResultsItem;
         _resultsScrollPanel.Controls.Add(_resultsCanvas);
 
+        BuildResultsBar();
+        _resultsArea = new Panel { Dock = DockStyle.Fill, BackColor = PanelColor };
+        _resultsArea.Controls.Add(_resultsScrollPanel);
+        _resultsArea.Controls.Add(_resultsBar);
+
+        _resultsScrollPanel.Resize += (s, e) =>
+        {
+            int w = _resultsScrollPanel.ClientSize.Width;
+            if (w > 0 && _resultsCanvas.Width != w)
+            {
+                _resultsCanvas.Width = w;
+                _resultsCanvas.Height = MeasureResultsHeight(w);
+                _resultsCanvas.Invalidate();
+            }
+        };
+    }
+
+    void BuildResultsBar()
+    {
         // Above the results: whether groups open after a run, and opening or closing them all
         _chkExpandAll = new CheckBox { Text = "Expand all groups after a run", ForeColor = DimColor, BackColor = PanelColor, Font = new Font("Segoe UI", 8.5f), AutoSize = true, FlatStyle = FlatStyle.Flat, Location = new Point(14, 4) };
         _chkExpandAll.CheckedChanged += (s, e) =>
@@ -329,21 +431,10 @@ class MainForm : Form
             lnkCollapseAll.Location = new Point(_resultsBar.ClientSize.Width - lnkCollapseAll.Width - S(14), S(6));
             lnkExpandAll.Location = new Point(lnkCollapseAll.Left - lnkExpandAll.Width - S(14), S(6));
         };
-        _resultsArea = new Panel { Dock = DockStyle.Fill, BackColor = PanelColor };
-        _resultsArea.Controls.Add(_resultsScrollPanel);
-        _resultsArea.Controls.Add(_resultsBar);
+    }
 
-        _resultsScrollPanel.Resize += (s, e) =>
-        {
-            int w = _resultsScrollPanel.ClientSize.Width;
-            if (w > 0 && _resultsCanvas.Width != w)
-            {
-                _resultsCanvas.Width = w;
-                _resultsCanvas.Height = MeasureResultsHeight(w);
-                _resultsCanvas.Invalidate();
-            }
-        };
-
+    void BuildGuideBox()
+    {
         // Guide (RichTextBox)
         _guideBox = new RichTextBox
         {
@@ -370,7 +461,10 @@ class MainForm : Form
             }
         };
         PopulateGuide();
+    }
 
+    void BuildGpTab()
+    {
         // Group Policy tab
         _gpBox = new RichTextBox
         {
@@ -396,7 +490,10 @@ class MainForm : Form
         _gpPanel.Controls.Add(_gpBox);
         _gpPanel.Controls.Add(gpBtnPanel);
         AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor);
+    }
 
+    void BuildIntuneTab()
+    {
         // Intune policies tab
         _intuneBox = new RichTextBox
         {
@@ -420,7 +517,10 @@ class MainForm : Form
         _intunePanel.Controls.Add(_intuneBox);
         _intunePanel.Controls.Add(intuneBtnPanel);
         AppendIntuneLine("Switch to this tab to load Intune details, or click Refresh.\n", DimColor);
+    }
 
+    void BuildTicketsTab()
+    {
         // Kerberos Tickets tab
         _ticketsBox = new RichTextBox
         {
@@ -447,42 +547,10 @@ class MainForm : Form
         _ticketsPanel = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Visible = false };
         _ticketsPanel.Controls.Add(_ticketsBox);
         _ticketsPanel.Controls.Add(ticketsBtnPanel);
+    }
 
-        (_dnsPanel, _dnsBox, _btnRegister, _btnDnsCheck, _cmbZtna) = BuildDnsTab();
-        FillZtnaChoices([]);
-        RenderDnsBox();
-
-        (_logPanel, _logBox, _chkDebug) = BuildLogTab();
-        // The log is written from worker threads; the pane catches up on a timer, and only while it is on show
-        _logTimer.Tick += (s, e) => RefreshLog();
-        _logTimer.Start();
-
-        _historyPanel = new Panel { Height = 28, Dock = DockStyle.Top, BackColor = BgColor, Visible = false };
-        _historyPanel.Paint += (s, e) => e.Graphics.DrawLine(BorderPen, 0, _historyPanel.Height - 1, _historyPanel.Width, _historyPanel.Height - 1);
-
-        // The tabs share one host under the Runs strip. Docked straight into the wrapper, a tab's place depended on
-        // the wrapper's child order, which WinForms can change once the strip appears, leaving tabs under it
-        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = BgColor };
-        tabHost.Controls.AddRange([_resultsArea, _guideBox, _gpPanel, _ticketsPanel, _dnsPanel, _intunePanel, _logPanel]);
-        contentWrapper.Controls.Add(tabHost);
-        contentWrapper.Controls.Add(_historyPanel);
-        contentWrapper.Controls.Add(tabBar);
-        layout.Controls.Add(contentWrapper, 0, 4);
-
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
-            ThemeScrollbars(scrolling);
-
-        mainPanel.Controls.Add(layout);
-        Controls.Add(mainPanel);
-        AcceptButton = _btnRun; // Enter in the domain or DC field starts a run
-
-        // Everything above is laid out for 96 DPI; this scales it once to the display's DPI. Code that
-        // positions or draws afterwards scales its own pixel values with S().
-        AutoScaleDimensions = new SizeF(96f, 96f);
-        AutoScaleMode = AutoScaleMode.Dpi;
-
-        _placeholderText = PlaceholderText;
-
+    void WireLifecycle()
+    {
         Load += (s, e) =>
         {
             LayoutTabs();
@@ -504,11 +572,8 @@ class MainForm : Form
             // flush (the app writes no files), so end the process outright.
             TerminateProcess(GetCurrentProcess(), 0);
         };
-        bool elevated = false;
-        try { elevated = Probe.IsElevated(); } catch { }
-        AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
-        _ = DetectStartupAsync();
     }
+
 
     async Task DetectDomainAsync()
     {
@@ -575,16 +640,7 @@ class MainForm : Form
         Color[] oldBack = BackTokens(), oldFore = ForeTokens();
         Dark = dark;
         Color[] newBack = BackTokens(), newFore = ForeTokens();
-
-        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, InfoBrush, SkipBrush })
-            old.Dispose();
-        BorderPen = new(BorderColor);
-        RowLinePen = new(RowLineColor);
-        PassBrush = new(PassColor);
-        FailBrush = new(FailColor);
-        WarnBrush = new(WarnColor);
-        InfoBrush = new(AccentColor);
-        SkipBrush = new(SkipColor);
+        RecreateThemeBrushes();
 
         static Color Map(Color c, Color[] from, Color[] to)
         {
@@ -602,19 +658,38 @@ class MainForm : Form
         Retheme(this);
         _btnTheme.Text = ThemeButtonText;
         ApplyTitleBarTheme();
-        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _logBox })
+        foreach (var scrolling in new Control[] { _resultsScrollPanel, _guideBox, _gpBox, _ticketsBox, _dnsBox, _intuneBox, _logBox })
             if (scrolling.IsHandleCreated) ApplyScrollbarTheme(scrolling);
+        RerenderTextPanes();
+        Invalidate(true);
+    }
 
-        // The text panes hold coloured runs, so they are written again in the new colours
+    static void RecreateThemeBrushes()
+    {
+        foreach (IDisposable old in new IDisposable[] { BorderPen, RowLinePen, PassBrush, FailBrush, WarnBrush, InfoBrush, SkipBrush })
+            old.Dispose();
+        BorderPen = new(BorderColor);
+        RowLinePen = new(RowLineColor);
+        PassBrush = new(PassColor);
+        FailBrush = new(FailColor);
+        WarnBrush = new(WarnColor);
+        InfoBrush = new(AccentColor);
+        SkipBrush = new(SkipColor);
+    }
+
+    // The text panes hold coloured runs, so they are written again in the new colours
+    void RerenderTextPanes()
+    {
         PopulateGuide();
         if (_gpLoaded) RefreshGpTab();
         else { _gpBox.Clear(); AppendGpLine("Switch to this tab to load Group Policy details, or click Refresh.\n", DimColor); }
         if (_showingExplainer) ShowTicketsExplainer();
         else if (_ticketsLoaded) RefreshTickets();
+        if (_intuneLoaded) RefreshIntuneTab();
+        else { _intuneBox.Clear(); AppendIntuneLine("Switch to this tab to load Intune details, or click Refresh.\n", DimColor); }
         RenderDnsBox();
         RenderLog();
         RebuildHistoryBar();
-        Invalidate(true);
     }
 
     /// <summary>Asks Windows to draw this control's scrollbars to match the theme, now and whenever its handle is created.</summary>
@@ -886,51 +961,45 @@ class MainForm : Form
             AppendGuide(open ? "\n\n" : "\n", GuideSectionFont, TextColor);
             if (!open) continue;
 
-            var lines = body.Split('\n');
-            foreach (var line in lines)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
-                if (line.StartsWith("• "))
-                {
-                    int dash = line.IndexOf(" — ", StringComparison.Ordinal);
-                    if (dash > 0)
-                    {
-                        AppendGuide(line[..(dash + 3)], GuideTestNameFont, TextColor);
-                        AppendGuide(line[(dash + 3)..] + "\n", GuideBodyFont, TextColor);
-                    }
-                    else
-                    {
-                        AppendGuide(line + "\n", GuideTestNameFont, TextColor);
-                    }
-                }
-                else if (line.TrimStart().StartsWith("Fix:"))
-                {
-                    string trimmed = line.TrimStart();
-                    AppendGuide("  Fix: ", GuideFixLabelFont, FixLabelColor);
-                    AppendGuide(trimmed[5..].TrimStart() + "\n\n", GuideFixFont, DimColor);
-                }
-                else if (line.TrimStart().StartsWith("Recommended:"))
-                {
-                    string trimmed = line.TrimStart();
-                    AppendGuide("  Recommended: ", GuideFixLabelFont, FixLabelColor);
-                    AppendGuide(trimmed[12..].TrimStart() + "\n\n", GuideFixFont, DimColor);
-                }
-                else if (line.TrimStart().StartsWith("- "))
-                {
-                    AppendGuide("    " + line.TrimStart() + "\n", GuideBodyFont, DimColor);
-                }
-                else
-                {
-                    AppendGuide(line + "\n", GuideBodyFont, DimColor);
-                }
-            }
+            foreach (var line in body.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)))
+                AppendGuideLine(line);
             AppendGuide("\n", GuideBodyFont, DimColor);
         }
 
         _guideBox.SelectionStart = 0;
         _guideBox.ScrollToCaret();
+    }
+
+    // A section body line: "• Check — what it is" with the check in bold, "Fix:" and "Recommended:" labelled,
+    // "- " items indented, anything else as dim text
+    void AppendGuideLine(string line)
+    {
+        string trimmed = line.TrimStart();
+        if (line.StartsWith("• "))
+        {
+            int dash = line.IndexOf(" — ", StringComparison.Ordinal);
+            if (dash <= 0)
+            {
+                AppendGuide(line + "\n", GuideTestNameFont, TextColor);
+                return;
+            }
+            AppendGuide(line[..(dash + 3)], GuideTestNameFont, TextColor);
+            AppendGuide(line[(dash + 3)..] + "\n", GuideBodyFont, TextColor);
+        }
+        else if (trimmed.StartsWith("Fix:"))
+        {
+            AppendGuide("  Fix: ", GuideFixLabelFont, FixLabelColor);
+            AppendGuide(trimmed[4..].TrimStart() + "\n\n", GuideFixFont, DimColor);
+        }
+        else if (trimmed.StartsWith("Recommended:"))
+        {
+            AppendGuide("  Recommended: ", GuideFixLabelFont, FixLabelColor);
+            AppendGuide(trimmed[12..].TrimStart() + "\n\n", GuideFixFont, DimColor);
+        }
+        else if (trimmed.StartsWith("- "))
+            AppendGuide("    " + trimmed + "\n", GuideBodyFont, DimColor);
+        else
+            AppendGuide(line + "\n", GuideBodyFont, DimColor);
     }
 
     string? GuideHeadingAt(int charIndex) =>
@@ -1149,39 +1218,37 @@ class MainForm : Form
         {
             ResetGpBox(keep);
             AppendGpLine("Loading Group Policy details...\n", DimColor);
-
             string raw = "";
             List<GpScope> scopes;
-            try
-            {
-                scopes = await Task.Run(() => Diagnostics.QueryRsop(Probe, out raw));
-            }
+            try { scopes = await Task.Run(() => Diagnostics.QueryRsop(Probe, out raw)); }
             catch (Exception ex)
             {
                 ResetGpBox(keep);
                 AppendGpLine($"Error querying Group Policy results: {ex.Message}\n", FailColor);
                 return;
             }
-
             ResetGpBox(keep);
-            if (scopes.Count == 0)
-            {
-                AppendGpLine("Could not read Group Policy results. Raw output:\n\n", WarnColor);
-                AppendGpLine(raw, DimColor);
-                return;
-            }
-
-            AppendGpLine("\n", BgColor);
-            foreach (var scope in scopes)
-                RenderGpScope(scope);
-
-            _gpBox.SelectionStart = 0;
-            _gpBox.ScrollToCaret();
+            RenderGpResults(scopes, raw);
         }
         finally
         {
             _gpRunning = false;
         }
+    }
+
+    void RenderGpResults(List<GpScope> scopes, string raw)
+    {
+        if (scopes.Count == 0)
+        {
+            AppendGpLine("Could not read Group Policy results. Raw output:\n\n", WarnColor);
+            AppendGpLine(raw, DimColor);
+            return;
+        }
+        AppendGpLine("\n", BgColor);
+        foreach (var scope in scopes)
+            RenderGpScope(scope);
+        _gpBox.SelectionStart = 0;
+        _gpBox.ScrollToCaret();
     }
 
     void ResetGpBox(int keepLength)
@@ -1209,43 +1276,32 @@ class MainForm : Form
             Color ageColor = (DateTime.Now - lastTime).TotalDays >= 7 ? WarnColor : TextColor;
             AppendGpLine($"{lastTime:g}  ({Diagnostics.FormatTimeSpan(DateTime.Now - lastTime)} ago)\n", ageColor, bold: true);
         }
-
         if (!string.IsNullOrEmpty(scope.Site))
         {
             AppendGpLine("  Site: ", DimColor);
             AppendGpLine(scope.Site + "\n", TextColor);
         }
 
-        AppendGpLine("\n", BorderColor);
-        AppendGpLine("  Applied GPOs", TextColor, bold: true);
-        AppendGpLine($"  ({scope.Applied.Count})\n", DimColor);
-        if (scope.Applied.Count == 0)
-        {
-            AppendGpLine("    None\n", DimColor);
-        }
-        foreach (var gpo in scope.Applied)
-        {
-            AppendGpLine("    ● ", PassColor);
-            AppendGpLine(gpo + "\n", TextColor);
-        }
+        RenderGpoList("Applied GPOs", scope.Applied.Select(gpo => (gpo, "")).ToList(), PassColor);
+        RenderGpoList("Denied / Filtered GPOs", scope.Denied, WarnColor);
+        AppendGpLine("\n\n", BorderColor);
+    }
 
+    void RenderGpoList(string title, List<(string Name, string Reason)> gpos, Color mark)
+    {
         AppendGpLine("\n", BorderColor);
-        AppendGpLine("  Denied / Filtered GPOs", TextColor, bold: true);
-        AppendGpLine($"  ({scope.Denied.Count})\n", DimColor);
-        if (scope.Denied.Count == 0)
-        {
+        AppendGpLine($"  {title}", TextColor, bold: true);
+        AppendGpLine($"  ({gpos.Count})\n", DimColor);
+        if (gpos.Count == 0)
             AppendGpLine("    None\n", DimColor);
-        }
-        foreach (var (name, reason) in scope.Denied)
+        foreach (var (name, reason) in gpos)
         {
-            AppendGpLine("    ● ", WarnColor);
+            AppendGpLine("    ● ", mark);
             AppendGpLine(name, TextColor);
             if (!string.IsNullOrEmpty(reason))
                 AppendGpLine($"  — {reason}", DimColor);
             AppendGpLine("\n", TextColor);
         }
-
-        AppendGpLine("\n\n", BorderColor);
     }
 
 
@@ -1386,7 +1442,7 @@ class MainForm : Form
     async void RefreshIntuneTab()
     {
         if (_intuneRunning) return;
-        _intuneRunning = true;
+        _intuneRunning = _intuneLoaded = true;
         DiagLog.Block = new LogBlock($"Intune policies {Clock(DateTime.Now)}", "MDM enrollment and policy settings from the registry");
         _intuneBox.Clear();
         AppendIntuneLine("Loading Intune details...\n", DimColor);
@@ -1662,91 +1718,63 @@ class MainForm : Form
         string cacheFlag = fields.TryGetValue("Cache Flags", out var cf) ? cf : "";
         bool isDelegation = cacheFlag.Contains("DELEGATION", StringComparison.OrdinalIgnoreCase);
         bool isPrimary = cacheFlag.Contains("PRIMARY", StringComparison.OrdinalIgnoreCase);
-
-        string tgtDesc = isDelegation ? "Delegation TGT — forwarded for Kerberos delegation"
-            : isPrimary ? "Primary TGT — your main logon credential from the KDC"
-            : "Ticket Granting Ticket — master key from KDC";
-
-        var (label, desc) = svc switch
-        {
-            "KRBTGT" => ("TGT", tgtDesc),
-            "CIFS" => ("CIFS", "SMB file share service ticket"),
-            "HTTP" => ("HTTP", "Web service ticket (ADFS, Exchange, etc.)"),
-            "LDAP" => ("LDAP", "Directory service ticket"),
-            "HOST" => ("HOST", "Host service ticket (remote admin, WinRM)"),
-            "RPCSS" => ("RPCSS", "RPC service ticket"),
-            "DNS" => ("DNS", "DNS service ticket"),
-            "TERMSRV" => ("RDP", "Remote Desktop service ticket"),
-            "MSSQLSVC" => ("SQL", "SQL Server service ticket"),
-            "EXCHANGEMDB" => ("EXCH", "Exchange mailbox service ticket"),
-            _ => ("SVC", $"{svc} service ticket"),
-        };
-
-        Color badgeBg = svc == "KRBTGT" ? AccentColor : PassColor;
+        var (label, desc) = TicketKind(svc, isDelegation, isPrimary);
 
         AppendTicketsLine($"\n ┌─ ", BorderColor);
-        AppendTicketsLine($" {label} ", OnAccentColor, bold: true, backColor: badgeBg);
+        AppendTicketsLine($" {label} ", OnAccentColor, bold: true, backColor: svc == "KRBTGT" ? AccentColor : PassColor);
         AppendTicketsLine($"  {desc}\n", DimColor);
         AppendTicketsLine($" │\n", BorderColor);
 
-        AppendTicketsLine($" │  ", BorderColor);
-        AppendTicketsLine("Server: ", DimColor);
-        AppendTicketsLine(server + "\n", TextColor, bold: true);
-
+        TicketField("Server", server, TextColor, bold: true);
         if (fields.TryGetValue("Client", out var client))
-        {
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine("Client: ", DimColor);
-            AppendTicketsLine(client + "\n", TextColor, bold: true);
-        }
-
+            TicketField("Client", client, TextColor, bold: true);
         if (fields.TryGetValue("KerbTicket Encryption Type", out var enc))
-        {
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine("Encryption: ", DimColor);
-            Color encColor = enc.Contains("AES", StringComparison.OrdinalIgnoreCase) ? PassColor
-                : enc.Contains("RC4", StringComparison.OrdinalIgnoreCase) ? WarnColor : TextColor;
-            AppendTicketsLine(enc + "\n", encColor);
-        }
-
+            TicketField("Encryption", enc, enc.Contains("AES", StringComparison.OrdinalIgnoreCase) ? PassColor
+                : enc.Contains("RC4", StringComparison.OrdinalIgnoreCase) ? WarnColor : TextColor);
         if (fields.TryGetValue("Ticket Flags", out var flags))
-        {
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine("Flags: ", DimColor);
-            AppendTicketsLine(flags + "\n", DimColor);
-        }
-
+            TicketField("Flags", flags, DimColor);
         if (!string.IsNullOrEmpty(cacheFlag))
-        {
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine("Cache: ", DimColor);
-            AppendTicketsLine(cacheFlag + "\n", isDelegation ? WarnColor : isPrimary ? PassColor : TextColor);
-        }
-
+            TicketField("Cache", cacheFlag, isDelegation ? WarnColor : isPrimary ? PassColor : TextColor);
         if (fields.TryGetValue("Kdc Called", out var kdc))
-        {
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine("KDC: ", DimColor);
-            AppendTicketsLine(kdc + "\n", TextColor);
-        }
+            TicketField("KDC", kdc, TextColor);
 
         foreach (var timeKey in new[] { "Start Time", "End Time", "Renew Time" })
         {
             if (!fields.TryGetValue(timeKey, out var timeVal)) continue;
-            AppendTicketsLine($" │  ", BorderColor);
-            AppendTicketsLine($"{timeKey}: ", DimColor);
-
-            bool expired = false;
-            if (timeKey == "End Time")
-            {
-                string cleaned = Regex.Replace(timeVal, @"\s*\(.*?\)\s*$", "");
-                expired = DateTime.TryParse(cleaned, out var endTime) && endTime < DateTime.Now;
-            }
-            AppendTicketsLine(timeVal + (expired ? "  EXPIRED" : "") + "\n", expired ? FailColor : TextColor);
+            bool expired = timeKey == "End Time" && TicketExpired(timeVal);
+            TicketField(timeKey, timeVal + (expired ? "  EXPIRED" : ""), expired ? FailColor : TextColor);
         }
 
         AppendTicketsLine($" └──\n", BorderColor);
     }
+
+    // One " │  Label: value" line of a ticket card
+    void TicketField(string label, string value, Color color, bool bold = false)
+    {
+        AppendTicketsLine(" │  ", BorderColor);
+        AppendTicketsLine($"{label}: ", DimColor);
+        AppendTicketsLine(value + "\n", color, bold: bold);
+    }
+
+    static bool TicketExpired(string endTime) =>
+        DateTime.TryParse(Regex.Replace(endTime, @"\s*\(.*?\)\s*$", ""), out var end) && end < DateTime.Now;
+
+    static (string Label, string Desc) TicketKind(string svc, bool isDelegation, bool isPrimary) => svc switch
+    {
+        "KRBTGT" => ("TGT", isDelegation ? "Delegation TGT — forwarded for Kerberos delegation"
+            : isPrimary ? "Primary TGT — your main logon credential from the KDC"
+            : "Ticket Granting Ticket — master key from KDC"),
+        "CIFS" => ("CIFS", "SMB file share service ticket"),
+        "HTTP" => ("HTTP", "Web service ticket (ADFS, Exchange, etc.)"),
+        "LDAP" => ("LDAP", "Directory service ticket"),
+        "HOST" => ("HOST", "Host service ticket (remote admin, WinRM)"),
+        "RPCSS" => ("RPCSS", "RPC service ticket"),
+        "DNS" => ("DNS", "DNS service ticket"),
+        "TERMSRV" => ("RDP", "Remote Desktop service ticket"),
+        "MSSQLSVC" => ("SQL", "SQL Server service ticket"),
+        "EXCHANGEMDB" => ("EXCH", "Exchange mailbox service ticket"),
+        _ => ("SVC", $"{svc} service ticket"),
+    };
 
     void ShowTicketsExplainer()
     {
@@ -2229,7 +2257,6 @@ class MainForm : Form
         // Formatted: the time, a kind column (a result's status, or where the line came from), By time's section
         // column, then the message. Sections drops the milliseconds and the section, which its heading names
         string lead = _logBySection ? $"{line.Time:HH:mm:ss}  " : $"{line.Time:HH:mm:ss.fff}  ";
-        var result = DiagLog.ParseResult(line);
         string column = _logBySection ? ""
             : (line.Section == null ? "" : LogSectionNames.FirstOrDefault(s => s.Name == line.Section).Short ?? line.Section)
                 .PadRight(DiagLog.SectionColumn);
@@ -2239,37 +2266,39 @@ class MainForm : Form
         LogParagraph(indent, 0);
         int start = _logBox.TextLength;
         AppendRun(_logBox, lead, DimColor);
-        string[] parts;
-        int message;
-        if (result is { } res)
-        {
-            var (mark, color) = LogStatusLook(res.Word);
-            AppendRun(_logBox, $"{mark} {res.Word}".PadRight(LogKindColumn), color);
-            AppendRun(_logBox, column, DimColor);
-            message = _logBox.TextLength;
-            AppendRun(_logBox, res.Name, TextColor, LogBoldFont);
-            AppendRun(_logBox, (res.Detail.Length > 0 ? "  " + res.Detail : "") + "\n", TextColor);
-            parts = [];
-        }
-        else
-        {
-            AppendRun(_logBox, line.Source.PadRight(LogKindColumn), DimColor);
-            AppendRun(_logBox, column, DimColor);
-            message = _logBox.TextLength;
-            // A debug line is dim, which already sets it apart
-            parts = line.Message.Split('\n');
-            AppendRun(_logBox, parts[0] + "\n", line.Debug ? DimColor : TextColor);
-        }
+        var (message, more) = AppendLogMessage(line, column);
         // Wrapped text, and the raw tool output after a debug line's first line, line up under the message. Where
         // the message starts is read from the box, since measuring the text apart from it comes out a little wide
         int hang = _logBox.GetPositionFromCharIndex(message).X - _logBox.GetPositionFromCharIndex(start).X;
         _logBox.Select(start, _logBox.TextLength - start);
         _logBox.SelectionHangingIndent = hang;
-        foreach (string raw in parts.Skip(1))
+        foreach (string raw in more)
         {
             LogParagraph(indent + hang, 0);
             AppendRun(_logBox, raw + "\n", DimColor);
         }
+    }
+
+    // The kind and section columns, then the message's first line; returns where the message starts and its further lines
+    (int Start, IEnumerable<string> More) AppendLogMessage(LogLine line, string column)
+    {
+        if (DiagLog.ParseResult(line) is { } res)
+        {
+            var (mark, color) = LogStatusLook(res.Word);
+            AppendRun(_logBox, $"{mark} {res.Word}".PadRight(LogKindColumn), color);
+            AppendRun(_logBox, column, DimColor);
+            int at = _logBox.TextLength;
+            AppendRun(_logBox, res.Name, TextColor, LogBoldFont);
+            AppendRun(_logBox, (res.Detail.Length > 0 ? "  " + res.Detail : "") + "\n", TextColor);
+            return (at, []);
+        }
+        AppendRun(_logBox, line.Source.PadRight(LogKindColumn), DimColor);
+        AppendRun(_logBox, column, DimColor);
+        int start = _logBox.TextLength;
+        // A debug line is dim, which already sets it apart
+        var parts = line.Message.Split('\n');
+        AppendRun(_logBox, parts[0] + "\n", line.Debug ? DimColor : TextColor);
+        return (start, parts.Skip(1));
     }
 
     /// <summary>
@@ -2329,41 +2358,7 @@ class MainForm : Form
             _logBox.Clear();
             _logHeadings.Clear();
             _logLastBlock = null;
-            LogItem? previous = null;
-            bool blockFolded = false, sectionFolded = false;
-            foreach (var item in DiagLog.Arrange(lines, _logBySection, LogSectionNames.Select(s => s.Name).ToList()))
-            {
-                // Sections: a folded run keeps only its heading, a folded section its heading inside the run; a run's
-                // Started and Complete lines say what its heading already does
-                if (_logBySection)
-                {
-                    if (item is LogEntry { Line: var bookend } && DiagLog.IsRunBookend(bookend)) continue;
-                    if (item is LogBlockHeading b) (blockFolded, sectionFolded) = (!_logOpen.Contains(b.Block), false);
-                    else if (item is LogSectionHeading h) sectionFolded = !_logOpen.Contains((h.Block, h.Section));
-                    else if (item is LogEntry { Line.Section: null }) sectionFolded = false;
-                    if (item is not LogBlockHeading && (blockFolded && item is not LogEntry { Line.Block: null } || sectionFolded && item is LogEntry))
-                        continue;
-                }
-                switch (item)
-                {
-                    case LogBlockHeading when _logView == LogView.Raw:
-                        break;
-                    case LogBlockHeading heading:
-                        AppendLogBlockHeading(heading.Block);
-                        _logLastBlock = heading.Block;
-                        break;
-                    case LogSectionHeading heading:
-                        AppendLogSectionHeading(heading.Block, heading.Section);
-                        break;
-                    case LogEntry entry:
-                        // A run's own lines after its sections (such as "Complete") are set apart from the last one
-                        if (_logBySection && entry.Line.Block != null && entry.Line.Section == null && previous is LogEntry { Line.Section: not null })
-                            AppendRun(_logBox, "\n", TextColor, LogGapFont);
-                        AppendLogLine(entry.Line);
-                        break;
-                }
-                previous = item;
-            }
+            WriteLogItems(lines);
             _logBox.SelectionStart = atEnd ? _logBox.TextLength : 0;
             _logBox.ScrollToCaret();
             if (!atEnd && top > 0) SendMessage(_logBox.Handle, EmLineScroll, IntPtr.Zero, top);
@@ -2376,6 +2371,51 @@ class MainForm : Form
         _logSeq = last;
         _logStale = false;
         _logRenderedAt = DateTime.Now;
+    }
+
+    void WriteLogItems(List<LogLine> lines)
+    {
+        LogItem? previous = null;
+        bool blockFolded = false, sectionFolded = false;
+        foreach (var item in DiagLog.Arrange(lines, _logBySection, LogSectionNames.Select(s => s.Name).ToList()))
+        {
+            if (_logBySection && HiddenInSections(item, ref blockFolded, ref sectionFolded)) continue;
+            WriteLogItem(item, previous);
+            previous = item;
+        }
+    }
+
+    // Sections: a folded run keeps only its heading, a folded section its heading inside the run; a run's Started
+    // and Complete lines say what its heading already does
+    bool HiddenInSections(LogItem item, ref bool blockFolded, ref bool sectionFolded)
+    {
+        if (item is LogEntry { Line: var bookend } && DiagLog.IsRunBookend(bookend)) return true;
+        if (item is LogBlockHeading b) (blockFolded, sectionFolded) = (!_logOpen.Contains(b.Block), false);
+        else if (item is LogSectionHeading h) sectionFolded = !_logOpen.Contains((h.Block, h.Section));
+        else if (item is LogEntry { Line.Section: null }) sectionFolded = false;
+        return item is not LogBlockHeading && (blockFolded && item is not LogEntry { Line.Block: null } || sectionFolded && item is LogEntry);
+    }
+
+    void WriteLogItem(LogItem item, LogItem? previous)
+    {
+        switch (item)
+        {
+            case LogBlockHeading when _logView == LogView.Raw:
+                break;
+            case LogBlockHeading heading:
+                AppendLogBlockHeading(heading.Block);
+                _logLastBlock = heading.Block;
+                break;
+            case LogSectionHeading heading:
+                AppendLogSectionHeading(heading.Block, heading.Section);
+                break;
+            case LogEntry entry:
+                // A run's own lines after its sections (such as "Complete") are set apart from the last one
+                if (_logBySection && entry.Line.Block != null && entry.Line.Section == null && previous is LogEntry { Line.Section: not null })
+                    AppendRun(_logBox, "\n", TextColor, LogGapFont);
+                AppendLogLine(entry.Line);
+                break;
+        }
     }
 
     object? LogHeadingAt(int charIndex) =>
@@ -3294,30 +3334,38 @@ class MainForm : Form
         var lblRuns = new Label { Text = "Runs:", ForeColor = DimColor, Font = HistoryLabelFont, AutoSize = true, Location = new Point(x, S(6)) };
         _historyPanel.Controls.Add(lblRuns);
         x += lblRuns.PreferredWidth + S(4);
-
         for (int ri = _runHistory.Count - 1; ri >= 0; ri--)
         {
-            int idx = ri;
-            var run = _runHistory[ri];
-            bool selected = ri == _selectedRunIndex;
-            bool isPending = run.IsPending;
-            string label = isPending ? "Pending..." : Clock(run.Timestamp);
-
-            var btn = new ThemedButton
-            {
-                Text = label, FlatStyle = FlatStyle.Flat,
-                Font = selected ? HistoryFontBold : HistoryFont,
-                BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
-                ForeColor = selected ? OnAccentColor : (isPending ? WarnColor : DimColor),
-                Location = new Point(x, S(4)),
-            };
-            // Fits the label, which follows the Windows clock and is wider in 12-hour time
-            btn.Size = new Size(Math.Max(S(isPending ? 72 : 62), TextRenderer.MeasureText(label, btn.Font).Width + S(14)), S(20));
-            if (!isPending) btn.Click += (s, e) => SelectRun(idx);
+            var btn = RunButton(ri, x);
             _historyPanel.Controls.Add(btn);
             x += btn.Width + S(4);
         }
+        _historyPanel.Controls.Add(DeleteRunButton());
+        _historyPanel.Visible = true;
+    }
 
+    ThemedButton RunButton(int index, int x)
+    {
+        var run = _runHistory[index];
+        bool selected = index == _selectedRunIndex;
+        bool isPending = run.IsPending;
+        string label = isPending ? "Pending..." : Clock(run.Timestamp);
+        var btn = new ThemedButton
+        {
+            Text = label, FlatStyle = FlatStyle.Flat,
+            Font = selected ? HistoryFontBold : HistoryFont,
+            BackColor = selected ? (isPending ? WarnColor : AccentColor) : SurfaceColor,
+            ForeColor = selected ? OnAccentColor : (isPending ? WarnColor : DimColor),
+            Location = new Point(x, S(4)),
+        };
+        // Fits the label, which follows the Windows clock and is wider in 12-hour time
+        btn.Size = new Size(Math.Max(S(isPending ? 72 : 62), TextRenderer.MeasureText(label, btn.Font).Width + S(14)), S(20));
+        if (!isPending) btn.Click += (s, e) => SelectRun(index);
+        return btn;
+    }
+
+    ThemedButton DeleteRunButton()
+    {
         var del = new ThemedButton
         {
             Text = "Delete run", FlatStyle = FlatStyle.Flat,
@@ -3328,9 +3376,7 @@ class MainForm : Form
         };
         del.Location = new Point(_historyPanel.ClientSize.Width - del.Width - S(10), S(4));
         del.Click += (s, e) => DeleteRun(_selectedRunIndex);
-        _historyPanel.Controls.Add(del);
-
-        _historyPanel.Visible = true;
+        return del;
     }
 
     void SelectRun(int index)
@@ -3411,20 +3457,21 @@ class MainForm : Form
             sb.AppendLine($"  DC Host: {run.Dc}");
         }
         sb.AppendLine();
-
         foreach (var group in run.Results)
+            AppendReportGroup(sb, run, group);
+        return sb.ToString();
+    }
+
+    static void AppendReportGroup(StringBuilder sb, DiagRun run, TestGroup group)
+    {
+        bool notRun = run.NotRun.Contains(group.Name);
+        string stamp = notRun ? "  (not run)"
+            : run.RanAt.TryGetValue(group.Name, out var at) ? $"  (run at {at:G})" : "";
+        sb.AppendLine("---------------------------------------------------");
+        sb.AppendLine($"  {group.Name.ToUpperInvariant()}{stamp}");
+        sb.AppendLine("---------------------------------------------------");
+        if (!notRun)
         {
-            bool notRun = run.NotRun.Contains(group.Name);
-            string stamp = notRun ? "  (not run)"
-                : run.RanAt.TryGetValue(group.Name, out var at) ? $"  (run at {at:G})" : "";
-            sb.AppendLine("---------------------------------------------------");
-            sb.AppendLine($"  {group.Name.ToUpperInvariant()}{stamp}");
-            sb.AppendLine("---------------------------------------------------");
-            if (notRun)
-            {
-                sb.AppendLine();
-                continue;
-            }
             foreach (var test in group.Tests)
             {
                 char icon = test.Status switch { Status.Pass => '+', Status.Fail => 'X', Status.Warn => '!', Status.Info => 'i', _ => 'o' };
@@ -3432,9 +3479,8 @@ class MainForm : Form
             }
             if (group.Readiness is { } ready)
                 sb.AppendLine($"  = {"Readiness",-26} {ready.Text}" + (ready.ShowGuide ? $" Fixes: Guide tab, {group.Name}." : ""));
-            sb.AppendLine();
         }
-        return sb.ToString();
+        sb.AppendLine();
     }
 
     void BtnCopy_Click(object? sender, EventArgs e)

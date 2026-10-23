@@ -196,46 +196,51 @@ static class Parsers
     public static List<GpScope> ParseRsop(string output)
     {
         var scopes = new List<GpScope>();
-        var links = new List<(string Scope, string Id, int Order, string Name, string Reason)>();
-
+        var links = new List<GpLink>();
         foreach (var rawLine in output.Split('\n'))
         {
             var parts = rawLine.TrimEnd('\r').Split('|');
             if (parts.Length >= 3 && parts[0] == "SCOPE")
-            {
-                var (state, detail) = parts[2] switch
-                {
-                    "OK" => (GpScopeState.Ok, ""),
-                    "DENIED" => (GpScopeState.AccessDenied, ""),
-                    "NODATA" => (GpScopeState.NoData, ""),
-                    _ => (GpScopeState.Error, string.Join("|", parts[3..]).Trim()),
-                };
-                DateTime? lastApplied = state == GpScopeState.Ok && parts.Length > 3
-                    && DateTime.TryParse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
-                    ? t.ToUniversalTime() : null;
-                string site = state == GpScopeState.Ok && parts.Length > 4 ? string.Join("|", parts[4..]).Trim() : "";
-                scopes.Add(new(parts[1], state, detail, lastApplied, site, [], []));
-            }
+                scopes.Add(ParseRsopScope(parts));
             else if (parts.Length >= 9 && parts[0] == "GPO" && int.TryParse(parts[3], out int order))
             {
                 bool Flag(int i) => parts[i].Trim() == "1";
-                links.Add((parts[1], parts[2], order, string.Join("|", parts[8..]).Trim(),
+                links.Add(new(parts[1], parts[2], order, string.Join("|", parts[8..]).Trim(),
                     GpDeniedReason(Flag(4), Flag(5), Flag(6), Flag(7))));
             }
         }
-
         foreach (var scope in scopes)
-        {
-            var mine = links.Where(l => l.Scope == scope.Name).ToList();
-            // Highest appliedOrder wins, so list it first (as gpresult does). A GPO linked more than once
-            // shows up once: as applied if any of its links applied.
-            var applied = mine.Where(l => l.Order > 0).OrderByDescending(l => l.Order).DistinctBy(l => l.Id).ToList();
-            scope.Applied.AddRange(applied.Select(l => l.Name));
-            scope.Denied.AddRange(mine.Where(l => l.Order <= 0 && !applied.Any(a => a.Id == l.Id))
-                .DistinctBy(l => l.Id).Select(l => (l.Name, l.Reason)));
-        }
-
+            AddScopeGpos(scope, links.Where(l => l.Scope == scope.Name).ToList());
         return scopes;
+    }
+
+    record GpLink(string Scope, string Id, int Order, string Name, string Reason);
+
+    static GpScope ParseRsopScope(string[] parts)
+    {
+        var (state, detail) = parts[2] switch
+        {
+            "OK" => (GpScopeState.Ok, ""),
+            "DENIED" => (GpScopeState.AccessDenied, ""),
+            "NODATA" => (GpScopeState.NoData, ""),
+            _ => (GpScopeState.Error, string.Join("|", parts[3..]).Trim()),
+        };
+        DateTime? lastApplied = state == GpScopeState.Ok && parts.Length > 3
+            && DateTime.TryParse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
+            ? t.ToUniversalTime() : null;
+        string site = state == GpScopeState.Ok && parts.Length > 4 ? string.Join("|", parts[4..]).Trim() : "";
+        return new(parts[1], state, detail, lastApplied, site, [], []);
+    }
+
+    // Highest appliedOrder wins, so it is listed first (as gpresult does). A GPO linked more than once shows up
+    // once: as applied if any of its links applied
+    static void AddScopeGpos(GpScope scope, List<GpLink> mine)
+    {
+        var applied = mine.Where(l => l.Order > 0).OrderByDescending(l => l.Order).DistinctBy(l => l.Id).ToList();
+        var appliedIds = applied.Select(a => a.Id).ToHashSet();
+        scope.Applied.AddRange(applied.Select(l => l.Name));
+        scope.Denied.AddRange(mine.Where(l => l.Order <= 0 && !appliedIds.Contains(l.Id))
+            .DistinctBy(l => l.Id).Select(l => (l.Name, l.Reason)));
     }
 
     /// <summary>Why an unapplied GPO was filtered out, using gpresult's wording.</summary>
@@ -277,65 +282,65 @@ static class Parsers
     public static KlistOutput ParseKlist(string raw)
     {
         var headers = new List<string>();
-        var tickets = new List<KlistTicket>();
-
-        string? currentServer = null;
-        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        int fieldIndex = 0;
+        var reader = new KlistTicketReader();
         bool inTicket = false;
-
-        void ParseField(string text)
-        {
-            if (SplitKlistField(text) is not { } field) return;
-            var (label, value) = field;
-
-            string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
-                ?? (fieldIndex < KlistFieldOrder.Length ? KlistFieldOrder[fieldIndex] : label);
-            fieldIndex++;
-
-            if (key == "Server")
-                currentServer = value;
-            else
-                fields[key] = value;
-        }
-
-        void Flush()
-        {
-            if (currentServer != null)
-                tickets.Add(new(currentServer, new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase)));
-            currentServer = null;
-            fields.Clear();
-            fieldIndex = 0;
-        }
-
         foreach (string rawLine in raw.Split('\n'))
         {
             string line = rawLine.TrimEnd('\r');
             if (string.IsNullOrWhiteSpace(line)) continue;
 
             string trimmedLine = line.TrimStart();
-            if (Regex.IsMatch(trimmedLine, @"^#\d+>"))
+            if (TicketMarker.IsMatch(trimmedLine))
             {
-                Flush();
+                reader.Flush();
                 inTicket = true;
-
                 // The ticket marker line can carry a field on the same line, e.g. "#0>     Client: user @ REALM"
                 string rest = trimmedLine[(trimmedLine.IndexOf('>') + 1)..].Trim();
-                if (rest.Length > 0) ParseField(rest);
+                if (rest.Length > 0) reader.Field(rest);
                 continue;
             }
 
             // Lines before the first ticket are headers ("Current LogonId is ...", "Cached Tickets: (n)")
-            if (inTicket) ParseField(line);
+            if (inTicket) reader.Field(line);
             else headers.Add(line.Trim());
         }
-        Flush();
+        reader.Flush();
 
         // A failed klist (e.g. "klist failed with 0xc000005f ... (no credentials)") has no cache to show
-        if (tickets.Count == 0 && KlistError(raw) != null)
+        if (reader.Tickets.Count == 0 && KlistError(raw) != null)
             headers.Clear();
+        return new(headers, reader.Tickets);
+    }
 
-        return new(headers, tickets);
+    static readonly Regex TicketMarker = new(@"^#\d+>");
+
+    // Collects one ticket's fields at a time, keyed by their English label or, when translated, their position
+    sealed class KlistTicketReader
+    {
+        public readonly List<KlistTicket> Tickets = [];
+        readonly Dictionary<string, string> _fields = new(StringComparer.OrdinalIgnoreCase);
+        string? _server;
+        int _index;
+
+        public void Field(string text)
+        {
+            if (SplitKlistField(text) is not { } field) return;
+            var (label, value) = field;
+            string key = KlistFieldOrder.FirstOrDefault(k => k.Equals(label, StringComparison.OrdinalIgnoreCase))
+                ?? (_index < KlistFieldOrder.Length ? KlistFieldOrder[_index] : label);
+            _index++;
+            if (key == "Server") _server = value;
+            else _fields[key] = value;
+        }
+
+        public void Flush()
+        {
+            if (_server != null)
+                Tickets.Add(new(_server, new Dictionary<string, string>(_fields, StringComparer.OrdinalIgnoreCase)));
+            _server = null;
+            _fields.Clear();
+            _index = 0;
+        }
     }
 
     static readonly Regex DsregLinePattern = new(@"^\s*([A-Za-z][A-Za-z0-9 ]*?)\s+:\s?(.*?)\s*$", RegexOptions.Multiline);

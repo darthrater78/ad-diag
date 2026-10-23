@@ -178,53 +178,57 @@ sealed class DiagLog(Func<DateTime>? clock = null)
     /// any block stay where they fall. By time: every line in
     /// order, with a block's heading before its first line and again where its lines resume after another block's.
     /// </summary>
-    public static List<LogItem> Arrange(IReadOnlyList<LogLine> lines, bool bySection, IReadOnlyList<string> sectionOrder)
+    public static List<LogItem> Arrange(IReadOnlyList<LogLine> lines, bool bySection, IReadOnlyList<string> sectionOrder) =>
+        bySection ? ArrangeBySection(lines, sectionOrder) : ArrangeByTime(lines);
+
+    static List<LogItem> ArrangeByTime(IReadOnlyList<LogLine> lines)
     {
         var items = new List<LogItem>();
-        if (!bySection)
+        LogBlock? current = null;
+        foreach (var line in lines)
         {
-            LogBlock? current = null;
-            foreach (var line in lines)
+            if (line.Block != null && line.Block != current)
             {
-                if (line.Block != null && line.Block != current)
-                {
-                    items.Add(new LogBlockHeading(line.Block));
-                    current = line.Block;
-                }
-                items.Add(new LogEntry(line));
+                items.Add(new LogBlockHeading(line.Block));
+                current = line.Block;
             }
-            return items;
+            items.Add(new LogEntry(line));
         }
+        return items;
+    }
 
-        int Rank(string section)
-        {
-            int i = sectionOrder.ToList().IndexOf(section);
-            return i < 0 ? int.MaxValue : i;
-        }
+    static List<LogItem> ArrangeBySection(IReadOnlyList<LogLine> lines, IReadOnlyList<string> sectionOrder)
+    {
+        var rank = sectionOrder.Select((section, i) => (section, i)).DistinctBy(p => p.section).ToDictionary(p => p.section, p => p.i);
+        var byBlock = lines.Where(l => l.Block != null).ToLookup(l => l.Block!); // keeps each block's lines in order
+        var items = new List<LogItem>();
         var seen = new HashSet<LogBlock>();
         foreach (var line in lines)
         {
             if (line.Block is not { } block)
-            {
                 items.Add(new LogEntry(line));
-                continue;
-            }
-            if (!seen.Add(block)) continue;
-            var mine = lines.Where(l => l.Block == block).ToList();
-            items.Add(new LogBlockHeading(block));
-            // The block's own lines from before its sections began (such as "Started") go above them, the rest below
-            long sectionsStart = mine.FirstOrDefault(l => l.Section != null)?.Seq ?? long.MaxValue;
-            items.AddRange(mine.Where(l => l.Section == null && l.Seq < sectionsStart).Select(l => new LogEntry(l)));
-            var sections = mine.Select(l => l.Section).OfType<string>().Distinct()
-                .Select((section, first) => (section, first)).OrderBy(p => Rank(p.section)).ThenBy(p => p.first);
-            foreach (var (section, _) in sections)
-            {
-                items.Add(new LogSectionHeading(block, section));
-                items.AddRange(mine.Where(l => l.Section == section).Select(l => new LogEntry(l)));
-            }
-            items.AddRange(mine.Where(l => l.Section == null && l.Seq > sectionsStart).Select(l => new LogEntry(l)));
+            else if (seen.Add(block))
+                AddBlock(items, block, byBlock[block].ToList(), rank);
         }
         return items;
+    }
+
+    // A block's heading, its own lines from before its sections began (such as "Started"), each section under its
+    // heading in the given order (others after, as they first appear), then the block's later lines
+    static void AddBlock(List<LogItem> items, LogBlock block, List<LogLine> mine, Dictionary<string, int> rank)
+    {
+        items.Add(new LogBlockHeading(block));
+        long sectionsStart = mine.FirstOrDefault(l => l.Section != null)?.Seq ?? long.MaxValue;
+        items.AddRange(mine.Where(l => l.Section == null && l.Seq < sectionsStart).Select(l => new LogEntry(l)));
+        var sections = mine.Select(l => l.Section).OfType<string>().Distinct()
+            .Select((section, first) => (section, first))
+            .OrderBy(p => rank.GetValueOrDefault(p.section, int.MaxValue)).ThenBy(p => p.first);
+        foreach (var (section, _) in sections)
+        {
+            items.Add(new LogSectionHeading(block, section));
+            items.AddRange(mine.Where(l => l.Section == section).Select(l => new LogEntry(l)));
+        }
+        items.AddRange(mine.Where(l => l.Section == null && l.Seq > sectionsStart).Select(l => new LogEntry(l)));
     }
 
     /// <summary>The whole log as plain text, one line after another: the order lines were added in.</summary>
