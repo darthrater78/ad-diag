@@ -970,7 +970,10 @@ class MainForm : Form
     static Color FixLabelColor => WarnColor;
 
     static readonly Font GuideSectionFont = new("Segoe UI", 10.5f, FontStyle.Bold);
-    static readonly Font GuideChevronFont = new(MonoFamily, 9f); // ► and ▼ are in the monospace font everywhere
+    // Fold marks in the text panes (Guide, Log, Intune): ▶ and ▼ from Segoe UI Symbol, which ships with Windows and
+    // draws both the same size (the monospace fonts drew ► much smaller than ▼)
+    static readonly Font ChevronFont = new("Segoe UI Symbol", 8f);
+    static string FoldMark(bool open) => open ? "\u25BC " : "\u25B6 ";
 
     // Each section folds to its title, with a chevron down when open and right when folded; all start folded, so
     // the Guide opens as a list of its sections
@@ -989,7 +992,7 @@ class MainForm : Form
             if (open || previousOpen) AppendGuide("\n", GuideBodyFont, TextColor);
             previousOpen = open;
             _guideAnchors[title] = _guideBox.TextLength;
-            AppendGuide(open ? "\u25BC " : "\u25BA ", GuideChevronFont, DimColor);
+            AppendGuide(FoldMark(open), ChevronFont, DimColor);
             AppendGuide(title, GuideSectionFont, TextColor);
             _guideHeadings.Add((_guideAnchors[title], _guideBox.TextLength, title));
             AppendGuide(open ? "\n\n" : "\n", GuideSectionFont, TextColor);
@@ -1481,13 +1484,13 @@ class MainForm : Form
     static readonly Font IntuneBoldFont = new("Segoe UI", 9.5f, FontStyle.Bold);
     static readonly Font IntuneValueFont = new(MonoFamily, 8.5f);
 
-    void AppendIntuneLine(string text, Color color, bool bold = false, bool mono = false)
+    void AppendIntuneLine(string text, Color color, bool bold = false, bool mono = false, Font? font = null)
     {
         _intuneBox.SelectionStart = _intuneBox.TextLength;
         _intuneBox.SelectionLength = 0;
         _intuneBox.SelectionColor = color;
         _intuneBox.SelectionBackColor = _intuneBox.BackColor;
-        _intuneBox.SelectionFont = bold ? IntuneBoldFont : mono ? IntuneValueFont : _intuneBox.Font;
+        _intuneBox.SelectionFont = font ?? (bold ? IntuneBoldFont : mono ? IntuneValueFont : _intuneBox.Font);
         _intuneBox.AppendText(text);
     }
 
@@ -1551,7 +1554,7 @@ class MainForm : Form
         bool open = _intuneOpen.Contains(key);
         int start = _intuneBox.TextLength;
         AppendIntuneLine("  ", TextColor);
-        AppendIntuneLine(open ? "\u25BC " : "\u25BA ", DimColor, mono: true);
+        AppendIntuneLine(FoldMark(open), DimColor, font: ChevronFont);
         AppendIntuneLine(title, TextColor, bold: true);
         AppendIntuneLine($"   {summary}", DimColor);
         _intuneHeadings.Add((start, _intuneBox.TextLength, key));
@@ -1604,24 +1607,49 @@ class MainForm : Form
             AppendIntuneLine($"  Not read: {s.AppsError}\n", WarnColor);
             return;
         }
-        int failed = s.Apps.Count(a => Diagnostics.MsiStatus(a.Status).Look == Status.Fail);
-        string summary = s.Apps.Count == 0 ? $"no MSI apps from {provider}"
-            : $"{s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")}{(failed > 0 ? $", {failed} failed" : "")}";
-        if (!IntuneFoldSection("apps", "Applications", summary) || s.Apps.Count == 0) return;
+        var groups = Diagnostics.GroupApps(s.Apps);
+        int failed = groups.Count(g => Diagnostics.MsiStatus(g.Current.Status).Look == Status.Fail);
+        string versions = s.Apps.Count > groups.Count ? $" ({s.Apps.Count} versions)" : "";
+        string summary = groups.Count == 0 ? $"no MSI apps from {provider}"
+            : $"{groups.Count} MSI app{(groups.Count == 1 ? "" : "s")}{versions}{(failed > 0 ? $", {failed} failed" : "")}";
+        if (!IntuneFoldSection("apps", "Applications", summary) || groups.Count == 0) return;
         AppendIntuneLine($"  From {provider}\n\n", DimColor);
-        foreach (var app in s.Apps)
+        foreach (var group in groups)
+            RenderIntuneApp(group);
+    }
+
+    // An app's current version, its product code, and its earlier versions folded under one line
+    void RenderIntuneApp(MdmAppGroup group)
+    {
+        var app = group.Current;
+        var (text, look) = Diagnostics.MsiStatus(app.Status);
+        var (mark, color) = StatusMark(look);
+        AppendIntuneLine($"    {mark} ", color);
+        AppendIntuneLine(group.Name ?? "Unnamed app", TextColor, bold: group.Name != null);
+        if (app.Version is { Length: > 0 } version) AppendIntuneLine($"  {version}", DimColor);
+        if (app.User) AppendIntuneLine("  (user)", DimColor);
+        AppendIntuneLine($"  — {text}", look == Status.Info ? DimColor : color);
+        if (app.LastError is { } error and not 0)
+            AppendIntuneLine($", error 0x{error:X8}", FailColor);
+        AppendIntuneLine("\n      ", TextColor);
+        AppendIntuneLine($"{{{app.ProductCode}}}\n", DimColor, mono: true);
+        if (group.Earlier.Count == 0) return;
+
+        string key = "app:" + app.ProductCode;
+        bool open = _intuneOpen.Contains(key);
+        int start = _intuneBox.TextLength;
+        AppendIntuneLine("      ", TextColor);
+        AppendIntuneLine(FoldMark(open), DimColor, font: ChevronFont);
+        int n = group.Earlier.Count;
+        AppendIntuneLine($"{n} earlier version{(n == 1 ? "" : "s")}{(app.Installed ? ", replaced by this one" : "")}", DimColor);
+        _intuneHeadings.Add((start, _intuneBox.TextLength, key));
+        AppendIntuneLine("\n", TextColor);
+        if (!open) return;
+        foreach (var earlier in group.Earlier)
         {
-            var (text, look) = Diagnostics.MsiStatus(app.Status);
-            var (mark, color) = StatusMark(look);
-            AppendIntuneLine($"    {mark} ", color);
-            AppendIntuneLine(app.Name ?? "Unnamed app", TextColor, bold: app.Name != null);
-            if (app.Version is { Length: > 0 } version) AppendIntuneLine($"  {version}", DimColor);
-            if (app.User) AppendIntuneLine("  (user)", DimColor);
-            AppendIntuneLine($"  — {text}", look == Status.Info ? DimColor : color);
-            if (app.LastError is { } error and not 0)
-                AppendIntuneLine($", error 0x{error:X8}", FailColor);
-            AppendIntuneLine("\n      ", TextColor);
-            AppendIntuneLine($"{{{app.ProductCode}}}\n", DimColor, mono: true);
+            AppendIntuneLine($"          {earlier.Version ?? "version not recorded"}", TextColor);
+            AppendIntuneLine($"  — {Diagnostics.MsiStatus(earlier.Status).Text}  ", DimColor);
+            AppendIntuneLine($"{{{earlier.ProductCode}}}\n", DimColor, mono: true);
         }
     }
 
@@ -2328,8 +2356,7 @@ class MainForm : Form
     }
 
     // Down when open, right when folded; Sections only, where a heading folds
-    // ► and ▼ are in the log's monospace font everywhere
-    string Chevron(object key) => !_logBySection ? "" : _logOpen.Contains(key) ? "\u25BC " : "\u25BA ";
+    string Chevron(object key) => !_logBySection ? "" : FoldMark(_logOpen.Contains(key));
 
     // A run's or an action's heading: its name and time in primary, then what it covered and how it came out
     void AppendLogBlockHeading(LogBlock block)
@@ -2337,7 +2364,7 @@ class MainForm : Form
         LogParagraph(0, 0);
         if (_logBox.TextLength > 0) AppendRun(_logBox, "\n", TextColor, LogGapFont);
         int start = _logBox.TextLength;
-        AppendRun(_logBox, Chevron(block), DimColor, _logBox.Font);
+        AppendRun(_logBox, Chevron(block), DimColor, ChevronFont);
         AppendRun(_logBox, block.Title, AccentColor, LogBlockFont);
         AppendRun(_logBox, "    " + block.Detail, DimColor, LogNoteFont);
         if (block.Totals != null) AppendRun(_logBox, "    " + block.Totals, DimColor, LogNoteFont);
@@ -2351,7 +2378,7 @@ class MainForm : Form
         AppendRun(_logBox, "\n", TextColor, LogGapFont);
         int start = _logBox.TextLength;
         var key = (block, section);
-        AppendRun(_logBox, Chevron(key), DimColor, _logBox.Font);
+        AppendRun(_logBox, Chevron(key), DimColor, ChevronFont);
         AppendRun(_logBox, section, TextColor, LogSectionFont);
         if (block.SectionNotes.TryGetValue(section, out var note)) AppendRun(_logBox, "    " + note, DimColor, LogNoteFont);
         _logHeadings.Add((start, _logBox.TextLength, key));

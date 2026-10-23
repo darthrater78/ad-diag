@@ -164,7 +164,7 @@ static class Shots
         FrontFill(Get<Panel>(form, "_intunePanel"));
         var intune = Get<RichTextBox>(form, "_intuneBox");
         intune.Clear();
-        Call(form, "AppendIntuneLine", "\n", Theme("TextColor"), false, false);
+        Call(form, "AppendIntuneLine", "\n", Theme("TextColor"), false, false, null);
         Get<HashSet<string>>(form, "_intuneOpen").Add("device"); // one section open, the others folded
         Call(form, "RenderIntune", MockIntune(DateTime.UtcNow));
         Get<Control>(form, "_btnIntuneSync").Enabled = true;
@@ -463,9 +463,11 @@ static class Shots
         ];
         var apps = new List<MdmApp>
         {
-            new("DDF6D6BF-887E-4EB3-A89D-2C153BAF3256", "Microsoft Intune Management Extension", "1.105.103.0", 70, 0, false),
-            new("6A7DFC50-0395-4E1E-BF84-ED1404E72051", "Contoso VPN Client", "4.2.1.0", 70, 0, false),
-            new("7ECACCD0-8601-4884-8860-7A4ADF4ED814", "ContosoTimesheet.msi", "2.0.0.0", 60, unchecked((int)0x80070643), true),
+            new("0C295A70-0C7C-451D-8D2D-C15DFCF7B226", "Microsoft Intune Management Extension", "1.106.151.0", 70, 0, false, "IntuneWindowsAgent.msi", true),
+            new("A99DF952-D7EE-44E9-B277-A9881EAC57B0", "IntuneWindowsAgent.msi", "1.106.106.0", 70, 0, false, "IntuneWindowsAgent.msi"),
+            new("DDF6D6BF-887E-4EB3-A89D-2C153BAF3256", "IntuneWindowsAgent.msi", "1.105.103.0", 70, 0, false, "IntuneWindowsAgent.msi"),
+            new("6A7DFC50-0395-4E1E-BF84-ED1404E72051", "Contoso VPN Client", "4.2.1.0", 70, 0, false, "ContosoVpn.msi", true),
+            new("7ECACCD0-8601-4884-8860-7A4ADF4ED814", "ContosoTimesheet.msi", "2.0.0.0", 60, unchecked((int)0x80070643), true, "ContosoTimesheet.msi"),
         };
         return new(enrollment, nowUtc.AddMinutes(-28), null, null, null, null, device, user, null, apps, null);
     }

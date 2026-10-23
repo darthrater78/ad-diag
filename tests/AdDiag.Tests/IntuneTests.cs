@@ -253,6 +253,51 @@ public class IntuneTests
         Assert.EndsWith("; 3 MSI apps; failed: Contoso VPN Client (install failed)", policies.Detail);
     }
 
+    // The user's PC: seven Management Extension versions, only the newest installed
+    static readonly (string Code, string Version)[] ImeVersions =
+    [
+        ("0c295a70-0c7c-451d-8d2d-c15dfcf7b226", "1.106.151.0"), ("58976ff3-87ca-4691-bdfc-671f37f07cb6", "1.103.101.0"),
+        ("5d50ad5a-2e84-4d08-a5b6-9bff0dfecd27", "1.102.103.0"), ("6a7dfc50-0395-4e1e-bf84-ed1404e72051", "1.104.102.0"),
+        ("7ecaccd0-8601-4884-8860-7a4adf4ed814", "1.105.152.0"), ("a99df952-d7ee-44e9-b277-a9881eac57b0", "1.106.106.0"),
+        ("ddf6d6bf-887e-4eb3-a89d-2c153baf3256", "1.105.103.0"),
+    ];
+
+    [Fact]
+    public void Apps_VersionsOfOneInstallerAreOneAppNamedFromTheInstalledOne()
+    {
+        var probe = Enrolled();
+        foreach (var (code, version) in ImeVersions)
+            probe.Registry[$@"{AppsRoot}\{DeviceContext}\MSI\{{{{{code}}}}}"] = new()
+            {
+                ["Status"] = 70, ["ProductVersion"] = version, ["ServerAccountID"] = Id,
+                ["CurrentDownloadUrl"] = "https://imeswda-afd-hotfix.manage.microsoft.com/IntuneWindowsAgent.msi",
+            };
+        probe.Registry[@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{0C295A70-0C7C-451D-8D2D-C15DFCF7B226}"] =
+            new() { ["DisplayName"] = "Microsoft Intune Management Extension" };
+
+        var state = Diagnostics.ReadIntuneState(probe, Diagnostics.ReadEnrollment(probe)!);
+        var group = Assert.Single(Diagnostics.GroupApps(state.Apps));
+        Assert.Equal(("Microsoft Intune Management Extension", "1.106.151.0", true), (group.Name, group.Current.Version, group.Current.Installed));
+        Assert.Equal(["1.106.106.0", "1.105.152.0", "1.105.103.0", "1.104.102.0", "1.103.101.0", "1.102.103.0"],
+            group.Earlier.Select(a => a.Version));
+        Assert.EndsWith("; 1 MSI app", Entry(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc), "Device Policies").Detail);
+    }
+
+    [Fact]
+    public void Apps_WithNothingInstalledTheNewestIsCurrent()
+    {
+        var groups = Diagnostics.GroupApps(
+        [
+            new("A", "Tool.msi", "1.0.0.0", 70, 0, false, "Tool.msi"),
+            new("B", "Tool.msi", "1.2.0.0", 60, 1603, false, "Tool.msi"),
+            new("C", "Other.msi", "3.0", 70, 0, true, "Other.msi"),
+        ]);
+        Assert.Equal(2, groups.Count);
+        Assert.Equal(("B", false), (groups[0].Current.ProductCode, groups[0].Current.User));
+        Assert.Equal(["A"], groups[0].Earlier.Select(a => a.ProductCode));
+        Assert.True(groups[1].Current.User);
+    }
+
     [Theory]
     [InlineData(70, "Pass")]
     [InlineData(60, "Fail")]

@@ -98,9 +98,10 @@ static partial class Diagnostics
         if (s.PolicyError is { } error)
             return new(MdmPoliciesCheck, Status.Skip, $"Not checked: {error}") { NeedsAdmin = true };
         string apps = AppsSummary(s);
-        var failed = s.Apps.Where(a => MsiStatus(a.Status).Look == Status.Fail).ToList();
+        // An earlier version's failure is moot once a later one is in place, so only each app's current version counts
+        var failed = GroupApps(s.Apps).Where(g => MsiStatus(g.Current.Status).Look == Status.Fail).ToList();
         string failures = failed.Count == 0 ? ""
-            : $"; failed: {string.Join(", ", failed.Select(a => $"{a.Name ?? a.ProductCode} ({MsiStatus(a.Status).Text.ToLowerInvariant()})"))}";
+            : $"; failed: {string.Join(", ", failed.Select(g => $"{g.Name ?? g.Current.ProductCode} ({MsiStatus(g.Current.Status).Text.ToLowerInvariant()})"))}";
         var won = s.Device.Where(p => p.ProviderWins).ToList();
         if (s.Device.Count == 0)
             return new(MdmPoliciesCheck, failed.Count > 0 ? Status.Warn : Status.Info, $"No device settings from Intune yet{apps}{failures}");
@@ -114,8 +115,12 @@ static partial class Diagnostics
     }
 
     // The MSI apps, as Settings counts them beside the policy areas; empty when there are none or they weren't read
-    static string AppsSummary(IntuneState s) =>
-        s.AppsError != null ? "; apps not read" : s.Apps.Count == 0 ? "" : $"; {s.Apps.Count} MSI app{(s.Apps.Count == 1 ? "" : "s")}";
+    static string AppsSummary(IntuneState s)
+    {
+        if (s.AppsError != null) return "; apps not read";
+        int count = GroupApps(s.Apps).Count;
+        return count == 0 ? "" : $"; {count} MSI app{(count == 1 ? "" : "s")}";
+    }
 
     /// <summary>
     /// The MDM enrollment Windows keeps under HKLM\SOFTWARE\Microsoft\Enrollments, preferring a completed Intune one;
@@ -202,26 +207,53 @@ static partial class Diagnostics
                 if (values.GetValueOrDefault("ServerAccountID") is string server && !SameId(server, enrollmentId)) continue;
                 // The key and ProductCode wrap the product code in one or two pairs of braces
                 string code = key.Trim('{', '}');
-                apps.Add(new(code, AppName(probe, code, values), values.GetValueOrDefault("ProductVersion") as string,
-                    values.GetValueOrDefault("Status") as int?, values.GetValueOrDefault("LastError") as int?, isUser));
+                string? installed = InstalledName(probe, code);
+                apps.Add(new(code, installed ?? InstallerFile(values), values.GetValueOrDefault("ProductVersion") as string,
+                    values.GetValueOrDefault("Status") as int?, values.GetValueOrDefault("LastError") as int?, isUser,
+                    InstallerFile(values), installed != null));
             }
         }
         return apps;
     }
 
-    // The installed product's name; else the installer's file name, from the URL's path only (the query can hold a token)
-    static string? AppName(IProbe probe, string code, Dictionary<string, object> values)
+    // The installed product's name from its uninstall entry; null when this version isn't installed
+    static string? InstalledName(IProbe probe, string code)
     {
         if (Guid.TryParse(code, out var guid))
             foreach (string root in UninstallKeys)
                 if (probe.RegistryValues($@"{root}\{guid.ToString("B").ToUpperInvariant()}")?.GetValueOrDefault("DisplayName") is string { Length: > 0 } name)
                     return name;
+        return null;
+    }
+
+    // The installer's file name, from the download URL's path only (the query can hold a token)
+    static string? InstallerFile(Dictionary<string, object> values)
+    {
         string? url = values.GetValueOrDefault("CurrentDownloadUrl") as string
             ?? (values.GetValueOrDefault("DownloadUrlList") as string[])?.FirstOrDefault(u => u.Length > 0);
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
         string file = Uri.UnescapeDataString(uri.AbsolutePath.Split('/').Last());
         return file.Length > 0 ? file : null;
     }
+
+    /// <summary>
+    /// The apps as one entry each: versions that share an installer file are one app (every MSI version has its own
+    /// product code, and Intune keeps an entry for each it pushed). The installed version, else the newest, is the
+    /// current one; the app takes the installed version's name, and the rest are the earlier versions it replaced.
+    /// </summary>
+    internal static List<MdmAppGroup> GroupApps(IEnumerable<MdmApp> apps) =>
+        apps.GroupBy(a => (a.User, Key: a.Installer?.ToLowerInvariant() ?? a.ProductCode))
+            .Select(g =>
+            {
+                var byVersion = g.OrderByDescending(a => a.Installed).ThenByDescending(a => ParseVersion(a.Version)).ToList();
+                var current = byVersion[0];
+                string? name = g.FirstOrDefault(a => a.Installed)?.Name ?? current.Name;
+                var earlier = byVersion.Skip(1).OrderByDescending(a => ParseVersion(a.Version)).ToList();
+                return new MdmAppGroup(name, current, earlier);
+            })
+            .OrderBy(g => g.Current.User).ThenBy(g => g.Name ?? "\uffff", StringComparer.OrdinalIgnoreCase).ToList();
+
+    static Version ParseVersion(string? text) => Version.TryParse(text, out var v) ? v : new Version(0, 0);
 
     /// <summary>An MSI app's Status as Settings words it (EnterpriseDesktopAppManagement CSP), and how it went.</summary>
     internal static (string Text, Status Look) MsiStatus(int? status) => status switch
@@ -331,7 +363,13 @@ record MdmEnrollment(string Id, string Provider, int? State, string? Upn)
 record MdmSetting(string Area, string Name, string Value, bool ProviderWins, string? Winner);
 
 /// <summary>One MSI app an MDM pushed: its product code, name when known, version, CSP Status and LastError, and whether it is the user's.</summary>
-record MdmApp(string ProductCode, string? Name, string? Version, int? Status, int? LastError, bool User);
+/// <param name="Installer">The installer's file name from its download URL; versions of one app share it.</param>
+/// <param name="Installed">This version has an uninstall entry, so it is the one on the PC now.</param>
+record MdmApp(string ProductCode, string? Name, string? Version, int? Status, int? LastError, bool User,
+    string? Installer = null, bool Installed = false);
+
+/// <summary>One app: its name, the version in place (installed, else newest) and the earlier versions Intune pushed.</summary>
+record MdmAppGroup(string? Name, MdmApp Current, List<MdmApp> Earlier);
 
 /// <summary>What the Intune group and the Intune policies tab show; an error is the reason a part couldn't be read.</summary>
 record IntuneState(MdmEnrollment Enrollment, DateTime? LastSuccess, DateTime? LastFailure, string? SyncError,
