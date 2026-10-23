@@ -92,13 +92,13 @@ record Readiness(Status Status, string Text, bool ShowGuide);
 static partial class Diagnostics
 {
     /// <summary>
-    /// The checks that can be held back for want of Administrator (each sets <see cref="TestEntry.NeedsAdmin"/> when
-    /// it is). Before a run, an app that isn't elevated marks them, so the need shows before anything runs.
+    /// The checks a standard user is always denied, as seen on a real PC: before a run, an app that isn't elevated
+    /// marks them, so the need shows before anything runs. Others that may be denied (Hello policy, biometrics,
+    /// Intune) set <see cref="TestEntry.NeedsAdmin"/> only when a run finds they were.
     /// </summary>
     public static readonly IReadOnlySet<string> AdminChecks = new HashSet<string>
     {
         "Secure Channel", "GP Last Refresh", "Applied GPOs", "Denied GPOs",
-        HelloTrustCheck, SignInMethodsCheck, MdmEnrollmentCheck, MdmSyncCheck, MdmPoliciesCheck,
     };
 
     public static TestGroup TestDomainMembership(DiagConfig cfg, IProbe probe) => new("Domain Membership & Identity",

@@ -2658,12 +2658,13 @@ class MainForm : Form
             if (!notRun && GroupVerdict(group) is { } verdict) DrawGroupBadge(g, verdict, noteX - S(12), y);
             DrawChevron(g, left, y + S(8), open);
             TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), notRun ? DimColor : TextColor, oneLine);
-            bool needsAdmin = group.Tests.Any(t => ShowsNeedsAdmin(t, notRun));
-            if (needsAdmin)
+            int needsAdmin = group.Tests.Count(t => ShowsNeedsAdmin(t, notRun));
+            if (needsAdmin > 0)
             {
+                bool all = needsAdmin == group.Tests.Count;
                 int nameRight = left + S(14) + TextRenderer.MeasureText(g, group.Name, GroupHeaderFont, Size.Empty, oneLine).Width;
-                DrawAdminNote(g, nameRight + S(8), noteX - S(12) - BadgeWidth(g) - S(8), y);
-                note += "; some checks need Run as Administrator";
+                DrawAdminNote(g, all ? AdminNoteText : PartialAdminNoteText, nameRight + S(8), noteX - S(12) - BadgeWidth(g) - S(8), y);
+                note += all ? "; its checks need Run as Administrator" : "; some checks need Run as Administrator";
             }
 
             var bounds = new Rectangle(left - S(4), y, right - S(RunSlot) - S(8) - (left - S(4)), S(24));
@@ -2730,15 +2731,16 @@ class MainForm : Form
             TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 
-    const string AdminNoteText = "Needs admin";
-    const string AdminNoteTip = "Some checks here need the app run as Administrator. Close it, right-click ad-diag.exe and choose Run as administrator.";
+    const string AdminNoteText = "Needs admin", PartialAdminNoteText = "Partially needs admin";
+    const string AdminNoteTip = "The checks with a shield need the app run as Administrator. Close it, right-click ad-diag.exe and choose Run as administrator.";
 
     // A capsule like the verdict pills, in the warning colour, right-aligned to end at maxRight: a shield and "Needs
-    // admin", or the shield alone when the group's name leaves no room for the words
-    void DrawAdminNote(Graphics g, int minLeft, int maxRight, int y)
+    // admin" (or "Partially needs admin" when only some of the group's checks do), or the shield alone when the
+    // group's name leaves no room for the words
+    void DrawAdminNote(Graphics g, string text, int minLeft, int maxRight, int y)
     {
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
-        int textW = TextRenderer.MeasureText(g, AdminNoteText, BadgeFont, Size.Empty, flags).Width;
+        int textW = TextRenderer.MeasureText(g, text, BadgeFont, Size.Empty, flags).Width;
         int full = S(8) + S(10) + S(5) + textW + S(8), compact = S(24);
         int w = maxRight - full >= minLeft ? full : compact;
         if (maxRight - w < minLeft) return; // no room at all on a very narrow window; the rows still carry the shield
@@ -2746,7 +2748,7 @@ class MainForm : Form
         FillRounded(g, r, S(8), Blend(PanelColor, WarnColor, 0.16));
         DrawShield(g, WarnColor, w == compact ? r.X + r.Width / 2f : r.X + S(13), r.Y + r.Height / 2f, 10);
         if (w == full)
-            TextRenderer.DrawText(g, AdminNoteText, BadgeFont, new Rectangle(r.X + S(23), r.Y, textW + S(2), r.Height), WarnColor,
+            TextRenderer.DrawText(g, text, BadgeFont, new Rectangle(r.X + S(23), r.Y, textW + S(2), r.Height), WarnColor,
                 flags | TextFormatFlags.VerticalCenter);
         _resultsCanvas.AdminNotes.Add(r);
     }

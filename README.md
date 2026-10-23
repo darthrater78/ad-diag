@@ -108,7 +108,7 @@ Each check ends in one of five results:
 
 A group's heading shows the worst of its checks: **FAILED**, **WARNING** or **PASSED** (Info and Skipped don't lower it).
 
-**Run as Administrator:** a few checks read more as Administrator: the secure channel, the computer half of Group Policy, Intune's sync times and policy settings, and possibly the Hello policy and biometric enrollment. When the app isn't elevated and one of them was held back, its row has a shield after its name and its group's heading a **Needs admin** capsule (hover it for how to elevate). Before a run, an app that isn't elevated shows the capsule on every group with such a check, and opening the group shows which ones. When the app is elevated, the title bar reads "Administrator: AD Diagnostics" and the header shows **Running as administrator**.
+**Run as Administrator:** a few checks read more as Administrator: the secure channel, the computer half of Group Policy, Intune's sync times and policy settings, and possibly the Hello policy and biometric enrollment. When the app isn't elevated and one of them was held back, its row has a shield after its name and its group's heading a **Needs admin** capsule, or **Partially needs admin** when only some of the group's checks need it (hover it for how to elevate). Before a run, an app that isn't elevated shows the capsule on the groups whose checks always need it (the secure channel and Group Policy), and opening the group shows which ones. When the app is elevated, the title bar reads "Administrator: AD Diagnostics" and the header shows **Running as administrator**.
 
 ### Profiles
 

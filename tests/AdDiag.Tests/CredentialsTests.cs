@@ -107,7 +107,6 @@ public class CredentialsTests
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.True(entry.NeedsAdmin);
-        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Fact]
@@ -120,7 +119,6 @@ public class CredentialsTests
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.True(entry.NeedsAdmin);
-        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Theory]

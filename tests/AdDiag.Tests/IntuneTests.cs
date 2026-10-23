@@ -47,7 +47,7 @@ public class IntuneTests
     [Fact]
     public void NotEnrolled_ShowsOneNoteAndNothingElse()
     {
-        var group = Diagnostics.TestIntune(new FakeProbe(), Now);
+        var group = Diagnostics.TestIntune(new FakeProbe(), Now, TimeZoneInfo.Utc);
 
         var entry = Assert.Single(group.Tests);
         Assert.Equal(("MDM Enrollment", Status.Info), (entry.Name, entry.Status));
@@ -57,7 +57,7 @@ public class IntuneTests
     [Fact]
     public void Enrolled_AllWell_Passes()
     {
-        var group = Diagnostics.TestIntune(Enrolled(), Now);
+        var group = Diagnostics.TestIntune(Enrolled(), Now, TimeZoneInfo.Utc);
 
         Assert.Equal(["MDM Enrollment", "Last Sync", "Management Extension", "Device Policies"], group.Tests.Select(t => t.Name));
         Assert.Equal("Enrolled in Microsoft Intune as jdoe@contoso.com", Entry(group, "MDM Enrollment").Detail);
@@ -72,7 +72,7 @@ public class IntuneTests
     [Fact]
     public void SyncOlderThanAWeek_Warns()
     {
-        var entry = Entry(Diagnostics.TestIntune(Enrolled(lastSuccess: "20261014T080000Z"), Now), "Last Sync");
+        var entry = Entry(Diagnostics.TestIntune(Enrolled(lastSuccess: "20261014T080000Z"), Now, TimeZoneInfo.Utc), "Last Sync");
 
         Assert.Equal(Status.Warn, entry.Status);
         Assert.Contains("over a week", entry.Detail);
@@ -81,7 +81,7 @@ public class IntuneTests
     [Fact]
     public void FailureAfterLastSuccess_Warns()
     {
-        var entry = Entry(Diagnostics.TestIntune(Enrolled(lastFailure: "20261023T084500Z"), Now), "Last Sync");
+        var entry = Entry(Diagnostics.TestIntune(Enrolled(lastFailure: "20261023T084500Z"), Now, TimeZoneInfo.Utc), "Last Sync");
 
         Assert.Equal(Status.Warn, entry.Status);
         Assert.StartsWith("Last attempt failed", entry.Detail);
@@ -92,7 +92,7 @@ public class IntuneTests
     [InlineData(1, "Warn", "installed but stopped")]
     public void ManagementExtension_ByServiceState(int? state, string status, string detail)
     {
-        var entry = Entry(Diagnostics.TestIntune(Enrolled(extension: state), Now), "Management Extension");
+        var entry = Entry(Diagnostics.TestIntune(Enrolled(extension: state), Now, TimeZoneInfo.Utc), "Management Extension");
 
         Assert.Equal(Enum.Parse<Status>(status), entry.Status);
         Assert.Contains(detail, entry.Detail);
@@ -104,12 +104,23 @@ public class IntuneTests
         var probe = Enrolled();
         probe.Denied.Add($@"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\{Id}\Protected\ConnInfo");
 
-        var entry = Entry(Diagnostics.TestIntune(probe, Now), "Last Sync");
+        var entry = Entry(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc), "Last Sync");
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.Equal("Not checked: needs Run as Administrator to read the sync times", entry.Detail);
         Assert.True(entry.NeedsAdmin);
-        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
+    }
+
+    [Fact]
+    public void SyncTimes_AreThePcsLocalTime()
+    {
+        // The MDM client writes local time with a Z: 10:40 on a PC at UTC-4 is 14:40 UTC
+        var zone = TimeZoneInfo.CreateCustomTimeZone("UTC-4", TimeSpan.FromHours(-4), "UTC-4", "UTC-4");
+        Assert.Equal(new DateTime(2026, 10, 23, 14, 40, 4, DateTimeKind.Utc), Diagnostics.MdmTime("20261023T104004Z", zone));
+        Assert.Null(Diagnostics.MdmTime("not a time", zone));
+
+        var entry = Entry(Diagnostics.TestIntune(Enrolled(lastSuccess: "20261023T050000Z"), Now, zone), "Last Sync");
+        Assert.Contains("(0m ago)", entry.Detail);
     }
 
     [Fact]
@@ -118,11 +129,10 @@ public class IntuneTests
         var probe = Enrolled();
         probe.Denied.Add($@"SOFTWARE\Microsoft\PolicyManager\providers\{Id}\default\Device");
 
-        var entry = Entry(Diagnostics.TestIntune(probe, Now), "Device Policies");
+        var entry = Entry(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc), "Device Policies");
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.True(entry.NeedsAdmin);
-        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Fact]
@@ -131,11 +141,10 @@ public class IntuneTests
         var probe = Enrolled();
         probe.Denied.Add(@"SOFTWARE\Microsoft\Enrollments");
 
-        var entry = Assert.Single(Diagnostics.TestIntune(probe, Now).Tests);
+        var entry = Assert.Single(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc).Tests);
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.True(entry.NeedsAdmin);
-        Assert.Contains(entry.Name, Diagnostics.AdminChecks);
     }
 
     [Fact]
@@ -144,7 +153,7 @@ public class IntuneTests
         var probe = Enrolled();
         probe.Registry[$@"SOFTWARE\Microsoft\Enrollments\{Id}"]["EnrollmentState"] = 6;
 
-        var entry = Entry(Diagnostics.TestIntune(probe, Now), "MDM Enrollment");
+        var entry = Entry(Diagnostics.TestIntune(probe, Now, TimeZoneInfo.Utc), "MDM Enrollment");
 
         Assert.Equal(Status.Warn, entry.Status);
         Assert.Contains("EnrollmentState 6", entry.Detail);

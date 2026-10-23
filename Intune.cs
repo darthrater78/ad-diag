@@ -31,7 +31,8 @@ static partial class Diagnostics
 
     public static TestGroup TestIntune(DiagConfig cfg, IProbe probe) => TestIntune(probe, DateTime.UtcNow);
 
-    internal static TestGroup TestIntune(IProbe probe, DateTime nowUtc)
+    /// <param name="zone">The zone the MDM client writes its times in; null for this PC's.</param>
+    internal static TestGroup TestIntune(IProbe probe, DateTime nowUtc, TimeZoneInfo? zone = null)
     {
         MdmEnrollment? enrollment;
         try { enrollment = ReadEnrollment(probe); }
@@ -45,7 +46,7 @@ static partial class Diagnostics
             return new(IntuneGroup, [new(MdmEnrollmentCheck, Status.Info, "Not enrolled in Intune or another MDM; the other Intune checks don't apply")]);
 
         var tests = new List<TestEntry> { EnrollmentCheck(enrollment) };
-        var state = ReadIntuneState(probe, enrollment);
+        var state = ReadIntuneState(probe, enrollment, zone);
         tests.Add(SyncCheck(state, nowUtc));
         tests.Add(ExtensionCheck(state));
         tests.Add(PoliciesCheck(state));
@@ -120,15 +121,15 @@ static partial class Diagnostics
     }
 
     /// <summary>The enrollment's sync times, the extension's service and the settings it pushed, for the device and this user.</summary>
-    internal static IntuneState ReadIntuneState(IProbe probe, MdmEnrollment enrollment)
+    internal static IntuneState ReadIntuneState(IProbe probe, MdmEnrollment enrollment, TimeZoneInfo? zone = null)
     {
         DateTime? success = null, failure = null;
         string? syncError = null;
         try
         {
             var conn = probe.RegistryValues($@"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\{enrollment.Id}\Protected\ConnInfo");
-            success = MdmTime(conn?.GetValueOrDefault("ServerLastSuccessTime"));
-            failure = MdmTime(conn?.GetValueOrDefault("ServerLastFailureTime"));
+            success = MdmTime(conn?.GetValueOrDefault("ServerLastSuccessTime"), zone);
+            failure = MdmTime(conn?.GetValueOrDefault("ServerLastFailureTime"), zone);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
         {
@@ -194,10 +195,19 @@ static partial class Diagnostics
         return text.Length > 120 ? text[..117] + "..." : text;
     }
 
-    /// <summary>An MDM client time such as "20261023T075203Z", as UTC; null if absent or unreadable.</summary>
-    internal static DateTime? MdmTime(object? value) =>
-        value is string s && DateTime.TryParseExact(s.Trim(), "yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc) ? utc : null;
+    /// <summary>
+    /// An MDM client time such as "20261023T075203Z", as UTC; null if absent or unreadable. Despite the Z the client
+    /// writes the PC's local time (seen on a real PC: a sync at 10:40 local read "…T104004Z"), so it is converted
+    /// from <paramref name="zone"/>, this PC's zone when null.
+    /// </summary>
+    internal static DateTime? MdmTime(object? value, TimeZoneInfo? zone = null)
+    {
+        if (value is not string s || !DateTime.TryParseExact(s.Trim(), "yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var local))
+            return null;
+        try { return TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), zone ?? TimeZoneInfo.Local); }
+        catch (ArgumentException) { return null; } // a time skipped by a daylight saving change
+    }
 
     /// <summary>
     /// The scheduled task the MDM client runs to sync now, the one Settings &gt; Accounts &gt; Access work or school
