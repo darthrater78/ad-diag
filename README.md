@@ -122,7 +122,7 @@ The profile decides which groups run, and which checks they make. Pick a profile
 
 | Profile | Groups | Left out |
 |---|---|---|
-| Domain joined | 1–11 | Device Auth and Primary Refresh Token rows (group 9) |
+| Domain joined | 1–10 | group 11 Intune and the Intune policies tab (Intune enrolls only Entra or hybrid joined PCs), the Device Auth and Primary Refresh Token rows (group 9) |
 | Microsoft Entra hybrid joined | 1–11 | nothing |
 | Microsoft Entra joined | 8 Dynamic DNS Registration, 9 Entra Seamless Single Sign-On, 10 Credentials & Windows Hello, 11 Intune | groups 1–7, the Domain and DC fields, the Group Policy tab, the Seamless SSO rows (group 9) |
 
@@ -253,7 +253,7 @@ How this user's sign-in credentials are held, on every profile.
 
 ### 11. Intune
 
-Whether this PC is managed by Microsoft Intune (or another MDM), on every profile, since Intune works the same however the PC is joined. Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
+Whether this PC is managed by Microsoft Intune (or another MDM), on the Microsoft Entra joined and hybrid joined profiles. The Domain joined profile leaves it out: Intune enrolls only a PC joined to Microsoft Entra ID, so a domain-only PC could only ever read "not enrolled". Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
 
 - **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown. Only an enrollment with an MDM server counts: Windows' own entries there (Local, Deploy and Cloud Authority) and the ConfigMgr bridge are on PCs that aren't in Intune too
 - **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns; a failed attempt since the last success is a note (the next sync retries it)
@@ -447,6 +447,7 @@ Newest first. Each version's section is its GitHub release notes: the release wo
 
 #### Results
 - The checks follow the profile picked, not only how the PC is joined, and keep one order on every profile.
+- The Domain joined profile leaves out Intune and its tab, since Intune enrolls only Entra or hybrid joined PCs.
 - Result details are set in Segoe UI, like the rest of the window, instead of a monospace font.
 - SMB results are drawn like the Results grid.
 

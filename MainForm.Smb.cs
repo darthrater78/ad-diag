@@ -111,7 +111,14 @@ partial class MainForm
 
         LayoutTabs();
         // A tab the mode or profile hides gives way to Results
-        SwitchTab(_tab is "gp" or "dns" or "intune" && (smb || (_tab == "gp" && entra)) ? "results" : _tab);
+        bool hidden = _tab switch
+        {
+            "gp" => smb || entra,
+            "dns" => smb,
+            "intune" => smb || _profile == JoinProfile.Domain,
+            _ => false,
+        };
+        SwitchTab(hidden ? "results" : _tab);
     }
 
     // ── The pane ──

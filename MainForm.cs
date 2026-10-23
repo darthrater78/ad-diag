@@ -1327,7 +1327,7 @@ partial class MainForm : Form
                 "  Fix: Remove them in Control Panel > Credential Manager > Windows Credentials, or 'cmdkey /delete:<target>'"),
 
             (Diagnostics.IntuneGroup,
-                "Whether this PC is managed by Microsoft Intune (or another MDM), read from the registry keys the Windows MDM client keeps. It runs on every profile, since Intune works the same however the PC is joined. Whether Intune counts the PC as compliant is decided in the service and isn't stored on the PC, so it isn't checked. The Intune policies tab lists every setting Intune pushed.\n\n" +
+                "Whether this PC is managed by Microsoft Intune (or another MDM), read from the registry keys the Windows MDM client keeps. It runs on the Entra joined and hybrid joined profiles; the Domain joined profile leaves it out, since Intune enrolls only a PC joined to Microsoft Entra ID. Whether Intune counts the PC as compliant is decided in the service and isn't stored on the PC, so it isn't checked. The Intune policies tab lists every setting Intune pushed.\n\n" +
                 "• MDM Enrollment — enrolled, and the account that enrolled the PC. Not enrolled is Info, and the other checks don't apply\n" +
                 "  Fix: Enroll from Settings > Accounts > Access work or school > Connect, or through automatic enrollment (Microsoft Entra ID > Mobility (MDM and WIP) > Microsoft Intune, MDM user scope). For an enrollment that isn't complete, read Event Viewer > Applications and Services Logs > Microsoft > Windows > DeviceManagement-Enterprise-Diagnostics-Provider > Admin\n\n" +
                 "• Last Sync — when the PC last synced with Intune. A PC that is on syncs about every 8 hours, so over a week, or a failed attempt since the last success, warns\n" +
@@ -1590,7 +1590,8 @@ partial class MainForm : Form
     {
         bool smb = _mode == TestMode.Smb, entra = _profile == JoinProfile.Entra;
         _btnTabGp.Visible = !smb && !entra;
-        _btnTabDns.Visible = _btnTabIntune.Visible = !smb;
+        _btnTabDns.Visible = !smb;
+        _btnTabIntune.Visible = !smb && _profile != JoinProfile.Domain;
         ThemedButton[] own = [_btnTabResults, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune];
         int x = S(10);
         foreach (var tab in own.Where(t => t.Visible))
@@ -3498,8 +3499,13 @@ partial class MainForm : Form
     ];
 
     /// <summary>Whether a section (or a Guide section of the same name) belongs to a profile.</summary>
-    static bool InProfile(string name, JoinProfile profile) =>
-        profile != JoinProfile.Entra || !Sections.Any(s => s.Name == name && s.DomainOnly);
+    static bool InProfile(string name, JoinProfile profile) => profile switch
+    {
+        JoinProfile.Entra => !Sections.Any(s => s.Name == name && s.DomainOnly),
+        // Intune enrolls only an Entra or hybrid joined PC; a domain-only one can only ever be "not enrolled"
+        JoinProfile.Domain => name != Diagnostics.IntuneGroup,
+        _ => true,
+    };
 
     // A heading from a run made for another profile can name a section this profile doesn't run
     bool SectionInProfile(string name)
