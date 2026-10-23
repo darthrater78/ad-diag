@@ -59,6 +59,8 @@ interface IProbe
     int? ServiceState(string name);
     /// <summary>The signed-in user's SID, under which PolicyManager keeps their settings; null if unknown.</summary>
     string? CurrentUserSid();
+    /// <summary>The TPM's major version (1 for 1.2, 2 for 2.0) from TPM Base Services; null if there is no TPM.</summary>
+    int? TpmVersion();
 }
 
 /// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
@@ -74,7 +76,11 @@ record UrlSecurity(int Zone, int Logon, int StatusBar);
 /// </param>
 record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
 enum Status { Pass, Fail, Warn, Skip, Info }
-record TestEntry(string Name, Status Status = Status.Skip, string Detail = "");
+record TestEntry(string Name, Status Status = Status.Skip, string Detail = "")
+{
+    /// <summary>The check was held back because the app isn't running as Administrator; the UI calls it out.</summary>
+    public bool NeedsAdmin { get; init; }
+}
 record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
 /// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>
 record Readiness(Status Status, string Text, bool ShowGuide);
@@ -118,7 +124,7 @@ static partial class Diagnostics
         {
             var sc = Parsers.ParseScVerify(probe.RunTool("nltest", $"/sc_verify:{cfg.Domain}", 10000, cfg.Cancel));
             return sc.AccessDenied
-                ? new("Secure Channel", Status.Skip, "Not checked: needs Run as Administrator")
+                ? new("Secure Channel", Status.Skip, "Not checked: needs Run as Administrator") { NeedsAdmin = true }
                 : new("Secure Channel", sc.Ok ? Status.Pass : Status.Fail, sc.Detail);
         }
         catch (Exception ex)
@@ -379,27 +385,30 @@ static partial class Diagnostics
         {
             string why = scopes.Count == 0 ? "Could not read Group Policy results"
                 : string.Join("; ", scopes.Select(GpScopeUnavailable));
+            bool denied = scopes.Any(s => s.State == GpScopeState.AccessDenied);
             return
             [
-                new("GP Last Refresh", Status.Skip, $"Not checked: {why}"),
-                new("Applied GPOs", Status.Skip, "No scope data available"),
-                new("Denied GPOs", Status.Skip, "No scope data available"),
+                new("GP Last Refresh", Status.Skip, $"Not checked: {why}") { NeedsAdmin = denied },
+                new("Applied GPOs", Status.Skip, "No scope data available") { NeedsAdmin = denied },
+                new("Denied GPOs", Status.Skip, "No scope data available") { NeedsAdmin = denied },
             ];
         }
 
         string scopeLabel = primary.Name;
         string elevationNote = computer?.State == GpScopeState.AccessDenied ? " (run as Administrator for Computer scope)" : "";
         int appliedCount = primary.Applied.Count;
+        // Only the user scope could be read: every row stands in for the computer's, which needs Administrator
+        bool computerDenied = elevationNote.Length > 0;
         return
         [
-            GpRefreshEntry(primary, elevationNote),
+            GpRefreshEntry(primary, elevationNote) with { NeedsAdmin = computerDenied },
             new("Applied GPOs",
                 appliedCount > 0 ? Status.Pass : Status.Warn,
                 appliedCount > 0
                     ? $"{scopeLabel}: {appliedCount} GPO(s) applied{elevationNote}"
-                    : $"{scopeLabel}: No applied GPOs found{elevationNote}"),
+                    : $"{scopeLabel}: No applied GPOs found{elevationNote}") { NeedsAdmin = computerDenied },
             new("Denied GPOs", Status.Pass,
-                $"{scopeLabel}: {primary.Denied.Count} GPO(s) filtered out (informational){elevationNote}"),
+                $"{scopeLabel}: {primary.Denied.Count} GPO(s) filtered out (informational){elevationNote}") { NeedsAdmin = computerDenied },
         ];
     }
 
@@ -440,7 +449,8 @@ static partial class Diagnostics
     }
 
     public static TestGroup TestKerberosAndTime(DiagConfig cfg, IProbe probe) => new("Kerberos & Time Sync",
-        [TgtCheck(cfg, probe), ClockSkewCheck(cfg, probe), TimeSourceCheck(cfg, probe)]);
+        [TgtCheck(cfg, probe), ClockSkewCheck(cfg, probe), TimeSourceCheck(cfg, probe),
+            .. KeyAgeChecks(probe, cfg.Domain, DateTime.UtcNow, [KrbtgtKey], cfg.Cancel)]);
 
     static TestEntry TgtCheck(DiagConfig cfg, IProbe probe)
     {

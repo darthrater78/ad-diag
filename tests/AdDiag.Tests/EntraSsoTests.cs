@@ -99,7 +99,7 @@ public class EntraSsoTests
 
         Assert.Equal("Entra Seamless Single Sign-On", group.Name);
         Assert.Equal(["Join Type", "Device Auth", "Primary Refresh Token", "Seamless SSO Ticket", "Intranet Zone",
-            "Automatic Logon", "Status Bar Scripts", "Entra Endpoints"], group.Tests.Select(t => t.Name));
+            "Automatic Logon", "Status Bar Scripts", "Seamless SSO Key", "Cloud Kerberos Key", "Entra Endpoints"], group.Tests.Select(t => t.Name));
         Assert.All(group.Tests, t => Assert.Equal(Status.Pass, t.Status));
         Assert.Contains("hybrid joined", Entry(group, "Join Type").Detail);
         Assert.Contains("tenant Contoso", Entry(group, "Join Type").Detail);

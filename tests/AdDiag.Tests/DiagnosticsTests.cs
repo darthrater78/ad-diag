@@ -16,6 +16,8 @@ public class DiagnosticsTests
         // Keyed by the start of "tool arguments"; a tool with no entry behaves as one that never answers
         public Dictionary<string, string> Tools = new();
         public List<string> ToolCalls = [];
+        // Every key set 10 days ago
+        public string KeyAges = $"KEY|AZUREADSSOACC$|{DateTime.UtcNow.AddDays(-10):o}\nKEY|krbtgt_AzureAD|{DateTime.UtcNow.AddDays(-10):o}\nKEY|krbtgt|{DateTime.UtcNow.AddDays(-10):o}";
         public string PasswordAge = $"OK|contoso.com|{DateTime.UtcNow.AddDays(-10):o}";
         public string Rsop = $"SCOPE|Computer|OK|{DateTime.UtcNow.AddHours(-1):o}|HQ\nGPO|Computer|{{A}}|1|1|1|0|1|Default Domain Policy\nGPO|Computer|{{B}}|0|1|1|1|1|Server Hardening";
         public Dictionary<string, IPAddress[]> Hosts = new(StringComparer.OrdinalIgnoreCase);
@@ -55,6 +57,7 @@ public class DiagnosticsTests
                 DnsEventQueries++;
                 return DnsEvents();
             }
+            if (script.Contains("KEY|")) return KeyAges;
             return script.Contains("pwdLastSet") ? PasswordAge : Rsop;
         }
 
@@ -127,6 +130,8 @@ public class DiagnosticsTests
 
         public int? ServiceState(string name) => Services.TryGetValue(name, out int state) ? state : null;
         public string? CurrentUserSid() => Sid;
+        public int? Tpm = 2;
+        public int? TpmVersion() => Tpm;
     }
 
     // A machine where everything works
@@ -171,7 +176,7 @@ public class DiagnosticsTests
             Diagnostics.TestGroupPolicy(Config(), probe), Diagnostics.TestTrusts(Config(), probe),
             Diagnostics.TestKerberosAndTime(Config(), probe), Diagnostics.TestDnsRegistration(Config(), probe),
         };
-        Assert.Equal(35, groups.Sum(g => g.Tests.Count));
+        Assert.Equal(36, groups.Sum(g => g.Tests.Count));
         Assert.All(groups.SelectMany(g => g.Tests), t => Assert.True(t.Status == Status.Pass, $"{t.Name}: {t.Status} — {t.Detail}"));
     }
 
@@ -208,6 +213,31 @@ public class DiagnosticsTests
         probe.Tools["nltest /sc_verify"] = nltest;
         Assert.Equal(expected, StatusOf(Diagnostics.TestDomainMembership(Config(), probe), "Secure Channel").ToString());
     }
+
+    [Theory]
+    [InlineData(Samples.NltestScVerifyAccessDenied, true)]
+    [InlineData(Samples.NltestScVerifyBroken, false)]
+    public void Membership_SecureChannelDenied_IsMarkedNeedsAdmin(string nltest, bool needsAdmin)
+    {
+        var probe = Healthy();
+        probe.Tools["nltest /sc_verify"] = nltest;
+        var group = Diagnostics.TestDomainMembership(Config(), probe);
+        Assert.Equal(needsAdmin, group.Tests.Single(t => t.Name == "Secure Channel").NeedsAdmin);
+        Assert.False(group.Tests.Single(t => t.Name == "Domain Joined").NeedsAdmin);
+    }
+
+    [Fact]
+    public void GroupPolicy_ComputerScopeDenied_MarksEveryRowNeedsAdmin()
+    {
+        var probe = new FakeProbe { Rsop = $"SCOPE|Computer|DENIED\nSCOPE|User|OK|{DateTime.UtcNow.AddHours(-1):o}|HQ\nGPO|User|{{A}}|1|1|1|0|1|Drive Maps" };
+        var group = Diagnostics.TestGroupPolicy(Config(), probe);
+        Assert.All(group.Tests, t => Assert.True(t.NeedsAdmin));
+        Assert.Equal(Status.Pass, StatusOf(group, "Applied GPOs"));
+    }
+
+    [Fact]
+    public void GroupPolicy_Elevated_MarksNothing() =>
+        Assert.All(Diagnostics.TestGroupPolicy(Config(), new FakeProbe()).Tests, t => Assert.False(t.NeedsAdmin));
 
     [Theory]
     [InlineData(10, "Pass")]

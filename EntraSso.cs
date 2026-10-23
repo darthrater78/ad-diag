@@ -72,7 +72,7 @@ static partial class Diagnostics
         bool seamless = kind is JoinKind.Hybrid or JoinKind.DomainOnly;
         var prt = PrtCheck(ds, kind.Value, nowUtc);
         bool fallbackOnly = kind == JoinKind.Hybrid && prt.Status == Status.Pass;
-        tests.AddRange(SignInChecks(cfg, probe, ds, kind.Value, prt, fallbackOnly));
+        tests.AddRange(SignInChecks(cfg, probe, ds, kind.Value, prt, fallbackOnly, nowUtc));
         tests.Add(EndpointsCheck(cfg, probe, seamless ? [LoginHost, AutologonHost] : [LoginHost]));
         return new(EntraSsoGroup, tests, SsoReadiness(tests, seamless, fallbackOnly));
     }
@@ -80,21 +80,34 @@ static partial class Diagnostics
     // The checks for how this PC signs in. One that doesn't apply to how it is joined isn't shown at all: a
     // domain-joined PC has no device authentication or PRT, an Entra joined one no Seamless SSO
     static IEnumerable<TestEntry> SignInChecks(DiagConfig cfg, IProbe probe, Dictionary<string, string> ds, JoinKind kind,
-        TestEntry prt, bool fallbackOnly)
+        TestEntry prt, bool fallbackOnly, DateTime nowUtc)
     {
         if (kind != JoinKind.DomainOnly)
         {
             yield return DeviceAuthCheck(ds, kind);
             yield return prt;
         }
+        var keys = SsoKeyChecks(cfg, probe, ds, kind, nowUtc);
         if (kind == JoinKind.EntraOnly)
         {
-            foreach (var test in EntraKerberosChecks(ds)) yield return test;
+            foreach (var test in EntraKerberosChecks(ds).Concat(keys)) yield return test;
             yield break;
         }
         var sso = new List<TestEntry> { SeamlessTicketCheck(cfg, probe) };
         sso.AddRange(BrowserZoneChecks(cfg, probe));
+        sso.AddRange(keys.Where(k => k.Name == SeamlessKeyCheck));
         foreach (var test in fallbackOnly ? sso.Select(AsFallback) : sso) yield return test;
+        foreach (var test in keys.Where(k => k.Name != SeamlessKeyCheck)) yield return test;
+    }
+
+    // The keys this PC's sign-in depends on, read in one query: Seamless SSO's where it is used, and cloud Kerberos
+    // trust's where the PC gets on-premises tickets through it
+    static List<TestEntry> SsoKeyChecks(DiagConfig cfg, IProbe probe, Dictionary<string, string> ds, JoinKind kind, DateTime nowUtc)
+    {
+        var keys = new List<(string, string, TimeSpan, string)>();
+        if (kind != JoinKind.EntraOnly) keys.Add(SeamlessKey);
+        if (Parsers.DsregFlag(ds, "OnPremTgt") == true) keys.Add(CloudKerberosKey);
+        return keys.Count == 0 ? [] : KeyAgeChecks(probe, cfg.Domain, nowUtc, keys, cfg.Cancel);
     }
 
     // A Seamless SSO problem on a PC that signs in with its PRT touches only the fallback, so it is a note

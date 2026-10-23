@@ -166,8 +166,12 @@ class MainForm : Form
     {
         ConfigureWindow();
         string appVersion = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
+        bool elevated = false;
+        try { elevated = Probe.IsElevated(); } catch (Exception) { } // unknown: shown as not elevated
+        // Windows marks an elevated window this way (as Command Prompt does), and the header says it too
+        if (elevated) Text = "Administrator: " + Text;
         var layout = BuildLayout();
-        layout.Controls.Add(BuildHeader(appVersion), 0, 0);
+        layout.Controls.Add(BuildHeader(appVersion, elevated), 0, 0);
         layout.Controls.Add(BuildConfigPanel(), 0, 1);
         layout.Controls.Add(BuildActionsPanel(), 0, 2);
         layout.Controls.Add(BuildSummaryPanel(), 0, 3);
@@ -185,8 +189,6 @@ class MainForm : Form
 
         _placeholderText = PlaceholderText;
         WireLifecycle();
-        bool elevated = false;
-        try { elevated = Probe.IsElevated(); } catch { }
         AppLog.Info("app", $"AD Diagnostics {appVersion} on {Environment.OSVersion.VersionString}, {(elevated ? "running as Administrator" : "not elevated")}");
         _ = DetectStartupAsync();
     }
@@ -227,7 +229,7 @@ class MainForm : Form
         return layout;
     }
 
-    Panel BuildHeader(string appVersion)
+    Panel BuildHeader(string appVersion, bool elevated)
     {
         // Header
         var header = new Panel { Height = 34, Dock = DockStyle.Fill };
@@ -242,14 +244,32 @@ class MainForm : Form
         _btnTheme = new ThemedButton { Text = ThemeButtonText, BackColor = SurfaceColor, ForeColor = TextColor, Font = new Font("Segoe UI", 8f), Size = new Size(84, 22), Location = new Point(0, 6) };
         _btnTheme.Click += (s, e) => SetTheme(!Dark);
         header.Controls.AddRange([lblTitle, lblTag, _btnTheme, lnkGithub, lnkRelease]);
+        var admin = elevated ? AdminIndicator() : null;
+        if (admin != null) header.Controls.Add(admin);
         header.Resize += (s, e) =>
         {
             lblTag.Left = lblTitle.Right + S(8);
+            if (admin != null) admin.Location = new Point(lblTag.Right + S(12), S(7));
             lnkRelease.Location = new Point(header.ClientSize.Width - lnkRelease.Width - S(10), S(10));
             lnkGithub.Location = new Point(lnkRelease.Left - lnkGithub.Width - S(12), S(10));
             _btnTheme.Left = lnkGithub.Left - _btnTheme.Width - S(14);
         };
         return header;
+    }
+
+    // A shield and "Running as administrator" beside the version, when the app is elevated
+    Control AdminIndicator()
+    {
+        const string text = "Running as administrator";
+        var font = new Font("Segoe UI", 8.5f);
+        var box = new Panel { Size = new Size(TextRenderer.MeasureText(text, font).Width + 22, 20), AccessibleName = text, AccessibleRole = AccessibleRole.StaticText };
+        box.Paint += (s, e) =>
+        {
+            DrawShield(e.Graphics, AccentColor, S(7), box.Height / 2f, 12);
+            TextRenderer.DrawText(e.Graphics, text, font, new Rectangle(S(16), 0, box.Width - S(16), box.Height), TextColor,
+                TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+        };
+        return box;
     }
 
     Panel BuildConfigPanel()
@@ -1152,7 +1172,9 @@ class MainForm : Form
                 "• Clock Skew — Kerberos has a strict 5-minute tolerance between client and DC\n" +
                 "  Fix: Run 'w32tm /resync'. Verify the Windows Time service (W32Time) is running and syncing from the domain hierarchy: 'w32tm /query /status'\n\n" +
                 "• Time Source — confirms this client is syncing from the domain hierarchy, not an external NTP server\n" +
-                "  Fix: Domain members should sync from the domain hierarchy automatically. If not, run 'w32tm /config /syncfromflags:domhier /update'"),
+                "  Fix: Domain members should sync from the domain hierarchy automatically. If not, run 'w32tm /config /syncfromflags:domhier /update'\n\n" +
+                "• krbtgt Key — when the domain's krbtgt key was last set (its pwdLastSet), read from AD. Older than 180 days warns: a stolen key keeps forging tickets until it is rolled over\n" +
+                "  Fix: A domain admin resets the krbtgt password twice, a day or more apart so replication and existing tickets catch up, for example with Microsoft's New-KrbtgtKeys.ps1. Never twice in quick succession: that invalidates every ticket at once"),
 
             (Diagnostics.EntraSsoGroup,
                 "Checks whether this PC signs in to Microsoft 365 and other cloud apps that use Microsoft Entra ID without asking for a password, however it is joined: domain joined, hybrid joined or Entra joined. Only this PC is checked: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated, where Seamless SSO doesn't apply.\n" +
@@ -1176,9 +1198,27 @@ class MainForm : Form
                 "  Fix: Needs Windows 10 21H2 or later with current updates. Sign out and in\n\n" +
                 "• On-premises Kerberos — Entra joined PCs: OnPremTgt YES, a ticket for AD issued through cloud Kerberos trust. Without it, file shares and printers ask for a password\n" +
                 "  Fix: The user must be synchronized from AD: in the Microsoft Entra admin center, Users > the user > On-premises sync enabled must be Yes. Once per domain, a Domain Admin who is also a Hybrid Identity Administrator creates the Microsoft Entra Kerberos server object: 'Install-Module AzureADHybridAuthenticationManagement', then 'Set-AzureADKerberosServer -Domain <domain> -UserPrincipalName <admin UPN>'. Then sign out and in on this PC\n\n" +
+                "• Seamless SSO Key — when the AZUREADSSOACC account's Kerberos decryption key was last set, read from AD (domain and hybrid joined PCs). Microsoft says to roll it over at least every 30 days; older warns\n" +
+                "  Fix: On the Microsoft Entra Connect server, as a Hybrid Identity Administrator and a domain admin: Import-Module .\\AzureADSSO.psd1, New-AzureADSSOAuthenticationContext, then Update-AzureADSSOForest -OnPremCredentials (Get-Credential)\n\n" +
+                "• Cloud Kerberos Key — when the krbtgt_AzureAD key of the Microsoft Entra Kerberos server object was last set (PCs that get on-premises tickets through cloud Kerberos trust). Older than 180 days warns\n" +
+                "  Fix: With the AzureADHybridAuthenticationManagement module, as a domain admin and Hybrid Identity Administrator: Set-AzureADKerberosServer -Domain <domain> -UserPrincipalName <admin> -RotateServerKey\n\n" +
                 "• Entra Endpoints — a direct TCP connection on port 443 to login.microsoftonline.com and, for Seamless SSO, autologon.microsoftazuread-sso.com; nothing is sent\n" +
                 "  Fix: Allow both through the firewall and proxy, and exclude them from TLS inspection. Behind a ZTNA client, check that its policy carries them. Through a proxy a warning here can be expected\n\n" +
                 "Microsoft's guides: 'Microsoft Entra seamless single sign-on: quickstart' and 'How SSO to on-premises resources works on Microsoft Entra joined devices' on learn.microsoft.com"),
+
+            (Diagnostics.CredentialsGroup,
+                "How this user's sign-in credentials are held: Windows Hello for Business, the TPM that protects its keys, the encryption of cached Kerberos tickets, and Windows credentials saved in Credential Manager. Runs on every profile. Credential Manager is read for the names of saved credentials only, never their passwords.\n\n" +
+                "• Windows Hello — whether Hello for Business is set up for this user (dsregcmd NgcSet). Not set up is Info: a password or smart card still signs in\n" +
+                "  Fix: To set it up, enable Windows Hello for Business by Group Policy (Computer Configuration > Administrative Templates > Windows Components > Windows Hello for Business) or Intune (Devices > Enrollment > Windows Hello for Business), then sign out and in\n\n" +
+                "• Hello Trust — how Hello signs in to on-premises resources: cloud Kerberos trust, certificate trust, or key trust when neither is set. On an Entra joined PC with none set, Hello reaches cloud apps only (Info)\n" +
+                "  Fix: For Entra joined PCs that need file shares and other AD resources, deploy cloud Kerberos trust: create the Microsoft Entra Kerberos server object in AD, then set Use cloud trust for on-premises authentication by Group Policy or the PassportForWork policy in Intune\n\n" +
+                "• Sign-in Methods — PIN, plus the fingerprint, face or iris enrolled for this user\n\n" +
+                "• TPM — the TPM's version, and on a PC joined to Entra ID whether the device key is protected by it (TpmProtected). No TPM, TPM 1.2, or a device key outside the TPM warns: the keys are then kept in software\n" +
+                "  Fix: Turn on the TPM (Security Device / PTT / fTPM) in the firmware settings. A device key outside the TPM is fixed by joining again: 'dsregcmd /leave' as Administrator, restart, and join\n\n" +
+                "• Ticket Encryption — cached Kerberos tickets that use RC4 instead of AES. Domain controllers hardened to AES refuse RC4, and Microsoft is retiring it\n" +
+                "  Fix: Set the service account's msDS-SupportedEncryptionTypes to AES (0x18), reset its password so AES keys exist, then purge tickets on the Kerberos tickets tab\n\n" +
+                "• Saved Credentials — Windows credentials saved in Credential Manager for servers. A saved password is used instead of the signed-in user's own sign-in, and locks the account out once the password changes\n" +
+                "  Fix: Remove them in Control Panel > Credential Manager > Windows Credentials, or 'cmdkey /delete:<target>'"),
 
             (Diagnostics.IntuneGroup,
                 "Whether this PC is managed by Microsoft Intune (or another MDM), read from the registry keys the Windows MDM client keeps. It runs on every profile, since Intune works the same however the PC is joined. Whether Intune counts the PC as compliant is decided in the service and isn't stored on the PC, so it isn't checked. The Intune policies tab lists every setting Intune pushed.\n\n" +
@@ -2576,6 +2616,7 @@ class MainForm : Form
         {
             _resultsCanvas.Rows.Clear();
             _resultsCanvas.Headings.Clear();
+            _resultsCanvas.AdminNotes.Clear();
         }
 
         // The counts column is as wide as the longest counts on show, at least NoteColumn, so a long one (a
@@ -2626,6 +2667,13 @@ class MainForm : Form
             if (!notRun && GroupVerdict(group) is { } verdict) DrawGroupBadge(g, verdict, noteX - S(12), y);
             if (!notRun) DrawChevron(g, left, y + S(8), open);
             TextRenderer.DrawText(g, group.Name, GroupHeaderFont, new Point(left + S(14), y + S(3)), notRun ? DimColor : TextColor, oneLine);
+            bool needsAdmin = !notRun && group.Tests.Any(t => t.NeedsAdmin);
+            if (needsAdmin)
+            {
+                int nameRight = left + S(14) + TextRenderer.MeasureText(g, group.Name, GroupHeaderFont, Size.Empty, oneLine).Width;
+                DrawAdminNote(g, nameRight + S(8), noteX - S(12) - BadgeWidth(g) - S(8), y);
+                note += "; some checks need Run as Administrator";
+            }
 
             var bounds = new Rectangle(left - S(4), y, right - S(RunSlot) - S(8) - (left - S(4)), S(24));
             _resultsCanvas.Rows.Add(notRun
@@ -2651,11 +2699,14 @@ class MainForm : Form
 
     // The verdict as a pill ending at right: PASSED, WARNING or FAILED in the status colour on a tint of it, all the
     // same width so they line up
+    int BadgeWidth(Graphics g) =>
+        TextRenderer.MeasureText(g, "WARNING", BadgeFont, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width + S(16);
+
     void DrawGroupBadge(Graphics g, Status verdict, int right, int y)
     {
         var (word, color) = StatusLook(new TestEntry("", verdict, "-"));
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
-        int w = TextRenderer.MeasureText(g, "WARNING", BadgeFont, Size.Empty, flags).Width + S(16);
+        int w = BadgeWidth(g);
         var pill = new Rectangle(right - w, y + S(4), w, S(16));
         FillRounded(g, pill, S(8), Blend(PanelColor, color, 0.16));
         TextRenderer.DrawText(g, word.ToUpperInvariant(), BadgeFont, pill, color,
@@ -2682,6 +2733,47 @@ class MainForm : Form
         int textX = r.X + S(26);
         TextRenderer.DrawText(g, notRun ? "Run" : "Run again", RunTextFont, new Rectangle(textX, r.Y, r.Right - textX, r.Height), color,
             TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+    }
+
+    const string AdminNoteText = "Needs admin";
+    const string AdminNoteTip = "Some checks here need the app run as Administrator. Close it, right-click ad-diag.exe and choose Run as administrator.";
+
+    // A capsule like the verdict pills, in the warning colour, right-aligned to end at maxRight: a shield and "Needs
+    // admin", or the shield alone when the group's name leaves no room for the words
+    void DrawAdminNote(Graphics g, int minLeft, int maxRight, int y)
+    {
+        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+        int textW = TextRenderer.MeasureText(g, AdminNoteText, BadgeFont, Size.Empty, flags).Width;
+        int full = S(8) + S(10) + S(5) + textW + S(8), compact = S(24);
+        int w = maxRight - full >= minLeft ? full : compact;
+        if (maxRight - w < minLeft) return; // no room at all on a very narrow window; the rows still carry the shield
+        var r = new Rectangle(maxRight - w, y + S(4), w, S(16));
+        FillRounded(g, r, S(8), Blend(PanelColor, WarnColor, 0.16));
+        DrawShield(g, WarnColor, w == compact ? r.X + r.Width / 2f : r.X + S(13), r.Y + r.Height / 2f, 10);
+        if (w == full)
+            TextRenderer.DrawText(g, AdminNoteText, BadgeFont, new Rectangle(r.X + S(23), r.Y, textW + S(2), r.Height), WarnColor,
+                flags | TextFormatFlags.VerticalCenter);
+        _resultsCanvas.AdminNotes.Add(r);
+    }
+
+    // A shield size px tall, centred on (cx, cy): flat top, straight sides, a point at the bottom
+    void DrawShield(Graphics g, Color color, float cx, float cy, int size)
+    {
+        float u = DeviceDpi / 96f, h = size * u, w = h * 0.8f, top = cy - h / 2;
+        var smooth = g.SmoothingMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+        using (var brush = new SolidBrush(color))
+        {
+            path.AddLine(cx - w / 2, top + h * 0.12f, cx, top);
+            path.AddLine(cx, top, cx + w / 2, top + h * 0.12f);
+            path.AddLine(cx + w / 2, top + h * 0.12f, cx + w / 2, top + h * 0.5f);
+            path.AddBezier(cx + w / 2, top + h * 0.5f, cx + w / 2, top + h * 0.78f, cx + w * 0.2f, top + h * 0.92f, cx, top + h);
+            path.AddBezier(cx, top + h, cx - w * 0.2f, top + h * 0.92f, cx - w / 2, top + h * 0.78f, cx - w / 2, top + h * 0.5f);
+            path.CloseFigure();
+            g.FillPath(brush, path);
+        }
+        g.SmoothingMode = smooth;
     }
 
     // A lightning bolt 12px tall, centred on (cx, cy)
@@ -2720,14 +2812,22 @@ class MainForm : Form
             g.DrawLine(RowLinePen, left, y, right, y);
             DrawStatusMark(g, test, left, y + S(8));
             TextRenderer.DrawText(g, word, StatusFont, new Point(left + S(15), y + S(5)), color, TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, test.Name, TestNameFont,
-                new Rectangle(S(NameX), y + S(4), S(DetailX - NameX - 6), S(18)), TextColor,
-                TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            // A check held back for want of Administrator has a shield after its name
+            int nameW = S(DetailX - NameX - 6) - (test.NeedsAdmin ? S(14) : 0);
+            const TextFormatFlags nameFlags = TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
+            TextRenderer.DrawText(g, test.Name, TestNameFont, new Rectangle(S(NameX), y + S(4), nameW, S(18)), TextColor, nameFlags);
+            if (test.NeedsAdmin)
+            {
+                int drawn = Math.Min(nameW, TextRenderer.MeasureText(g, test.Name, TestNameFont, Size.Empty,
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Width);
+                DrawShield(g, WarnColor, S(NameX) + drawn + S(8), y + S(12), 10);
+            }
             // The detail is plain text: the mark and word carry the status, so a long line stays readable
             TextRenderer.DrawText(g, test.Detail, TestDetailFont,
                 new Rectangle(S(DetailX), y + S(5), detailW, detailSize.Height),
                 test.Status == Status.Skip ? DimColor : TextColor, DetailTextFlags);
-            _resultsCanvas.Rows.Add(new(group, test.Name, word, test.Detail, new Rectangle(left, y + S(4), right - left, rowHeight)));
+            _resultsCanvas.Rows.Add(new(group, test.Name, word, test.Detail + (test.NeedsAdmin ? " (needs Run as Administrator)" : ""),
+                new Rectangle(left, y + S(4), right - left, rowHeight)));
         }
         return y + S(4) + rowHeight;
     }
@@ -2842,6 +2942,8 @@ class MainForm : Form
 
         public readonly List<Row> Rows = [];
         public readonly List<(string Group, Rectangle Band)> Headings = []; // each heading's full width, for hover
+        public readonly List<Rectangle> AdminNotes = [];                     // "Needs admin" capsules, for their tooltip
+        bool _onAdminNote;
         public string? HoverGroup { get; private set; }  // the group whose heading is under the mouse
         public bool HoverButton { get; private set; }    // the mouse is over that heading's Run button
         readonly ToolTip _tip = new();                   // names the Run button under the mouse
@@ -2885,6 +2987,12 @@ class MainForm : Form
             Cursor = i >= 0 && Rows[i].Kind == Kind.GuideLink ? Cursors.Hand : Cursors.Default;
             string? group = Headings.Find(h => h.Band.Contains(e.Location)).Group;
             bool onButton = i >= 0 && Rows[i].Kind == Kind.RunLink;
+            bool onAdmin = !onButton && AdminNotes.Any(r => r.Contains(e.Location));
+            if (onAdmin != _onAdminNote)
+            {
+                _onAdminNote = onAdmin;
+                _tip.SetToolTip(this, onAdmin ? AdminNoteTip : null);
+            }
             if (group != HoverGroup || onButton != HoverButton)
             {
                 if (onButton != HoverButton) _tip.SetToolTip(this, onButton ? Rows[i].Name : null);
@@ -2897,7 +3005,8 @@ class MainForm : Form
         {
             base.OnMouseLeave(e);
             if (HoverGroup == null) return;
-            if (HoverButton) _tip.SetToolTip(this, null);
+            if (HoverButton || _onAdminNote) _tip.SetToolTip(this, null);
+            _onAdminNote = false;
             (HoverGroup, HoverButton) = (null, false);
             Invalidate();
         }
@@ -3045,6 +3154,7 @@ class MainForm : Form
         ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime, true),
         ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration, false),
         (Diagnostics.EntraSsoGroup, "Seamless SSO", Diagnostics.TestEntraSso, false),
+        (Diagnostics.CredentialsGroup, "Credentials", Diagnostics.TestCredentials, false),
         (Diagnostics.IntuneGroup, "Intune", Diagnostics.TestIntune, false),
     ];
 
@@ -3066,7 +3176,8 @@ class MainForm : Form
     /// <summary>The domain and DC from the fields, or null (with the reason in the status line) when they're invalid.</summary>
     (string Domain, string Dc)? ReadTarget()
     {
-        if (_profile == JoinProfile.Entra) return ("", ""); // nothing on this profile needs a domain
+        // An Entra joined PC has no domain field; its key checks ask the domain the user's Kerberos realm names, if any
+        if (_profile == JoinProfile.Entra) return (EntraRealm(), "");
         string domain = _txtDomain.Text.Trim();
         string dc = _txtDc.Text.Trim();
         if (_chkDcSuffix.Checked && !string.IsNullOrEmpty(domain) && !dc.Contains('.'))
@@ -3079,6 +3190,12 @@ class MainForm : Form
         if (error == null) return (domain, dc);
         _lblStatus.Text = error;
         return null;
+    }
+
+    static string EntraRealm()
+    {
+        string realm = Environment.GetEnvironmentVariable("USERDNSDOMAIN")?.Trim().ToLowerInvariant() ?? "";
+        return HostnamePattern.IsMatch(realm) ? realm : "";
     }
 
     /// <summary>Marks a run as started or ended: while one runs, nothing else can start and nothing is exported.</summary>
@@ -3185,7 +3302,7 @@ class MainForm : Form
             RebuildHistoryBar();
         }
         run.NotRun.Remove(name);
-        run.Open.Remove(name); // its new results open or close by the default rule
+        run.Open[name] = true; // a group run on its own opens to show its new results, or stays open
 
         var config = new DiagConfig(domain, dc, cts.Token, _ztnaAdapter);
         if (!await RunSections(run, [name], config, cts)) return;
@@ -3553,7 +3670,7 @@ class MainForm : Form
                 new("Domain Trusts"),
             ]),
             new("Kerberos & Time Sync", [
-                new("TGT Present"), new("Clock Skew"), new("Time Source"),
+                new("TGT Present"), new("Clock Skew"), new("Time Source"), new(Diagnostics.KrbtgtKeyCheck),
             ]),
             new("Dynamic DNS Registration", [
                 new("Registration Name"), new("ZTNA / VPN Client"), new("Registering Adapters"),
@@ -3566,6 +3683,10 @@ class MainForm : Form
                     ? [new(Diagnostics.SsoCloudTgt), new(Diagnostics.SsoOnPremTgt)]
                     : new TestEntry[] { new(Diagnostics.SsoTicket), new(Diagnostics.SsoZone), new(Diagnostics.SsoLogon), new(Diagnostics.SsoStatusBar) },
                 new(Diagnostics.SsoEndpoints),
+            ]),
+            new(Diagnostics.CredentialsGroup, [
+                new(Diagnostics.HelloCheck), new(Diagnostics.TpmCheck),
+                new(Diagnostics.TicketEncryptionCheck), new(Diagnostics.SavedCredentialsCheck),
             ]),
             new(Diagnostics.IntuneGroup, [
                 new(Diagnostics.MdmEnrollmentCheck), new(Diagnostics.MdmSyncCheck),
@@ -3686,11 +3807,33 @@ class MainForm : Form
 
         public int? ServiceState(string name) => QueryServiceState(name);
 
+        public int? TpmVersion() => QueryTpmVersion();
+
         public string? CurrentUserSid()
         {
             using var id = WindowsIdentity.GetCurrent();
             return id.User?.Value;
         }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct TbsDeviceInfo
+    {
+        public uint StructVersion, TpmVersion, TpmInterfaceType, TpmImpRevision;
+    }
+
+    [DllImport("tbs.dll")]
+    static extern uint Tbsi_GetDeviceInfo(uint size, out TbsDeviceInfo info);
+
+    const uint TbsSuccess = 0, TbsTpmNotFound = 0x8028400F;
+
+    /// <summary>The TPM's major version from TPM Base Services, which any user may ask; null if there is none.</summary>
+    static int? QueryTpmVersion()
+    {
+        uint result = Tbsi_GetDeviceInfo((uint)Marshal.SizeOf<TbsDeviceInfo>(), out var info);
+        if (result == TbsTpmNotFound) return null;
+        if (result != TbsSuccess) throw new System.ComponentModel.Win32Exception((int)result, $"TPM Base Services error 0x{result:x8}");
+        return info.TpmVersion switch { 1 => 1, 2 => 2, _ => (int)info.TpmVersion };
     }
 
     const uint ScManagerConnect = 0x0001, ServiceQueryStatus = 0x0004;

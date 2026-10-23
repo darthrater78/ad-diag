@@ -37,7 +37,7 @@ static partial class Diagnostics
         try { enrollment = ReadEnrollment(probe); }
         catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
         {
-            return new(IntuneGroup, [new(MdmEnrollmentCheck, Status.Skip, "Not checked: needs Run as Administrator to read the enrollment")]);
+            return new(IntuneGroup, [new(MdmEnrollmentCheck, Status.Skip, "Not checked: needs Run as Administrator to read the enrollment") { NeedsAdmin = true }]);
         }
 
         // Not enrolled: the other checks don't apply, so they aren't shown
@@ -63,7 +63,7 @@ static partial class Diagnostics
     static TestEntry SyncCheck(IntuneState s, DateTime nowUtc)
     {
         if (s.SyncError is { } error)
-            return new(MdmSyncCheck, Status.Skip, $"Not checked: {error}");
+            return new(MdmSyncCheck, Status.Skip, $"Not checked: {error}") { NeedsAdmin = true };
         if (s.LastSuccess is not { } success)
             return new(MdmSyncCheck, Status.Skip, "Not checked: Windows has no successful sync recorded");
 
@@ -89,7 +89,7 @@ static partial class Diagnostics
     static TestEntry PoliciesCheck(IntuneState s)
     {
         if (s.PolicyError is { } error)
-            return new(MdmPoliciesCheck, Status.Skip, $"Not checked: {error}");
+            return new(MdmPoliciesCheck, Status.Skip, $"Not checked: {error}") { NeedsAdmin = true };
         var won = s.Device.Where(p => p.ProviderWins).ToList();
         if (s.Device.Count == 0)
             return new(MdmPoliciesCheck, Status.Info, "No device settings from Intune yet");

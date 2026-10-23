@@ -48,6 +48,9 @@ static class Shots
 
     static void CaptureAll(MainForm form, string outDir)
     {
+        // Wine runs everything as Administrator; the screenshots show the usual unelevated app
+        form.Text = "AD Diagnostics";
+        foreach (var c in AllControls(form).Where(c => c.AccessibleName == "Running as administrator")) c.Visible = false;
         Pump(800);
         Populate(form);
         // Tall enough for the two groups opened below
@@ -56,7 +59,7 @@ static class Shots
         // Groups start closed; open two as a user would, to show their checks
         var shown = (DiagRun)form.GetType().GetProperty("SelectedRun", F)!.GetValue(form)!;
         shown.Open["DC Discovery & Connectivity"] = true;
-        shown.Open[Diagnostics.EntraSsoGroup] = true;
+        shown.Open["Group Policy"] = true;
         Call(form, "RerenderResults");
         Pump(300);
         // Put the pointer on one heading's run button to show its hover state
@@ -138,7 +141,7 @@ static class Shots
         var entraHistory = Get<List<DiagRun>>(form, "_runHistory");
         var entraRun = new DiagRun(DateTime.Now, "", "", MockEntraResults(DateTime.Now)) { Profile = JoinProfile.Entra };
         entraRun.Open[Diagnostics.EntraSsoGroup] = true;
-        entraRun.Open[Diagnostics.IntuneGroup] = true;
+        entraRun.Open[Diagnostics.CredentialsGroup] = true;
         entraHistory.Insert(0, entraRun);
         Set(form, "_selectedRunIndex", 0);
         Call(form, "SwitchTab", "results");
@@ -237,6 +240,9 @@ static class Shots
         DiagLog.Block = null;
     }
 
+    static IEnumerable<Control> AllControls(Control root) =>
+        root.Controls.Cast<Control>().SelectMany(c => AllControls(c).Prepend(c));
+
     static void FrontFill(Control fill)
     {
         fill.BringToFront();
@@ -322,9 +328,10 @@ static class Shots
             ]),
             new("Group Policy",
             [
-                new("GP Last Refresh", Status.Pass, $"Computer: {gpTime} (1h 12m ago)"),
-                new("Applied GPOs", Status.Pass, "Computer: 5 GPO(s) applied"),
-                new("Denied GPOs", Status.Pass, "Computer: 2 GPO(s) filtered out (informational)"),
+                // Not elevated, so only the user scope could be read
+                new("GP Last Refresh", Status.Pass, $"User: {gpTime} (1h 12m ago) (run as Administrator for Computer scope)") { NeedsAdmin = true },
+                new("Applied GPOs", Status.Pass, "User: 3 GPO(s) applied (run as Administrator for Computer scope)") { NeedsAdmin = true },
+                new("Denied GPOs", Status.Pass, "User: 1 GPO(s) filtered out (informational) (run as Administrator for Computer scope)") { NeedsAdmin = true },
             ]),
             new("Trust Relationships",
             [
@@ -337,6 +344,7 @@ static class Shots
                     ? new("Clock Skew", Status.Warn, $"74.31s drift from {dc}")
                     : new("Clock Skew", Status.Pass, $"0.04s drift from {dc}"),
                 new("Time Source", Status.Pass, dc),
+                new("krbtgt Key", Status.Pass, $"krbtgt key last set {now.AddDays(-96):d} (96d ago)"),
             ]),
             new("Dynamic DNS Registration",
             [
@@ -359,8 +367,18 @@ static class Shots
                 new("Intranet Zone", Status.Fail, "https://autologon.microsoftazuread-sso.com is in the Internet zone, not Local intranet: browsers and apps that follow the Windows zones won't send it a Kerberos ticket, so Seamless SSO can't sign them in"),
                 new("Automatic Logon", Status.Skip, "Depends on the Intranet Zone check"),
                 new("Status Bar Scripts", Status.Skip, "Depends on the Intranet Zone check"),
+                new("Seamless SSO Key", Status.Warn, $"AZUREADSSOACC$ key last set {now.AddDays(-212):d} (212d ago); roll it over at least every 30 days (Update-AzureADSSOForest)"),
                 new("Entra Endpoints", Status.Pass, "login.microsoftonline.com and autologon.microsoftazuread-sso.com reachable on port 443"),
             ], new Readiness(Status.Fail, "Not ready for Seamless SSO.", true)),
+            new(Diagnostics.CredentialsGroup,
+            [
+                new("Windows Hello", Status.Pass, "Set up for this user (NgcSet: YES)"),
+                new("Hello Trust", Status.Pass, "Cloud Kerberos trust, set by Group Policy"),
+                new("Sign-in Methods", Status.Pass, "PIN, fingerprint"),
+                new("TPM", Status.Pass, "TPM 2.0; the device key is protected by it (TpmProtected: YES)"),
+                new("Ticket Encryption", Status.Warn, "RC4 on MSSQLSvc/sql01.contoso.com:1433; set the accounts to AES (msDS-SupportedEncryptionTypes)"),
+                new("Saved Credentials", Status.Pass, "No saved Windows credentials for servers"),
+            ]),
             new(Diagnostics.IntuneGroup,
             [
                 new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),
@@ -391,8 +409,18 @@ static class Shots
             new("Primary Refresh Token", Status.Pass, $"AzureAdPrt: YES, renewed {now.AddHours(-3):g} (3h 0m ago)"),
             new("Cloud Kerberos", Status.Pass, "CloudTgt: YES, a Microsoft Entra Kerberos ticket for Azure Files and other cloud resources"),
             new("On-premises Kerberos", Status.Pass, "OnPremTgt: YES, a ticket for AD resources through cloud Kerberos trust"),
+            new("Cloud Kerberos Key", Status.Pass, $"krbtgt_AzureAD key last set {now.AddDays(-41):d} (41d ago)"),
             new("Entra Endpoints", Status.Pass, "login.microsoftonline.com reachable on port 443"),
         ], new Readiness(Status.Pass, "Ready for single sign-on.", false)),
+        new(Diagnostics.CredentialsGroup,
+        [
+            new("Windows Hello", Status.Pass, "Set up for this user (NgcSet: YES)"),
+            new("Hello Trust", Status.Pass, "Cloud Kerberos trust, set by Intune"),
+            new("Sign-in Methods", Status.Pass, "PIN, face"),
+            new("TPM", Status.Pass, "TPM 2.0; the device key is protected by it (TpmProtected: YES)"),
+            new("Ticket Encryption", Status.Pass, "All 3 cached tickets use AES"),
+            new("Saved Credentials", Status.Warn, "1 saved Windows credential (fs01.contoso.com); a saved password replaces single sign-on there and locks the account out once it goes stale"),
+        ]),
         new(Diagnostics.IntuneGroup,
         [
             new("MDM Enrollment", Status.Pass, "Enrolled in Microsoft Intune as jdoe@contoso.com"),

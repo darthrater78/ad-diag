@@ -40,7 +40,7 @@ On first launch, Windows SmartScreen may display a warning ("Windows protected y
    On the other profiles the app auto-detects the current domain (from `USERDNSDOMAIN`, `dsregcmd /status`, or the machine's DNS domain suffix) and pre-fills the **Domain** field. Enter target details:
    - **Domain** — e.g. `contoso.com`
    - **DC Hostname** — optional, defaults to domain for DC discovery. **+ domain suffix** is on by default, auto-appending the domain to short names. Uncheck to use the value as-is.
-3. Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or click **Run again** at the right of its heading in Results (**Run** on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
+3. Click **Run Diagnostics** — results stream in as each test group completes. To run one group on its own, pick it from the arrow next to the button, or click **Run again** at the right of its heading in Results (**Run** on a group that hasn't run; with the keyboard, move to a heading and press Down to reach it). For the same domain and DC as the run on show, its results replace that group there, and the group opens to show them (or stays open) and its heading shows when it ran ("run at 14:32:05"); otherwise it starts a new run where the other groups show **Not run** until you run them. One run goes at a time
 
    ![The Run button's menu over a run started from one group, the others not run yet](docs/screenshots/run-menu.png)
 
@@ -64,6 +64,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Encryption at rest: not needed, since nothing is stored.** No settings file, cache or credential store exists to encrypt; the only files are the ones you save yourself, as plain text you chose to write.
 - **Nothing is written to disk.** The app stores no settings, credentials, tokens, or diagnostic data on disk. All state exists only in memory for the current session. The only files it writes are the ones you save yourself: **Export results** and **Save log**.
 - **Two connections leave the corporate network, and they send nothing.** The Entra Seamless Single Sign-On group opens a TCP connection on port 443 to `login.microsoftonline.com` and, on a domain-joined or hybrid joined PC, `autologon.microsoftazuread-sso.com`, then closes it: no TLS handshake, no request, no account name. Everything else the app contacts is your own DNS servers and domain controllers.
+- **Saved credentials are listed by name only.** `cmdkey /list` gives the targets of saved Windows credentials; the app never asks Credential Manager for a password.
 - **Intune details are read, never changed.** The Intune group and tab read the registry keys the Windows MDM client keeps (`HKLM\SOFTWARE\Microsoft\Enrollments`, `Provisioning\OMADM`, `PolicyManager`), opened read-only, and ask the service manager for one service's state with query rights only. Policy values can name internal hosts or groups; they stay in memory like everything else.
 - **Exported reports contain only metadata.** The text export includes test names and diagnostic details (trust names, GPO counts, port status). No raw tokens, password hashes, or credential material is included.
 - **External process output is not persisted.** Output from `dsregcmd`, `nltest`, `klist`, `w32tm`, PowerShell queries, and other tools is parsed in memory for specific values only. The raw output is never written to disk, and is kept only while **Debug** is ticked on the Log tab (see below).
@@ -76,13 +77,15 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 - **Every network call has a deadline.** DNS lookups (8s), SRV, SOA and host record queries (8s), TCP port checks (3s), share access (20s) and reading the Internet settings (5s) are bounded by the app, since Windows gives them no usable timeout. SYSVOL and NETLOGON are opened only after port 445 answers, so an unreachable domain fails in seconds. Clearing results or closing the app cancels a run: its tools are killed and no further ones start.
 - **Input validation on all fields.** Domain and DC fields are validated against `^[a-zA-Z0-9.\-]+$`. No user input is passed to shell commands without validation.
 - **No shell execution for diagnostics.** All external processes are launched with `UseShellExecute = false` and `CreateNoWindow = true`, and killed on timeout (a timeout is reported as a failure, never as a partial result).
-- **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
+- **No planted binaries.** Windows tools are launched by their full path in System32, and native DLLs (`dnsapi`, `netapi32`, `kernel32`, `advapi32`, `tbs`, `urlmon`, `user32`) load only from System32, so a `klist.exe` or DLL placed next to a downloaded `ad-diag.exe` is never run, even when the app is elevated.
 - **Links open unelevated.** The GitHub and Release Notes links accept only `https` URLs and open through `explorer.exe`, so the browser runs at the desktop's integrity level, never with the app's admin token.
 
 ### Changes
 
 Newest first. Dates are when the change was made; unreleased changes ship in the next version.
 
+- **2026-10-23 (unreleased):** the key rollover checks read three accounts' `pwdLastSet` from AD with a fixed query; the only thing put into it is the domain, and only once it is a plain DNS name.
+- **2026-10-23 (unreleased):** the Credentials & Windows Hello group reads the Hello policy and the user's biometric enrollment from the registry read-only, the TPM's version from TPM Base Services (which any user may ask), and only the target names of saved credentials from `cmdkey /list`, never their passwords.
 - **2026-10-23 (unreleased):** the Intune group and tab read the MDM client's registry keys read-only, and query one service's state with query rights only; the one new action that changes something, **Sync now**, asks first and starts Windows' own sync task, its path built only from the enrollment's GUID. The Kerberos tickets and Intune panes no longer turn URLs into links, so a policy value can't become something to click.
 - **2026-10-22 (unreleased):** the Internet-settings query for the Seamless SSO checks passed a buffer the wrong way to the Windows URL security manager, which could crash the app with memory corruption; it now passes a plain integer.
 - **v1.2.0, 2026-10-05:** every network call has a deadline, and every tool runs in a kill-on-close job object, so an unreachable domain can't hang the app and no tool outlives it.
@@ -100,15 +103,17 @@ Each check ends in one of five results:
 
 A group's heading shows the worst of its checks: **FAILED**, **WARNING** or **PASSED** (Info and Skipped don't lower it).
 
+**Run as Administrator:** a few checks read more as Administrator: the secure channel, the computer half of Group Policy, Intune's sync times and policy settings, and possibly the Hello policy and biometric enrollment. When the app isn't elevated and one of them was held back, its row has a shield after its name and its group's heading a **Needs admin** capsule (hover it for how to elevate). When the app is elevated, the title bar reads "Administrator: AD Diagnostics" and the header shows **Running as administrator**.
+
 ### Profiles
 
 The profile decides which groups run. A check that doesn't apply to how the PC is joined isn't shown or logged at all, rather than showing as skipped.
 
 | Profile | Groups | Left out |
 |---|---|---|
-| Domain joined | 1–10 | Device Auth and Primary Refresh Token rows (group 9) |
-| Microsoft Entra hybrid joined | 1–10 | nothing |
-| Microsoft Entra joined | 8 Dynamic DNS Registration, 9 Entra Seamless Single Sign-On, 10 Intune | groups 1–7, the Domain and DC fields, the Group Policy tab, the Seamless SSO rows (group 9) |
+| Domain joined | 1–11 | Device Auth and Primary Refresh Token rows (group 9) |
+| Microsoft Entra hybrid joined | 1–11 | nothing |
+| Microsoft Entra joined | 8 Dynamic DNS Registration, 9 Entra Seamless Single Sign-On, 10 Credentials & Windows Hello, 11 Intune | groups 1–7, the Domain and DC fields, the Group Policy tab, the Seamless SSO rows (group 9) |
 
 Dynamic DNS Registration stays on every profile: behind a ZTNA client an Entra joined PC's registration matters as much as a domain-joined one's.
 
@@ -170,6 +175,7 @@ Reads the Resultant Set of Policy logging data from WMI (`root\rsop`), the same 
 - **TGT Present** — checks for a cached `krbtgt/REALM` ticket; if none is cached (e.g. in an elevated session, which has its own empty cache), requests one with `klist get` — either way proving KDC contact
 - **Clock Skew** — measured via `w32tm` against the DC; Kerberos has a strict 5-minute tolerance
 - **Time Source** — confirms the client is syncing from the domain hierarchy, not local CMOS
+- **krbtgt Key** — when the domain's krbtgt key was last set (`pwdLastSet`, read from AD); older than 180 days warns, since a common practice is rolling it over (twice, a day apart) at least that often
 
 ### 8. Dynamic DNS Registration
 
@@ -211,11 +217,27 @@ Microsoft Entra joined PCs (no Seamless SSO, so its rows aren't shown):
 
 Both:
 
+Key rollover, read from AD (each account's `pwdLastSet`; any domain user can read it):
+
+- **Seamless SSO Key** — the `AZUREADSSOACC` account's Kerberos decryption key (domain and hybrid joined PCs). Microsoft says to roll it over at least every 30 days (`Update-AzureADSSOForest`); older warns
+- **Cloud Kerberos Key** — the `krbtgt_AzureAD` key of the Microsoft Entra Kerberos server object, where the PC gets on-premises tickets through cloud Kerberos trust (`OnPremTgt: YES`); older than 180 days warns (`Set-AzureADKerberosServer -RotateServerKey`). An Entra joined PC asks the domain of the user's Kerberos realm (`USERDNSDOMAIN`)
+
 - **Entra Endpoints** — a TCP connection on port 443 to `login.microsoftonline.com` (and `autologon.microsoftazuread-sso.com` for Seamless SSO). Nothing is sent. A miss warns rather than fails, since a proxy may still carry the traffic
 
 ![Guide tab opened at the Entra Seamless Single Sign-On fixes](docs/screenshots/guide-sso.png)
 
-### 10. Intune
+### 10. Credentials & Windows Hello
+
+How this user's sign-in credentials are held, on every profile.
+
+- **Windows Hello** — whether Hello for Business is set up for this user (`NgcSet` in `dsregcmd /status`); not set up is Info
+- **Hello Trust** — how Hello signs in to on-premises resources: cloud Kerberos trust or certificate trust, set by Group Policy or Intune, or key trust when neither is. On an Entra joined PC with none set, Hello reaches cloud apps only (Info). Shown only when Hello is set up
+- **Sign-in Methods** — PIN, and the fingerprint, face or iris enrolled for this user. Shown only when Hello is set up
+- **TPM** — the TPM's version from TPM Base Services and, on a PC joined to Entra ID, whether the device key is protected by it (`TpmProtected`). No TPM or TPM 1.2 on such a PC, or a device key outside the TPM, warns
+- **Ticket Encryption** — warns when a cached Kerberos ticket uses RC4 instead of AES, naming the services
+- **Saved Credentials** — Windows credentials saved in Credential Manager for servers (`cmdkey /list`, names only, never passwords), which replace single sign-on there and lock the account out once the password changes
+
+### 11. Intune
 
 Whether this PC is managed by Microsoft Intune (or another MDM), on every profile, since Intune works the same however the PC is joined. Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
 
@@ -298,7 +320,7 @@ What the app did and what came back. **Sections** (the default) groups it by run
 
 **Runtime:** .NET 10 WinForms, self-contained single-file executable (win-x64, ReadyToRun-precompiled for faster startup).
 
-**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs`, `DnsRegistration.cs`, `EntraSso.cs` and `Intune.cs` hold the ten test groups and the traced DNS registration, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
+**Structure:** `MainForm.cs` holds the UI and the Windows-specific calls; `Diagnostics.cs`, `DnsRegistration.cs`, `EntraSso.cs`, `Credentials.cs` and `Intune.cs` hold the eleven test groups and the traced DNS registration, which reach the machine only through the `IProbe` interface so they can be tested against a fake; `Log.cs` holds the in-memory log and the wrapper that logs every `IProbe` call; `Runner.cs` runs tools and network calls with deadlines; `Parsers.cs` holds the pure parsers for tool output (`klist`, `nltest`, `w32tm`, and the app's PowerShell queries), kept free of WinForms so they can be unit tested on any platform.
 
 **UI:** Owner-drawn `Panel` with `TextRenderer.MeasureText` for word-wrapped results. Starts in the Windows light or dark app setting; the header button switches between **Dark mode** and the light theme, **Flashbang**, at any time (the choice is not saved, since the app writes nothing to disk). Scales with the display DPI; every status has its own shape as well as its own colour, and each result row is exposed to screen readers as a list item. The design rules are in [DESIGN.md](DESIGN.md). Test groups stream results in real-time as each completes.
 
@@ -325,10 +347,11 @@ What the app did and what came back. **Sections** (the default) groups it by run
 | `klist purge` | Purge cached tickets (Kerberos Tickets tab) | 5s |
 | `w32tm /stripchart` | Clock skew measurement | 5s |
 | `w32tm /query /source` | Time source | 5s |
-| `powershell` (DirectorySearcher) | Computer password age from AD | 15s |
+| `powershell` (DirectorySearcher) | Computer password age from AD; key ages of `AZUREADSSOACC`, `krbtgt_AzureAD` and `krbtgt` | 15s / 20s |
 | `powershell` (Get-CimInstance, `root\rsop`) | Group Policy results (diagnostics + tab) | 25s |
 | `powershell` (Get-WinEvent, System log) | DNS Client registration failures (diagnostics + DNS registration tab) | 15s |
 | `ipconfig /registerdns` | Register in DNS (DNS registration tab) | 20s |
+| `cmdkey /list` | Names of saved Windows credentials (Credentials & Windows Hello) | 15s |
 | `powershell` (Start-ScheduledTask, `PushLaunch`) | Start an Intune sync (Intune policies tab, **Sync now**) | 30s |
 
 All launched with `CreateNoWindow`, `UseShellExecute=false`, redirected stdout/stderr, and stdin closed (so a tool that prompts gets EOF instead of hanging). On timeout the process tree is killed and the test reports the timeout; the same deadline covers a tool that exits but leaves its output pipe open.

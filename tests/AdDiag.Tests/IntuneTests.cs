@@ -108,6 +108,7 @@ public class IntuneTests
 
         Assert.Equal(Status.Skip, entry.Status);
         Assert.Equal("Not checked: needs Run as Administrator to read the sync times", entry.Detail);
+        Assert.True(entry.NeedsAdmin);
     }
 
     [Fact]

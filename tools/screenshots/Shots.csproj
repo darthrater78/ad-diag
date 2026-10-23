@@ -24,6 +24,8 @@
     <Compile Include="../../DnsRegistration.cs" />
     <Compile Include="../../EntraSso.cs" />
     <Compile Include="../../Intune.cs" />
+    <Compile Include="../../Credentials.cs" />
+    <Compile Include="../../KdcKeys.cs" />
     <Compile Include="../../Log.cs" />
   </ItemGroup>
 </Project>
