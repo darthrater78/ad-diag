@@ -104,7 +104,31 @@ public class DnsRegistrationTests
         Assert.Equal(Status.Skip, StatusOf(group, "Registering Adapters"));
         Assert.DoesNotContain("Behind the ZTNA client", DetailOf(group, "Registering Adapters"));
         Assert.DoesNotContain(group.Tests, t => t.Status == Status.Pass && t.Name != "Registration Errors");
+        Assert.EndsWith("\n3fff:: is in a range reserved for documentation (a client's placeholder), which other hosts cannot route to",
+            DetailOf(group, "Registering Adapters"));
+
+        // With a name, Island registering its placeholder address is a warning, on top of the both-register note
+        probe.Identity = ("PROX-ENTRA", "nscriven.net");
+        group = Run(probe);
+        Assert.Equal(Status.Warn, StatusOf(group, "Registering Adapters"));
+        string detail = DetailOf(group, "Registering Adapters");
+        Assert.Contains("Both the client's adapter (Island Private Access) and IOT register", detail);
+        Assert.Contains("3fff:: is in a range reserved for documentation", detail);
     }
+
+    [Theory]
+    [InlineData("3fff::", true)]
+    [InlineData("3fff:fff:ffff::1", true)]
+    [InlineData("3ffe::1", false)]
+    [InlineData("3fff:1000::1", false)]
+    [InlineData("2001:db8::5", true)]
+    [InlineData("2001:db9::5", false)]
+    [InlineData("192.0.2.10", true)]
+    [InlineData("198.51.100.1", true)]
+    [InlineData("203.0.113.99", true)]
+    [InlineData("172.16.50.5", false)]
+    public void Documentation_RangesAreRecognised(string ip, bool expected) =>
+        Assert.Equal(expected, Diagnostics.IsDocumentation(IPAddress.Parse(ip)));
 
     [Fact]
     public void ClientAndLanBothRegisterWithAName_IsANoteNamingTheLanAdapter()

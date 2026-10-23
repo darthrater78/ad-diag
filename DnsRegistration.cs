@@ -61,6 +61,27 @@ static partial class Diagnostics
         return b[0] == 100 && (b[1] & 0xC0) == 64;
     }
 
+    /// <summary>
+    /// Ranges reserved for documentation, which nothing routes: 3fff::/20 and 2001:db8::/32, and 192.0.2.0/24,
+    /// 198.51.100.0/24 and 203.0.113.0/24. Some clients (Island) give their adapter 3fff:: as a placeholder.
+    /// </summary>
+    public static bool IsDocumentation(IPAddress ip)
+    {
+        byte[] b = ip.GetAddressBytes();
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            return (b[0] == 0x3f && b[1] == 0xff && (b[2] & 0xf0) == 0) || (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8);
+        return ip.AddressFamily == AddressFamily.InterNetwork
+            && ((b[0] == 192 && b[1] == 0 && b[2] == 2) || (b[0] == 198 && b[1] == 51 && b[2] == 100) || (b[0] == 203 && b[1] == 0 && b[2] == 113));
+    }
+
+    // An address other hosts cannot reach this machine on, so it is no use in DNS
+    static bool IsUnusable(IPAddress ip) => IsCgnat(ip) || IsDocumentation(ip);
+
+    // One line per unusable address, saying why, e.g. "3fff:: is in 3fff::/20, reserved for documentation, ..."
+    static string WhyUnusable(IEnumerable<IPAddress> addresses) => string.Join("\n", addresses.Where(IsUnusable).Distinct().Select(a =>
+        $"{a} is " + (IsCgnat(a) ? "a 100.64.0.0/10 tunnel address" : "in a range reserved for documentation (a client's placeholder)")
+        + ", which other hosts cannot route to"));
+
     // Addresses Windows would put in DNS: not loopback, link-local (169.254/16, fe80::/10) or site-local placeholders
     static bool IsRegistrable(IPAddress ip)
     {
@@ -144,7 +165,7 @@ static partial class Diagnostics
             && a.Addresses.Length > 0 && a.Addresses.ToHashSet().SetEquals(b.Addresses))).ToList();
 
     static IPAddress[] UnregisteredClientAddresses(List<NetAdapter> adapters, string? tag) =>
-        UnregisteredClients(adapters, tag).SelectMany(a => a.Addresses).Where(a => IsRegistrable(a) && !IsCgnat(a)).Distinct().ToArray();
+        UnregisteredClients(adapters, tag).SelectMany(a => a.Addresses).Where(a => IsRegistrable(a) && !IsUnusable(a)).Distinct().ToArray();
 
     static List<NetAdapter> UnregisteredClients(List<NetAdapter> adapters, string? tag) =>
         ClientAdapters(adapters, tag).Where(c => !c.Adapter.RegistersInDns).Select(c => c.Adapter).ToList();
@@ -231,8 +252,8 @@ static partial class Diagnostics
         if (records.Length == 0)
             return (Status.Warn, $"{source} holds no A or AAAA record for this machine — it is not registered");
         string holds = $"{source} holds {Join(records)}";
-        if (records.Any(IsCgnat))
-            holds += " (a 100.64.0.0/10 tunnel address, which other hosts cannot route to)";
+        if (records.Any(IsUnusable))
+            holds += "\n" + WhyUnusable(records);
         if (local.Length == 0)
             return (Status.Pass, holds);
         var stale = records.Except(local).ToArray();
@@ -240,7 +261,7 @@ static partial class Diagnostics
             return (Status.Warn, $"{holds}; this machine has {Join(local)} — the record is stale");
         if (stale.Length > 0)
             return (Status.Warn, $"{holds}; this machine no longer has {Join(stale)}");
-        return (records.Any(IsCgnat) ? Status.Warn : Status.Pass, holds);
+        return (records.Any(IsUnusable) ? Status.Warn : Status.Pass, holds);
     }
 
     // DNS Client logs a warning (IDs in the 8000s) to the System log each time a registration or deregistration
@@ -356,8 +377,10 @@ static partial class Diagnostics
         var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
         if (registering.Count == 0)
             return new(RegAdapters, Status.Skip, "No registration name, and no connected adapter has \"Register this connection's addresses in DNS\" on");
+        var addresses = registering.SelectMany(a => a.Addresses).Where(IsRegistrable).ToList();
         return new(RegAdapters, Status.Skip, "No registration name. Once there is one, these addresses are registered:\n"
-            + string.Join("\n", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}")));
+            + string.Join("\n", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"))
+            + (addresses.Any(IsUnusable) ? "\n" + WhyUnusable(addresses) : ""));
     }
 
     static (List<NetAdapter> Adapters, string? Ztna) CheckAdapters(DiagConfig cfg, IProbe probe, Action<TestEntry> report)
@@ -380,16 +403,21 @@ static partial class Diagnostics
         }
     }
 
+    // The adapter verdict, then a warning on top for any address registered that no other host can use
     static TestEntry RegisteringAdaptersEntry(List<NetAdapter> adapters, string? ztna, string? tag)
     {
+        var entry = AdapterVerdict(adapters, ztna, tag);
+        var unusable = RegisteringAddresses(adapters).Where(IsUnusable).ToArray();
+        return unusable.Length == 0 ? entry : entry with { Status = Status.Warn, Detail = $"{entry.Detail}\n{WhyUnusable(unusable)}" };
+    }
+
+    static TestEntry AdapterVerdict(List<NetAdapter> adapters, string? ztna, string? tag)
+    {
         var registering = adapters.Where(a => a.RegistersInDns && a.Addresses.Any(IsRegistrable)).ToList();
-        var tunnelOnly = RegisteringAddresses(adapters).Where(IsCgnat).ToArray();
         // One adapter per line
         string list = string.Join("\n", registering.Select(a => $"{a.Name}: {Join(a.Addresses.Where(IsRegistrable))}"));
         if (registering.Count == 0)
             return new(RegAdapters, Status.Warn, "No connected adapter has \"Register this connection's addresses in DNS\" turned on");
-        if (tunnelOnly.Length > 0)
-            return new(RegAdapters, Status.Warn, $"{list}\n{Join(tunnelOnly)} is a 100.64.0.0/10 tunnel address, which other hosts cannot route to");
         if (ztna == null)
             return new(RegAdapters, Status.Pass, list);
         // The client's own adapter registers: say whether the local network's address goes into DNS beside it
@@ -461,7 +489,7 @@ static partial class Diagnostics
     // An address the internet routes: not private, carrier-grade NAT, loopback or link-local space
     static bool IsPublic(IPAddress ip)
     {
-        if (IPAddress.IsLoopback(ip) || IsCgnat(ip) || !IsRegistrable(ip)) return false;
+        if (IPAddress.IsLoopback(ip) || IsUnusable(ip) || !IsRegistrable(ip)) return false;
         if (ip.AddressFamily != AddressFamily.InterNetwork) return !ip.IsIPv6UniqueLocal;
         byte[] b = ip.GetAddressBytes();
         return !(b[0] == 10 || (b[0] == 172 && (b[1] & 0xF0) == 16) || (b[0] == 192 && b[1] == 168));
