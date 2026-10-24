@@ -63,6 +63,16 @@ interface IProbe
     int? TpmVersion();
     /// <summary>The signed-in user's UPN (user@domain), for Entra and domain accounts alike; null if Windows has none.</summary>
     string? CurrentUserUpn();
+    /// <summary>
+    /// The first step of an SSPI sign-in to <paramref name="spn"/> with <paramref name="package"/> ("Kerberos" or
+    /// "Negotiate") and this user's own credentials. Nothing is sent to the server; for Kerberos, Windows asks the KDC
+    /// for the service ticket. For Negotiate, the package it chose.
+    /// </summary>
+    SspiResult Authenticate(string package, string spn, CancellationToken ct);
+    /// <summary>Lists a share's root over SMB: the entry count, or the Win32 error that stopped it.</summary>
+    ShareOpen OpenShare(string unc, CancellationToken ct);
+    /// <summary>The shares a server offers, as opening \\server in Explorer lists them: the visible folder shares, or the error.</summary>
+    ShareList ListShares(string server, CancellationToken ct);
 }
 
 /// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
@@ -76,12 +86,18 @@ record UrlSecurity(int Zone, int Logon, int StatusBar);
 /// <param name="ZtnaAdapter">
 /// The adapter the user tagged as the ZTNA or VPN client's, by name; null to detect it, "" for "there is none".
 /// </param>
-record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null);
+/// <param name="Profile">
+/// The profile the user picked, which decides the checks a group makes even where the PC is joined another way; null
+/// to follow how the PC is joined.
+/// </param>
+record DiagConfig(string Domain, string Dc, CancellationToken Cancel, string? ZtnaAdapter = null, JoinProfile? Profile = null);
 enum Status { Pass, Fail, Warn, Skip, Info }
 record TestEntry(string Name, Status Status = Status.Skip, string Detail = "")
 {
     /// <summary>The check was held back because the app isn't running as Administrator; the UI calls it out.</summary>
     public bool NeedsAdmin { get; init; }
+    /// <summary>How many tries the check took when it retries (the SMB test's Kerberos requests); 1 otherwise.</summary>
+    public int Tries { get; init; } = 1;
 }
 record TestGroup(string Name, List<TestEntry> Tests, Readiness? Readiness = null);
 /// <summary>A group's overall verdict, shown under its checks; <c>ShowGuide</c> points the user to the Guide tab's fixes.</summary>

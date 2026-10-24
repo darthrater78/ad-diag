@@ -132,6 +132,16 @@ static class Parsers
     public static bool HasTgt(string klistOutput, string realm) =>
         Regex.IsMatch(klistOutput, $@"krbtgt/{Regex.Escape(realm)}\s*@\s*\S", RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// The realm of a cached on-prem TGT ("krbtgt/CONTOSO.COM" gives "CONTOSO.COM"), skipping Entra ID's cloud TGT
+    /// (KERBEROS.MICROSOFTONLINE.COM); null if there is none. The server names in klist aren't translated.
+    /// </summary>
+    public static string? OnPremTgtRealm(string klistOutput) =>
+        ParseKlist(klistOutput).Tickets
+            .Select(t => Regex.Match(t.Server, @"^krbtgt/([^\s@]+)", RegexOptions.IgnoreCase))
+            .Where(m => m.Success).Select(m => m.Groups[1].Value)
+            .FirstOrDefault(realm => realm.Contains('.') && !realm.Contains("MICROSOFTONLINE", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The NTSTATUS error from a failed <c>klist get</c>, e.g. "0xc000018b"; null if none.</summary>
     public static string? KlistError(string output)
     {

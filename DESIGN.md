@@ -152,7 +152,8 @@ Windows 11's own system values, so the app matches the OS around it.
 ## Typography
 
 - **Segoe UI** for everything a person reads as interface: 11pt bold title, 9.5pt bold group headings, 9pt body, 8.5pt captions.
-- **Cascadia Code, falling back to Consolas,** only for values copied from the system: hostnames, addresses, paths, tool output, tickets.
+- **Cascadia Code, falling back to Consolas,** only for values copied from the system that stand alone: the Domain and DC fields, tool output in the Log, tickets.
+- Result details (Results and the SMB pane) are Segoe UI 9pt in text colour: they mix sentences with values, and monospace made whole sentences read stark.
 - Sentence case everywhere. No all-caps labels.
 
 ## Layout
@@ -160,10 +161,19 @@ Windows 11's own system values, so the app matches the OS around it.
 - 14px side gutter. Fixed 96-DPI pixel values in code go through `S()` so they scale with the display.
 - Results are a grid: status (mark + word) at 14px, test name at 100px, detail at 280px to the right edge. Rows are at least 24px with a 1px row line above each.
 - Each group heading carries its verdict pill and counts in a fixed column, and its Run button at the right edge: "9 checks · 1 warning".
-- The input row starts with the **Profile** picker, 255px; the Domain and DC fields share the rest two to three, so the DC label has room for the suffix box beside it. On the Entra joined profile the Domain and DC fields give way to a text-dim line saying the domain checks are hidden and how to show them.
-- Tabs sit left to right in a fixed order (Results, Guide, Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) and close up around one a profile hides.
+- At the top of the strip, under the header, a **Test** switch (a segmented control: Active Directory | SMB) picks the mode. The input row, the primary button, the summary and Runs bars, the tabs and the Results tab's content follow it; the Profile is shared.
+- The input row starts with the **Profile** picker, 255px; the Domain and DC fields share the rest two to three, so the DC label has room for the suffix box beside it. On the Entra joined profile the Domain and DC fields give way to a text-dim line saying the domain checks are hidden and how to show them. In SMB mode **File server** and **Share (optional)** split the DC field's place two to one, each with example text, and File server has its own "Add suffix" box over its right end, as the DC field has "Add domain suffix" and the Domain field stays on every profile, labelled **On-prem domain** on the Entra joined one.
+- Tabs sit left to right in a fixed order and close up around one the mode or profile hides: the mode's own tabs (Active Directory: Results, Group Policy, Kerberos tickets, DNS registration, Intune policies, with Group Policy hidden on the Entra joined profile and Intune policies on the Domain joined one; SMB: Results, Kerberos tickets), a 1px border-colour divider, then Guide and Log, which serve both.
 - A tab's own actions (Group Policy, Kerberos tickets, DNS registration, Intune policies, Log) sit in a 34px bar at the top of the tab, under the run strip, never at the bottom of the window.
 - Groups collapse to their heading. After a run every group is closed, unless "Expand all groups after a run" is ticked; a group the user opens or closes stays that way for that run, and a group run on its own opens (or stays open) to show its new results. The verdict pill and counts stay on a closed heading, so its state still reads.
+
+## Icon
+
+A primary blue folder (the share) with "AD" in white, drawn as shapes, and a magnifier badge at the lower right whose white lens holds a pass-green check: AD, file shares, diagnosed. The badge has a white outline so it holds on a dark title bar. 32 px and up use `docs/logo/ad-diag.svg`; 16 and 24 px use `docs/logo/ad-diag-small.svg`, the folder and a larger check badge without the letters, which can't be read that small. `app.ico` holds PNGs rendered from them at 16, 24, 32, 48 and 256 px. The header shows it at 32px, left of the title, twice the title bar's 16px.
+
+## Window
+
+The window's border is 2px of primary (#005fb8, dark #4cc2ff): Windows 11's own 1px border, coloured through DWM, plus 1px the window paints just inside it, both following the theme switch. Corners are Windows 11's rounded ones. Maximized, there is no border; earlier Windows keeps its own border and square corners.
 
 ## Elevation & Depth
 
@@ -173,14 +183,15 @@ None. Depth is tone only: the panel is lighter (dark: darker) than the window. N
 
 - Buttons: 4px corner radius, 1px border when on the plain surface, no border when filled.
 - Inputs and panels: square.
-- Status marks are 10px and differ by shape: circle = passed, triangle = warning, cross = failed, disc with an "i" cut out = info ("i" in the DNS registration pane), dash = skipped, ring = running.
+- Status marks are 10px and differ by shape: circle = passed, triangle = warning, cross = failed, disc with an "i" cut out = info, dash = skipped, ring = running. In the text panes (Log, DNS registration, Intune) info is a bold on-primary "i" on a primary square one character wide, which keeps the Log's monospace columns aligned.
 - Warning means a problem to fix; Info means worth knowing with nothing broken, counted as notes and never lowering a verdict; Skipped means not checked, and its detail starts "Not checked:" with the reason.
 
 ## Components
 
 - **Button** (`ThemedButton`): surface fill, text colour label. Hover blends 7% toward text, pressed 14%, disabled fades toward the window. Focus draws the border in primary.
-- **Primary button:** one per screen (Run diagnostics); it is also the Enter-key default. It is the left half of a split button: the right half is 26px, primary, with a white down chevron and a thin divider in a blend of the label colour, and opens its menu: "Run all sections", a rule, then each group by name. Only the pair's outer corners are rounded.
-- **Segmented control** (Log view: Sections | By time | Raw): buttons joined like the split button; the chosen one is primary with on-primary text, the other a normal surface button.
+- **Primary button:** one per mode, and it is the Enter-key default: Run diagnostics, or in SMB mode **Test connection** (a plain primary button, 156px, as wide as the split pair) in the same place. It is the left half of a split button: the right half is 26px, primary, with a white down chevron and a thin divider in a blend of the label colour, and opens its menu: "Run all sections", a rule, then each group by name. Only the pair's outer corners are rounded.
+- **Connection path** (SMB mode, top of the Results tab, on the panel): the five steps (Name, Port 445, Kerberos, Sign-in, Share) spread evenly, each a 24px circle with a 2px border and the step's status mark at its centre, its name in bold under it and a text-dim caption (Passed, Passed on try 2, Warning, Failed, Failed here, Failed after 3 tries, Not reached, Checking…). A step not yet reached has a border-colour ring and no mark; the step being checked, a primary ring open on one side. A passed or warned step's circle takes a 14% tint of its status colour, and the 2px line leading to it its status colour; otherwise the line is row-line colour. Above it, the tab's 34px action bar: **Open share** (a normal button) and, when there is a fix, "See SMB in the Guide" in primary. Under the strip, the pane, drawn like Results (not a rich edit box, whose tab stops Windows doesn't keep): the target, the verdict line with its mark, a "Fix:" line as in the Guide, and each step as a group heading (name, verdict pill, counts) over rows in the results grid's columns.
+- **Segmented control** (Log view: Sections | By time | Raw; the Test switch): buttons joined like the split button; the chosen one is primary with on-primary text, the other a normal surface button.
 - **Menu:** surface fill, 1px border, body text; the hovered item takes a 20% blend toward primary. No icons or image margin.
 - **Danger button:** a normal button with the label in fail colour (Reset all, Delete run).
 - **Tab:** bare text, dim when idle; the selected tab is bold with a 3px primary underline.

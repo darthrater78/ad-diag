@@ -57,6 +57,7 @@ public class DiagnosticsTests
                 DnsEventQueries++;
                 return DnsEvents();
             }
+            if (script.Contains("servicePrincipalName")) return Spn;
             if (script.Contains("KEY|")) return KeyAges;
             if (script.Contains("DENY")) return CloudTrust;
             return script.Contains("pwdLastSet") ? PasswordAge : Rsop;
@@ -136,6 +137,36 @@ public class DiagnosticsTests
         public string? CurrentUserUpn() => Upn;
         public string CloudTrust = "USER|S-1-5-21-1-2-3-1105\nGROUP|S-1-5-21-1-2-3-513\nDENY|S-1-5-21-1-2-3-512|Domain Admins\nALLOW|S-1-5-21-1-2-3-513|Domain Users";
         public int? TpmVersion() => Tpm;
+        // SSPI: keyed by "package spn"; anything not listed succeeds, Negotiate choosing Kerberos
+        public Dictionary<string, SspiResult> Sspi = new(StringComparer.OrdinalIgnoreCase);
+        // Answers given in turn, one per call, before Sspi applies; an exception in the queue is thrown
+        public Dictionary<string, Queue<object>> SspiQueue = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> SspiCalls = [];
+        public SspiResult Authenticate(string package, string spn, CancellationToken ct)
+        {
+            string key = $"{package} {spn}";
+            SspiCalls.Add(key);
+            if (SspiQueue.TryGetValue(key, out var queue) && queue.Count > 0)
+            {
+                object next = queue.Dequeue();
+                if (next is Exception ex) throw ex;
+                return (SspiResult)next;
+            }
+            return Sspi.TryGetValue(key, out var r) ? r : new(SspiResult.ContinueNeeded, package == "Negotiate" ? "Kerberos" : null);
+        }
+        public string Spn = "SPN|FILES$|cifs/files.contoso.com";
+        public Func<string, ShareOpen> Shares = _ => new(14, 0, "");
+        public Func<string, ShareList> ServerShares = _ => new(["Finance", "HR", "Public"], 0, "");
+        public ShareList ListShares(string server, CancellationToken ct)
+        {
+            ShareCalls.Add(@"\\" + server);
+            return ServerShares(server);
+        }
+        public ShareOpen OpenShare(string unc, CancellationToken ct)
+        {
+            ShareCalls.Add(unc);
+            return Shares(unc);
+        }
     }
 
     // A machine where everything works

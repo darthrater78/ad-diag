@@ -16,7 +16,7 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <Version>2026.10.23</Version>
+    <Version>2026.10.23-2</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- Test project lives under tests/ and the screenshot harness under tools/; both are built separately -->
