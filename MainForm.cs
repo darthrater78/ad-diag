@@ -1283,11 +1283,13 @@ partial class MainForm : Form
             (Diagnostics.EntraSsoGroup,
                 "Checks whether this PC signs in to Microsoft 365 and other cloud apps that use Microsoft Entra ID without asking for a password, however it is joined: domain joined, hybrid joined or Entra joined. Only this PC is checked: how it is joined, its tokens, the browser settings Seamless SSO needs, and a direct connection to the sign-in endpoints. It can't see whether Seamless SSO is turned on in your tenant, or whether your domain is federated, where Seamless SSO doesn't apply.\n" +
                 "Microsoft Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows. Domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is the fallback, for browsers and apps that can't use the token or for when it is missing, so while the token is in place a Seamless SSO problem shows as Info, not a warning. Entra joined PCs reach AD resources with cloud Kerberos trust instead.\n\n" +
-                "• Join Type — how this PC is joined, from dsregcmd /status: hybrid joined (AzureAdJoined and DomainJoined both YES), Entra joined (AzureAdJoined only) or domain joined only\n" +
+                "• Join Type — how this PC is joined, from dsregcmd /status: hybrid joined (AzureAdJoined and DomainJoined both YES), Entra joined (AzureAdJoined only), domain joined only, Microsoft Entra registered (WorkplaceJoined only: a work account added to Windows), or not joined at all. Checked under a joined profile, a PC that isn't joined fails\n" +
                 "  Fix: A domain-joined PC that should be hybrid joined: check that Microsoft Entra Connect > Configure device options has set up the service connection point for this forest, and that the PC's OU is synchronized. Then restart the PC, or run 'dsregcmd /join' as SYSTEM\n\n" +
+                "• Device Certificate — on a Microsoft Entra registered PC, the dates of the registration's device certificate (DeviceCertificateValidity); apps prove the device with it, so an expired one fails\n" +
+                "  Fix: Remove the work account and add it again: Settings > Accounts > Access work or school.\n" +
                 "• Device Auth — DeviceAuthStatus must be SUCCESS, meaning the device is enabled in Entra ID and its certificate is valid\n" +
                 "  Fix: If FAILED, an Entra admin checks the device in the Microsoft Entra admin center > Devices. Disabled: enable it. Deleted: run 'dsregcmd /leave' as Administrator and restart to join again\n\n" +
-                "• Primary Refresh Token — AzureAdPrt must be YES. A token is valid for 14 days and Windows renews it at sign-in, at unlock and when apps ask for one, so a day or two old is normal; older than 14 days means renewal is failing\n" +
+                "• Primary Refresh Token — AzureAdPrt must be YES. A Microsoft Entra registered PC gets none at Windows sign-in, only tokens for the work account as apps ask, so there it is Info. A token is valid for 14 days and Windows renews it at sign-in, at unlock and when apps ask for one, so a day or two old is normal; older than 14 days means renewal is failing\n" +
                 "  Fix: Lock and unlock, or sign out and in. If it stays NO, read the Diagnostic Data section of 'dsregcmd /status' for the error, and check that login.microsoftonline.com and device.login.microsoftonline.com are reachable without TLS inspection\n\n" +
                 "• Seamless SSO Ticket — a Kerberos ticket for HTTP/autologon.microsoftazuread-sso.com from a domain controller ('klist get'). Without it the AZUREADSSOACC computer account is missing from the user's domain, which means Seamless SSO was never turned on for this forest\n" +
                 "  Fix: On the Microsoft Entra Connect server: Change user sign-in > Enable single sign-on, and enter Domain Admin credentials for this forest. To confirm, run 'Get-ADComputer AZUREADSSOACC -Properties servicePrincipalName'\n" +
@@ -1314,7 +1316,7 @@ partial class MainForm : Form
 
             (Diagnostics.CredentialsGroup,
                 "How this user's sign-in credentials are held: Windows Hello for Business, the TPM that protects its keys, the encryption of cached Kerberos tickets, and Windows credentials saved in Credential Manager. Runs on every profile. Credential Manager is read for the names of saved credentials only, never their passwords.\n\n" +
-                "• Windows Hello — whether Hello for Business is set up for this user (dsregcmd NgcSet). Not set up is Info: a password or smart card still signs in\n" +
+                "• Windows Hello — whether Hello for Business is set up for this user (dsregcmd NgcSet). When it isn't, the user's Windows Hello keys (certutil -csp \"Microsoft Passport Key Storage Provider\" -key, which only lists them) say what else is: a PIN for a local account, a personal Microsoft account, passkeys. Not set up is Info: a password or smart card still signs in\n" +
                 "  Fix: To set it up, enable Windows Hello for Business by Group Policy (Computer Configuration > Administrative Templates > Windows Components > Windows Hello for Business) or Intune (Devices > Enrollment > Windows Hello for Business), then sign out and in\n\n" +
                 "• Hello Trust — how Hello signs in to on-premises resources: cloud Kerberos trust, certificate trust, or key trust when neither is set. On an Entra joined PC with none set, Hello reaches cloud apps only (Info)\n" +
                 "  Fix: For Entra joined PCs that need file shares and other AD resources, deploy cloud Kerberos trust: create the Microsoft Entra Kerberos server object in AD, then set Use cloud trust for on-premises authentication by Group Policy or the PassportForWork policy in Intune\n\n" +
@@ -1530,7 +1532,9 @@ partial class MainForm : Form
     {
         JoinProfile.Domain => "Domain joined",
         JoinProfile.Hybrid => "Microsoft Entra hybrid joined",
-        _ => "Microsoft Entra joined",
+        JoinProfile.Entra => "Microsoft Entra joined",
+        JoinProfile.Registered => "Microsoft Entra registered",
+        _ => "Not joined",
     };
 
 
@@ -1553,13 +1557,12 @@ partial class MainForm : Form
         if (detected) _detectedProfile = profile;
         FillProfileChoices();
 
-        bool entra = profile == JoinProfile.Entra;
         ApplyMode();
         PopulateGuide();
         if (_runHistory.Count == 0) ShowPreview();
         if (changed || detected)
             AppLog.Info("app", $"Profile: {ProfileName(profile)}{(detected ? " (detected)" : " (picked)")}");
-        if ((!entra || _mode == TestMode.Smb) && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
+        if ((profile.HasDomain() || _mode == TestMode.Smb) && string.IsNullOrWhiteSpace(_txtDomain.Text)) _ = DetectDomainAsync();
     }
 
     // How the PC is joined decides the profile; the domain is filled in afterwards where the profile has one
@@ -1569,13 +1572,21 @@ partial class MainForm : Form
         {
             var ds = await Task.Run(() => Parsers.ParseDsreg(Probe.RunTool("dsregcmd", "/status", 5000, default)));
             if (IsDisposed) return;
-            var detected = Diagnostics.DetectProfile(ds);
+            // Nothing detected (dsregcmd named no join state): the domain profile, which runs everything, not marked detected
+            if (Diagnostics.DetectProfile(ds) is not { } detected)
+            {
+                AppLog.Info("app", $"Profile not detected: dsregcmd reported no join state; using {ProfileName(_profile)}");
+                if (!_profilePicked) await DetectDomainAsync();
+                return;
+            }
             if (_profilePicked)
             {
                 _detectedProfile = detected;
                 FillProfileChoices();
             }
             else SetProfile(detected, detected: true);
+            // A PC with no domain and no Entra join: say how it stands, which no profile name alone does
+            if (Diagnostics.NotJoinedText(ds) is { } notJoined) _lblStatus.Text = notJoined;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1588,9 +1599,9 @@ partial class MainForm : Form
     // the Guide and the Log, which serve both modes
     void LayoutTabs()
     {
-        bool smb = _mode == TestMode.Smb, entra = _profile == JoinProfile.Entra;
-        _btnTabGp.Visible = !smb && !entra;
-        _btnTabDns.Visible = !smb;
+        bool smb = _mode == TestMode.Smb;
+        _btnTabGp.Visible = !smb && _profile.HasDomain();
+        _btnTabDns.Visible = !smb && !NoDnsRegistration(_profile);
         _btnTabIntune.Visible = !smb && _profile != JoinProfile.Domain;
         ThemedButton[] own = [_btnTabResults, _btnTabGp, _btnTabTickets, _btnTabDns, _btnTabIntune];
         int x = S(10);
@@ -3492,16 +3503,23 @@ partial class MainForm : Form
         ("Group Policy", "Group Policy", Diagnostics.TestGroupPolicy, true),
         ("Trust Relationships", "Trusts", Diagnostics.TestTrusts, true),
         ("Kerberos & Time Sync", "Kerberos & Time", Diagnostics.TestKerberosAndTime, true),
-        ("Dynamic DNS Registration", "DNS Registration", Diagnostics.TestDnsRegistration, false),
+        (DnsRegistrationGroup, "DNS Registration", Diagnostics.TestDnsRegistration, false),
         (Diagnostics.EntraSsoGroup, "Seamless SSO", Diagnostics.TestEntraSso, false),
         (Diagnostics.CredentialsGroup, "Credentials", Diagnostics.TestCredentials, false),
         (Diagnostics.IntuneGroup, "Intune", Diagnostics.TestIntune, false),
     ];
 
+    const string DnsRegistrationGroup = "Dynamic DNS Registration";
+
+    // A PC in no domain registers its name in no AD zone, so the DNS registration section and tab don't apply
+    static bool NoDnsRegistration(JoinProfile profile) => profile is JoinProfile.Registered or JoinProfile.Workgroup;
+
     /// <summary>Whether a section (or a Guide section of the same name) belongs to a profile.</summary>
     static bool InProfile(string name, JoinProfile profile) => profile switch
     {
         JoinProfile.Entra => !Sections.Any(s => s.Name == name && s.DomainOnly),
+        // Neither is in a domain, nor has an AD zone to register its name in
+        JoinProfile.Registered or JoinProfile.Workgroup => !Sections.Any(s => s.Name == name && s.DomainOnly) && name != DnsRegistrationGroup,
         // Intune enrolls only an Entra or hybrid joined PC; a domain-only one can only ever be "not enrolled"
         JoinProfile.Domain => name != Diagnostics.IntuneGroup,
         _ => true,
@@ -3521,8 +3539,8 @@ partial class MainForm : Form
     /// <summary>The domain and DC from the fields, or null (with the reason in the status line) when they're invalid.</summary>
     (string Domain, string Dc)? ReadTarget()
     {
-        // An Entra joined PC has no domain field; its key checks ask the domain the user's Kerberos realm names, if any
-        if (_profile == JoinProfile.Entra) return (EntraRealm(), "");
+        // A PC in no domain has no domain field; its key checks ask the domain the user's Kerberos realm names, if any
+        if (!_profile.HasDomain()) return (EntraRealm(), "");
         string domain = _txtDomain.Text.Trim();
         string dc = _txtDc.Text.Trim();
         if (_chkDcSuffix.Checked && !string.IsNullOrEmpty(domain) && !dc.Contains('.'))
@@ -3554,9 +3572,9 @@ partial class MainForm : Form
 
     static string DcText(string dc) => dc.Length > 0 ? dc : "DC found automatically";
 
-    // What a run covered, for its log heading: an Entra joined run has no domain
+    // What a run covered, for its log heading: a run on a PC in no domain has none
     static string TargetText(JoinProfile profile, string domain, string dc) =>
-        profile == JoinProfile.Entra ? ProfileName(profile) : $"{ProfileName(profile)} · {domain} · {DcText(dc)}";
+        !profile.HasDomain() ? ProfileName(profile) : $"{ProfileName(profile)} · {domain} · {DcText(dc)}";
 
     // A log heading's outcome: "32 passed · 0 failed · 3 warnings"
     static string Totals(IEnumerable<TestEntry> tests)
@@ -3571,7 +3589,7 @@ partial class MainForm : Form
     {
         _runCts?.Cancel();
         _runCts = new CancellationTokenSource();
-        AppLog.Info("run", _profile == JoinProfile.Entra
+        AppLog.Info("run", !_profile.HasDomain()
             ? $"Started{what}: {ProfileName(_profile)} profile"
             : $"Started{what}: {ProfileName(_profile)} profile, domain {domain}, DC {(dc.Length > 0 ? dc : "(auto)")}");
         SetRunning(true);
@@ -3924,7 +3942,7 @@ partial class MainForm : Form
         sb.AppendLine();
         sb.AppendLine("Configuration:");
         sb.AppendLine($"  Profile: {ProfileName(run.Profile)}");
-        if (run.Profile != JoinProfile.Entra)
+        if (run.Profile.HasDomain())
         {
             sb.AppendLine($"  Domain:  {run.Domain}");
             sb.AppendLine($"  DC Host: {run.Dc}");

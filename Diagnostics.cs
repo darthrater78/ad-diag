@@ -75,8 +75,17 @@ interface IProbe
     ShareList ListShares(string server, CancellationToken ct);
 }
 
-/// <summary>How the PC is joined, which decides what the app checks and shows.</summary>
-enum JoinProfile { Domain, Hybrid, Entra }
+/// <summary>
+/// How the PC is joined, which decides what the app checks and shows. Registered is a PC that is only Microsoft Entra
+/// registered (a work account added to Windows); Workgroup one joined to nothing and registered nowhere.
+/// </summary>
+enum JoinProfile { Domain, Hybrid, Entra, Registered, Workgroup }
+
+static class JoinProfiles
+{
+    /// <summary>Whether the PC is in an AD domain under this profile, so it has a domain to check and its domain-only sections apply.</summary>
+    public static bool HasDomain(this JoinProfile profile) => profile is JoinProfile.Domain or JoinProfile.Hybrid;
+}
 
 /// <param name="Zone">0 Local machine, 1 Local intranet, 2 Trusted sites, 3 Internet, 4 Restricted sites.</param>
 /// <param name="Logon">URLACTION_CREDENTIALS_USE policy: 0 automatic logon, 0x10000 prompt, 0x20000 automatic in the intranet zone only, 0x30000 anonymous.</param>

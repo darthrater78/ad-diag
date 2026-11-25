@@ -16,14 +16,16 @@ namespace AdDiag;
 // domain controller and hands it to Entra ID, is how domain-joined PCs sign in, and on a hybrid joined PC only the
 // fallback for browsers and apps that can't use the PRT, or for when it is missing. Entra joined PCs reach AD
 // resources with the Kerberos ticket Entra ID issues through cloud Kerberos trust (OnPremTgt). So the join type and
-// the PRT decide which checks run and what they weigh. The fixes are in the Guide tab.
+// the PRT decide which checks run and what they weigh. A PC that is only Microsoft Entra registered (a work account
+// added to Windows) gets no PRT at Windows sign-in, so there the group checks the registration that apps sign in
+// with instead; a PC joined to nothing has no single sign-on to check. The fixes are in the Guide tab.
 static partial class Diagnostics
 {
     public const string EntraSsoGroup = "Entra Seamless Single Sign-On";
     public const string SsoJoin = "Join Type", SsoDeviceAuth = "Device Auth", SsoPrt = "Primary Refresh Token",
         SsoTicket = "Seamless SSO Ticket", SsoZone = "Intranet Zone", SsoLogon = "Automatic Logon",
         SsoStatusBar = "Status Bar Scripts", SsoCloudTgt = "Cloud Kerberos", SsoOnPremTgt = "On-premises Kerberos",
-        SsoEndpoints = "Entra Endpoints";
+        SsoEndpoints = "Entra Endpoints", SsoDeviceCert = "Device Certificate";
 
     public const string SsoSpn = "HTTP/autologon.microsoftazuread-sso.com";
     public const string SsoUrl = "https://autologon.microsoftazuread-sso.com";
@@ -43,7 +45,8 @@ static partial class Diagnostics
     static readonly string[] ZoneNames = ["Local machine", "Local intranet", "Trusted sites", "Internet", "Restricted sites"];
     static string ZoneName(int zone) => zone >= 0 && zone < ZoneNames.Length ? ZoneNames[zone] : $"custom ({zone})";
 
-    enum JoinKind { None, DomainOnly, Hybrid, EntraOnly }
+    // None: joined to nothing and registered nowhere. Registered: only Microsoft Entra registered
+    enum JoinKind { None, DomainOnly, Hybrid, EntraOnly, Registered }
 
     public static TestGroup TestEntraSso(DiagConfig cfg, IProbe probe) => TestEntraSso(cfg, probe, DateTime.UtcNow);
 
@@ -66,8 +69,20 @@ static partial class Diagnostics
         tests.Add(join);
         if (kind == null)
             return new(EntraSsoGroup, tests, new(Status.Skip, "Readiness unknown: dsregcmd reported no join state.", true));
+        // A PC checked as joined that isn't: the Join Type row has failed, and nothing else can be checked
+        if (join.Status == Status.Fail && kind is JoinKind.None or JoinKind.Registered)
+            return new(EntraSsoGroup, tests, new(Status.Fail, cfg.Profile == JoinProfile.Registered
+                ? "Not ready: this PC is not Microsoft Entra registered."
+                : "Not ready: this PC is not joined to Microsoft Entra ID or a domain.", true));
         if (kind == JoinKind.None)
-            return new(EntraSsoGroup, tests, new(Status.Fail, "Not ready: this PC is not joined to Microsoft Entra ID or a domain.", true));
+            return new(EntraSsoGroup, tests, new(Status.Info, "No single sign-on to check: sign-in is local to this PC.", false));
+        if (kind == JoinKind.Registered)
+        {
+            tests.Add(DeviceCertCheck(ds, nowUtc));
+            tests.Add(RegisteredPrtCheck(ds));
+            tests.Add(EndpointsCheck(cfg, probe, [LoginHost]));
+            return new(EntraSsoGroup, tests, RegisteredReadiness(tests));
+        }
 
         bool seamless = kind is JoinKind.Hybrid or JoinKind.DomainOnly;
         var prt = PrtCheck(ds, kind.Value, nowUtc);
@@ -82,7 +97,7 @@ static partial class Diagnostics
     /// <summary>Every row the group can show, in the one order all profiles keep; each profile leaves some out.</summary>
     internal static readonly string[] SsoRowOrder =
     [
-        SsoJoin, SsoDeviceAuth, SsoPrt, SsoTicket, SsoZone, SsoLogon, SsoStatusBar, SeamlessKeyCheck,
+        SsoJoin, SsoDeviceCert, SsoDeviceAuth, SsoPrt, SsoTicket, SsoZone, SsoLogon, SsoStatusBar, SeamlessKeyCheck,
         SsoCloudTgt, SsoOnPremTgt, CloudTrustGroupsCheck, CloudKerberosKeyCheck, SsoEndpoints,
     ];
 
@@ -92,27 +107,36 @@ static partial class Diagnostics
     /// </summary>
     public static IEnumerable<string> SsoRows(JoinProfile profile) => SsoRowOrder.Where(row => profile switch
     {
-        JoinProfile.Domain => row is not (SsoDeviceAuth or SsoPrt or SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
-        JoinProfile.Hybrid => row is not (SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
-        _ => row is not (SsoTicket or SsoZone or SsoLogon or SsoStatusBar or SeamlessKeyCheck),
+        JoinProfile.Domain => row is not (SsoDeviceCert or SsoDeviceAuth or SsoPrt or SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
+        JoinProfile.Hybrid => row is not (SsoDeviceCert or SsoCloudTgt or SsoOnPremTgt or CloudTrustGroupsCheck or CloudKerberosKeyCheck),
+        JoinProfile.Registered => row is SsoJoin or SsoDeviceCert or SsoPrt or SsoEndpoints,
+        JoinProfile.Workgroup => row is SsoJoin,
+        _ => row is not (SsoDeviceCert or SsoTicket or SsoZone or SsoLogon or SsoStatusBar or SeamlessKeyCheck),
     });
 
     /// <summary>
     /// How the PC is joined, as the Join Type row reports it, and the join type the checks follow: the picked profile's
-    /// when there is one, so another profile's checks can be seen on this PC. The row says when they differ.
+    /// when there is one, so another profile's checks can be seen on this PC. The row says when they differ. A PC that
+    /// isn't joined can't be checked as joined: picked as one of the joined profiles, its row fails.
     /// </summary>
     static (JoinKind? Kind, TestEntry Entry) ProfileJoin(DiagConfig cfg, Dictionary<string, string> ds)
     {
         var (detected, entry) = JoinCheck(ds);
-        if (cfg.Profile is not { } profile || detected is null or JoinKind.None) return (detected, entry);
+        if (cfg.Profile is not { } profile || detected is null) return (detected, entry);
         var (kind, name) = profile switch
         {
             JoinProfile.Domain => (JoinKind.DomainOnly, "Domain joined"),
             JoinProfile.Hybrid => (JoinKind.Hybrid, "Microsoft Entra hybrid joined"),
-            _ => (JoinKind.EntraOnly, "Microsoft Entra joined"),
+            JoinProfile.Entra => (JoinKind.EntraOnly, "Microsoft Entra joined"),
+            JoinProfile.Registered => (JoinKind.Registered, "Microsoft Entra registered"),
+            _ => (JoinKind.None, "Not joined"),
         };
-        return kind == detected ? (kind, entry)
-            : (kind, entry with { Status = Status.Info, Detail = $"{entry.Detail}; checked as {name}, the profile picked" });
+        if (kind == detected) return (kind, entry);
+        // Checks for a join or a registration this PC doesn't have can't run: a PC that isn't joined can't be checked as
+        // joined, nor one that isn't registered as registered
+        if (detected is JoinKind.None or JoinKind.Registered && kind != JoinKind.None)
+            return (detected, entry with { Status = Status.Fail, Detail = $"{entry.Detail}; the {name} profile picked doesn't apply to it" });
+        return (kind, entry with { Status = Status.Info, Detail = $"{entry.Detail}; checked as {name}, the profile picked" });
     }
 
     // The checks for how this PC signs in. One that doesn't apply to how it is joined isn't shown at all: a
@@ -168,8 +192,52 @@ static partial class Diagnostics
             (true, true) => (JoinKind.Hybrid, new(SsoJoin, Status.Pass, $"Microsoft Entra hybrid joined (DomainJoined: YES, AzureAdJoined: YES){tenant}")),
             (true, false) => (JoinKind.EntraOnly, new(SsoJoin, Status.Pass, $"Microsoft Entra joined (AzureAdJoined: YES, DomainJoined: NO){tenant}")),
             (false, true) => (JoinKind.DomainOnly, new(SsoJoin, Status.Pass, "Domain joined, not Microsoft Entra hybrid joined (AzureAdJoined: NO); Seamless SSO still applies")),
-            _ => (JoinKind.None, new(SsoJoin, Status.Fail, "Not joined to Microsoft Entra ID or a domain (AzureAdJoined: NO, DomainJoined: NO)")),
+            _ when Parsers.DsregFlag(ds, "WorkplaceJoined") == true => (JoinKind.Registered, new(SsoJoin, Status.Pass,
+                $"{RegisteredName(ds)} (WorkplaceJoined: YES); not joined to Microsoft Entra ID or a domain")),
+            _ => (JoinKind.None, new(SsoJoin, Status.Info,
+                "A standalone workstation: not joined to a domain or Microsoft Entra ID, and not registered (AzureAdJoined: NO, DomainJoined: NO, WorkplaceJoined: NO)")),
         };
+    }
+
+    // "Microsoft Entra registered to <tenant>", the tenant as dsregcmd names it under the work account
+    static string RegisteredName(Dictionary<string, string> ds) =>
+        ds.TryGetValue("WorkplaceTenantName", out var tenant) && tenant.Length > 0 ? $"Microsoft Entra registered to {tenant}" : "Microsoft Entra registered";
+
+    /// <summary>
+    /// How the PC is joined, in a few words for the status line: null when it is joined to a domain or Entra ID, or
+    /// dsregcmd reported no join state, so the profile picked says it all.
+    /// </summary>
+    internal static string? NotJoinedText(Dictionary<string, string> ds) => JoinCheck(ds).Kind switch
+    {
+        JoinKind.Registered => $"Not joined: {RegisteredName(ds)}",
+        JoinKind.None => "Not joined to a domain or Microsoft Entra ID, and not registered",
+        _ => null,
+    };
+
+    // The registration's device certificate: apps prove the device with it, and once it expires the registration is gone
+    static TestEntry DeviceCertCheck(Dictionary<string, string> ds, DateTime nowUtc)
+    {
+        if (Parsers.DsregValidity(ds, "DeviceCertificateValidity") is not var (from, to))
+            return new(SsoDeviceCert, Status.Skip, "Not checked: dsregcmd reported no device certificate dates");
+        string dates = $"{from.ToLocalTime():d} to {to.ToLocalTime():d}";
+        if (nowUtc > to)
+            return new(SsoDeviceCert, Status.Fail, $"Expired {to.ToLocalTime():d} (valid {dates}); apps can no longer prove this device");
+        if (nowUtc < from)
+            return new(SsoDeviceCert, Status.Warn, $"Not valid until {from.ToLocalTime():d} (valid {dates}); check this PC's clock");
+        return new(SsoDeviceCert, Status.Pass, $"Valid {dates}");
+    }
+
+    // Windows sign-in issues a PRT only on a joined PC; a registered one gets tokens for the work account as apps ask
+    static TestEntry RegisteredPrtCheck(Dictionary<string, string> ds) => Parsers.DsregFlag(ds, "AzureAdPrt") == true
+        ? new(SsoPrt, Status.Pass, "AzureAdPrt: YES")
+        : new(SsoPrt, Status.Info, "Windows sign-in gets none on a registered PC (AzureAdPrt: NO); apps sign in with the work account instead");
+
+    static Readiness RegisteredReadiness(List<TestEntry> tests)
+    {
+        var counted = tests.Where(t => t.Status is not (Status.Skip or Status.Info)).ToList();
+        return counted.Any(t => t.Status == Status.Fail) ? new(Status.Fail, "Not ready for app sign-in with the work account.", true)
+            : counted.Any(t => t.Status == Status.Warn) ? new(Status.Warn, "Ready for app sign-in with the work account, with warnings.", true)
+            : new(Status.Pass, "Ready for app sign-in with the work account. Windows sign-in has no single sign-on on a registered PC.", false);
     }
 
     static TestEntry DeviceAuthCheck(Dictionary<string, string> ds, JoinKind kind)
@@ -209,14 +277,17 @@ static partial class Diagnostics
     }
 
     /// <summary>
-    /// The profile that fits how this PC is joined, from <c>dsregcmd /status</c>. A PC joined to neither gets the
-    /// domain profile, which checks everything a domain needs and so shows what is missing.
+    /// The profile that fits how this PC is joined, from <c>dsregcmd /status</c>; null when it reported no join state,
+    /// so nothing was detected.
     /// </summary>
-    internal static JoinProfile DetectProfile(Dictionary<string, string> ds) => JoinCheck(ds).Kind switch
+    internal static JoinProfile? DetectProfile(Dictionary<string, string> ds) => JoinCheck(ds).Kind switch
     {
         JoinKind.Hybrid => JoinProfile.Hybrid,
         JoinKind.EntraOnly => JoinProfile.Entra,
-        _ => JoinProfile.Domain,
+        JoinKind.DomainOnly => JoinProfile.Domain,
+        JoinKind.Registered => JoinProfile.Registered,
+        JoinKind.None => JoinProfile.Workgroup,
+        _ => null,
     };
 
     /// <summary>

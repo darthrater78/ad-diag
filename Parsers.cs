@@ -385,6 +385,20 @@ static class Parsers
     }
 
     /// <summary>
+    /// A dsregcmd date range such as "[ 2026-09-15 11:31:35.000 UTC -- 2036-09-15 12:01:35.000 UTC ]", as UTC; null if
+    /// absent or it doesn't hold two readable times.
+    /// </summary>
+    public static (DateTime From, DateTime To)? DsregValidity(Dictionary<string, string> fields, string name)
+    {
+        if (!fields.TryGetValue(name, out var v)) return null;
+        var times = Regex.Matches(v, @"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+            .Select(m => DateTime.TryParseExact(m.Value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc) ? utc : (DateTime?)null)
+            .ToList();
+        return times.Count == 2 && times[0] is { } from && times[1] is { } to ? (from, to) : null;
+    }
+
+    /// <summary>
     /// The realm a <c>klist get &lt;spn&gt;</c> obtained a ticket from, read from the cached ticket's "spn @ REALM"
     /// line (language-neutral); null when no ticket for the SPN is listed.
     /// </summary>

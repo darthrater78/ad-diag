@@ -122,6 +122,8 @@ public class EntraSsoTests
     [Theory]
     [InlineData("Domain")]
     [InlineData("Hybrid")]
+    [InlineData("Registered")]
+    [InlineData("Workgroup")]
     [InlineData("Entra")]
     public void EveryProfileKeepsTheOneOrder(string picked)
     {
@@ -366,14 +368,128 @@ public class EntraSsoTests
         Assert.Equal(new Readiness(Status.Pass, "Ready for Seamless SSO.", false), group.Readiness);
     }
 
-    [Fact]
-    public void NotJoined_IsNotReadyAndChecksNothingElse()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Workgroup")]
+    public void NotJoined_IsANoteAndChecksNothingElse(string? picked)
     {
-        var group = Run(Machine(Dsreg("NO", "NO")));
+        var probe = Machine(Dsreg("NO", "NO"));
+        var group = picked == null ? Run(probe) : RunAs(probe, Enum.Parse<JoinProfile>(picked));
+
+        var entry = Assert.Single(group.Tests);
+        Assert.Equal(Status.Info, entry.Status);
+        Assert.StartsWith("A standalone workstation", entry.Detail);
+        Assert.Equal(new Readiness(Status.Info, "No single sign-on to check: sign-in is local to this PC.", false), group.Readiness);
+    }
+
+    [Theory]
+    [InlineData("Domain")]
+    [InlineData("Hybrid")]
+    [InlineData("Entra")]
+    public void NotJoined_CheckedAsJoined_Fails(string picked)
+    {
+        var group = RunAs(Machine(Dsreg("NO", "NO")), Enum.Parse<JoinProfile>(picked));
 
         var entry = Assert.Single(group.Tests);
         Assert.Equal(Status.Fail, entry.Status);
+        Assert.EndsWith("profile picked doesn't apply to it", entry.Detail);
         Assert.True(group.Readiness is { Status: Status.Fail, ShowGuide: true });
+    }
+
+    // ── Microsoft Entra registered: a work account added to Windows, no join ──
+
+    static string Registered(string validity = "[ 2026-09-15 11:31:35.000 UTC -- 2036-09-15 12:01:35.000 UTC ]", string workplace = "YES") => $"""
+        +----------------------------------------------------------------------+
+        | Device State                                                         |
+        +----------------------------------------------------------------------+
+
+                     AzureAdJoined : NO
+                  EnterpriseJoined : NO
+                      DomainJoined : NO
+                       Device Name : PC042
+
+        +----------------------------------------------------------------------+
+        | User State                                                           |
+        +----------------------------------------------------------------------+
+
+                            NgcSet : NO
+                   WorkplaceJoined : {workplace}
+                  WorkAccountCount : 1
+
+        +----------------------------------------------------------------------+
+        | SSO State                                                            |
+        +----------------------------------------------------------------------+
+
+                        AzureAdPrt : NO
+               AzureAdPrtAuthority : NO
+
+        +----------------------------------------------------------------------+
+        | Work Account 1                                                       |
+        +----------------------------------------------------------------------+
+
+                 WorkplaceDeviceId : 5f4e2a1c-0000-4000-8000-000000000042
+         DeviceCertificateValidity : {validity}
+                      TpmProtected : YES
+                 WorkplaceTenantId : 72f988bf-0000-4000-8000-000000000001
+               WorkplaceTenantName : Contoso
+        """;
+
+    [Fact]
+    public void Registered_ChecksTheRegistrationAndNotesTheMissingPrt()
+    {
+        var group = Run(Machine(Registered()));
+
+        Assert.Equal(["Join Type", "Device Certificate", "Primary Refresh Token", "Entra Endpoints"], group.Tests.Select(t => t.Name));
+        var join = Entry(group, "Join Type");
+        Assert.Equal(Status.Pass, join.Status);
+        Assert.StartsWith("Microsoft Entra registered to Contoso (WorkplaceJoined: YES)", join.Detail);
+        Assert.Equal(Status.Pass, Entry(group, "Device Certificate").Status);
+        Assert.Equal(Status.Info, Entry(group, "Primary Refresh Token").Status);
+        Assert.Equal("login.microsoftonline.com reachable on port 443", Entry(group, "Entra Endpoints").Detail);
+        Assert.True(group.Readiness is { Status: Status.Pass, ShowGuide: false });
+        Assert.StartsWith("Ready for app sign-in with the work account", group.Readiness!.Text);
+        Assert.Equal(group.Tests.Select(t => t.Name), Diagnostics.SsoRows(JoinProfile.Registered));
+    }
+
+    [Theory]
+    [InlineData("[ 2016-09-15 11:31:35.000 UTC -- 2026-09-15 12:01:35.000 UTC ]", "Fail")]
+    [InlineData("[ 2026-11-15 11:31:35.000 UTC -- 2036-11-15 12:01:35.000 UTC ]", "Warn")]
+    [InlineData("", "Skip")]
+    public void Registered_DeviceCertificateOutsideItsDates(string validity, string status)
+    {
+        var group = Run(Machine(Registered(validity)));
+
+        Assert.Equal(Enum.Parse<Status>(status), Entry(group, "Device Certificate").Status);
+        Assert.Equal(status == "Fail" ? Status.Fail : status == "Warn" ? Status.Warn : Status.Pass, group.Readiness!.Status);
+    }
+
+    [Theory]
+    [InlineData("Domain")]
+    [InlineData("Entra")]
+    public void Registered_CheckedAsJoined_Fails(string picked)
+    {
+        var group = RunAs(Machine(Registered()), Enum.Parse<JoinProfile>(picked));
+
+        Assert.Equal(Status.Fail, Assert.Single(group.Tests).Status);
+        Assert.Equal("Not ready: this PC is not joined to Microsoft Entra ID or a domain.", group.Readiness!.Text);
+    }
+
+    [Fact]
+    public void NotRegistered_CheckedAsRegistered_Fails()
+    {
+        var group = RunAs(Machine(Registered(workplace: "NO")), JoinProfile.Registered);
+
+        Assert.Equal(Status.Fail, Assert.Single(group.Tests).Status);
+        Assert.Equal("Not ready: this PC is not Microsoft Entra registered.", group.Readiness!.Text);
+    }
+
+    [Fact]
+    public void NotJoinedText_NamesTheRegistration()
+    {
+        Assert.Equal("Not joined: Microsoft Entra registered to Contoso", Diagnostics.NotJoinedText(Parsers.ParseDsreg(Registered())));
+        Assert.Equal("Not joined to a domain or Microsoft Entra ID, and not registered",
+            Diagnostics.NotJoinedText(Parsers.ParseDsreg(Registered(workplace: "NO"))));
+        Assert.Null(Diagnostics.NotJoinedText(Parsers.ParseDsreg(Dsreg("NO", "YES"))));
     }
 
     [Fact]
@@ -488,4 +604,7 @@ public class EntraSsoTests
     [InlineData("NO", "YES")]
     [InlineData("NO", "NO")]
     public void PrtCard_NotEntraJoined_HasNoCard(string entra, string domain) => Assert.Null(Card(Dsreg(entra, domain)));
+
+    [Fact]
+    public void PrtCard_Registered_HasNoCard() => Assert.Null(Card(Registered()));
 }

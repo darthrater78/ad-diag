@@ -227,7 +227,7 @@ static partial class Diagnostics
         if (profile != JoinProfile.Domain && CloudTrustEntry(profile, dsreg.Value) is { } trust) tests.Add(trust);
 
         bool haveDomain = cfg.Domain.Length > 0 && DomainName.IsMatch(cfg.Domain);
-        string noDomain = profile == JoinProfile.Entra ? "Not checked: type the on-prem domain" : "Not checked: no domain";
+        string noDomain = !profile.HasDomain() ? "Not checked: type the on-prem domain" : "Not checked: no domain";
         tests.Add(haveDomain ? TgtWithRetry(cfg, probe) : new(SmbTgtRow, Status.Skip, noDomain));
         if (profile != JoinProfile.Entra)
             tests.Add(haveDomain ? KpasswdEntry(cfg, probe) : new(SmbKpasswdRow, Status.Skip, noDomain));
@@ -250,6 +250,8 @@ static partial class Diagnostics
     // one it matters only when the user signs in with Windows Hello, so it shows only when Hello is set up
     static TestEntry? CloudTrustEntry(JoinProfile profile, (Dictionary<string, string>? Fields, string? Error) dsreg)
     {
+        // Cloud Kerberos trust needs a PC joined to Entra ID; a registered or unjoined one never gets an OnPremTgt
+        if (profile is JoinProfile.Registered or JoinProfile.Workgroup) return null;
         if (dsreg.Fields is not { } ds)
             return profile == JoinProfile.Entra ? new(SmbCloudTrustRow, Status.Skip, $"Not checked: dsregcmd failed: {dsreg.Error}") : null;
         bool? hello = Parsers.DsregFlag(ds, "NgcSet");

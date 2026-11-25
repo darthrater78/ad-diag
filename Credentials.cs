@@ -29,7 +29,7 @@ static partial class Diagnostics
         try { ds = Parsers.ParseDsreg(probe.RunTool("dsregcmd", "/status", 15000, cfg.Cancel)); }
         catch (Exception ex) when (ex is not OperationCanceledException) { dsError = ex.Message; }
 
-        var hello = HelloStatusCheck(ds, dsError);
+        var hello = HelloStatusCheck(cfg, probe, ds, dsError);
         bool helloSet = hello.Status == Status.Pass;
         var kind = ds == null ? null : ProfileJoin(cfg, ds).Kind;
         var tests = new List<TestEntry> { hello };
@@ -44,16 +44,72 @@ static partial class Diagnostics
         return new(CredentialsGroup, tests);
     }
 
-    static TestEntry HelloStatusCheck(Dictionary<string, string>? ds, string? dsError)
+    static TestEntry HelloStatusCheck(DiagConfig cfg, IProbe probe, Dictionary<string, string>? ds, string? dsError)
     {
         if (ds == null)
             return new(HelloCheck, Status.Skip, $"Not checked: dsregcmd failed: {dsError}");
         return Parsers.DsregFlag(ds, "NgcSet") switch
         {
             true => new(HelloCheck, Status.Pass, "Set up for this user (NgcSet: YES)"),
-            false => new(HelloCheck, Status.Info, "Not set up for this user (NgcSet: NO); sign-in uses a password or a smart card"),
+            false => HelloKeysEntry(cfg, probe),
             null => new(HelloCheck, Status.Skip, "Not checked: dsregcmd reported no Windows Hello state"),
         };
+    }
+
+    // NgcSet reports only Windows Hello for Business: a PIN for a local or personal Microsoft account, or a passkey,
+    // leaves it NO. The user's Hello key store holds them all, so it says what this user actually signs in with
+    static TestEntry HelloKeysEntry(DiagConfig cfg, IProbe probe)
+    {
+        HelloKeys keys;
+        try { keys = ParseHelloKeys(probe.RunTool("certutil", $"-csp \"{PassportKsp}\" -key", 15000, cfg.Cancel), probe.CurrentUserSid()); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new(HelloCheck, Status.Info, $"Not set up for a work account (NgcSet: NO); the Windows Hello key store couldn't be read: {ex.Message}");
+        }
+        if (keys.IsEmpty)
+            return new(HelloCheck, Status.Info, "Not set up for this user (NgcSet: NO, no Windows Hello keys); sign-in uses a password or a smart card");
+
+        var parts = new List<string>();
+        if (keys.Pin) parts.Add("a PIN");
+        if (keys.WorkAccount) parts.Add("a work account");
+        if (keys.PersonalAccount) parts.Add("a personal Microsoft account");
+        if (keys.Passkeys > 0) parts.Add(keys.Passkeys == 1 ? "a passkey" : $"{keys.Passkeys} passkeys");
+        if (keys.Other > 0) parts.Add(keys.Other == 1 ? "a key for another app" : $"{keys.Other} keys for other apps");
+        string list = parts.Count == 1 ? parts[0] : $"{string.Join(", ", parts.Take(parts.Count - 1))} and {parts[^1]}";
+        return new(HelloCheck, Status.Info, $"Set up for this user: {list}" + (keys.WorkAccount ? " (NgcSet: NO)" : "; none for a work account (NgcSet: NO)"));
+    }
+
+    const string PassportKsp = "Microsoft Passport Key Storage Provider";
+
+    /// <summary>What the user's Windows Hello keys are for, by kind.</summary>
+    internal record HelloKeys(bool Pin, bool WorkAccount, bool PersonalAccount, int Passkeys, int Other)
+    {
+        public bool IsEmpty => !Pin && !WorkAccount && !PersonalAccount && Passkeys == 0 && Other == 0;
+    }
+
+    // A key's name: "<user SID>/<container>/<owner>//<key>", the owner being the user's SID again for the PIN's own key,
+    // the sign-in authority for an account, FIDO_AUTHENTICATOR for a passkey, or an app's name. Names aren't translated
+    static readonly Regex HelloKeyName = new(@"^\s*(S-1-\d+(?:-\d+)+)/[^/\s]+/([^/\s]*)/[^\s]*", RegexOptions.Multiline);
+
+    /// <summary>
+    /// The Windows Hello keys <c>certutil -csp "Microsoft Passport Key Storage Provider" -key</c> lists, by kind; only
+    /// <paramref name="sid"/>'s when it is known.
+    /// </summary>
+    internal static HelloKeys ParseHelloKeys(string certutilOutput, string? sid)
+    {
+        bool pin = false, work = false, personal = false;
+        int passkeys = 0, other = 0;
+        foreach (Match m in HelloKeyName.Matches(certutilOutput))
+        {
+            if (sid != null && !m.Groups[1].Value.Equals(sid, StringComparison.OrdinalIgnoreCase)) continue;
+            string owner = m.Groups[2].Value;
+            if (owner.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase) || m.Value.Contains("//uvkey-", StringComparison.OrdinalIgnoreCase)) pin = true;
+            else if (owner.Equals("login.live.com", StringComparison.OrdinalIgnoreCase)) personal = true;
+            else if (owner.Equals("login.windows.net", StringComparison.OrdinalIgnoreCase) || owner.Equals("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase)) work = true;
+            else if (owner.Equals("FIDO_AUTHENTICATOR", StringComparison.OrdinalIgnoreCase)) passkeys++;
+            else other++;
+        }
+        return new(pin, work, personal, passkeys, other);
     }
 
     /// <summary>Hello's trust for on-premises sign-in, from Group Policy or, failing that, Intune; null when neither sets one.</summary>
@@ -128,7 +184,7 @@ static partial class Diagnostics
             return new(TpmCheck, Status.Skip, $"Not checked: the TPM service didn't answer: {ex.Message}");
         }
 
-        bool entra = kind is JoinKind.Hybrid or JoinKind.EntraOnly;
+        bool entra = kind is JoinKind.Hybrid or JoinKind.EntraOnly or JoinKind.Registered;
         bool? protectedKey = entra && ds != null ? Parsers.DsregFlag(ds, "TpmProtected") : null;
         string key = protectedKey switch
         {

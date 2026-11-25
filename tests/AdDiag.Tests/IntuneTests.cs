@@ -358,9 +358,15 @@ public class IntuneTests
     [InlineData("YES", "YES", "Hybrid")]
     [InlineData("YES", "NO", "Entra")]
     [InlineData("NO", "YES", "Domain")]
-    [InlineData("NO", "NO", "Domain")]
-    public void Profile_FollowsTheJoin(string entra, string domain, string profile) =>
-        Assert.Equal(Enum.Parse<JoinProfile>(profile), Diagnostics.DetectProfile(Parsers.ParseDsreg($"AzureAdJoined : {entra}\nDomainJoined : {domain}\n")));
+    [InlineData("NO", "NO", "Workgroup")]
+    [InlineData("NO", "NO", "Registered", "YES")]
+    [InlineData("YES", "NO", "Entra", "YES")] // a join outranks a registration
+    public void Profile_FollowsTheJoin(string entra, string domain, string profile, string workplace = "NO") =>
+        Assert.Equal(Enum.Parse<JoinProfile>(profile), Diagnostics.DetectProfile(Parsers.ParseDsreg(
+            $"AzureAdJoined : {entra}\nDomainJoined : {domain}\nWorkplaceJoined : {workplace}\n")));
+
+    [Fact]
+    public void Profile_NoJoinState_IsNotDetected() => Assert.Null(Diagnostics.DetectProfile(Parsers.ParseDsreg("Device Name : PC042\n")));
 
     [Fact]
     public void SyncScript_StartsOnlyTheEnrollmentsTask()
