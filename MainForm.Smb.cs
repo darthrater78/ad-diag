@@ -92,15 +92,21 @@ partial class MainForm
     /// </summary>
     void ApplyMode()
     {
-        bool smb = _mode == TestMode.Smb, entra = _profile == JoinProfile.Entra;
+        bool smb = _mode == TestMode.Smb, noDomain = !_profile.HasDomain();
         StyleModeButtons();
-        foreach (var control in _domainControls) control.Visible = !smb && !entra;
-        // SMB keeps the Domain field on every profile, for short names and the SPN search; an Entra joined PC has
-        // no domain of its own, so the user gives the on-prem one
-        _lblDomain.Visible = _txtDomain.Visible = !entra || smb;
-        _lblDomain.Text = smb && entra ? "On-prem domain" : "Domain";
+        foreach (var control in _domainControls) control.Visible = !smb && !noDomain;
+        // SMB keeps the Domain field on every profile, for short names and the SPN search; a PC that isn't in a
+        // domain has none of its own, so the user gives the on-prem one
+        _lblDomain.Visible = _txtDomain.Visible = !noDomain || smb;
+        _lblDomain.Text = smb && noDomain ? "On-prem domain" : "Domain";
         _lblSmbServer.Visible = _txtSmbServer.Visible = _lblSmbShare.Visible = _txtSmbShare.Visible = _chkSmbSuffix.Visible = smb;
-        _lblProfileHint.Visible = entra && !smb;
+        _lblProfileHint.Visible = noDomain && !smb;
+        _lblProfileHint.Text = _profile switch
+        {
+            JoinProfile.Entra => "Domain checks are hidden on an Entra joined PC. Pick Hybrid joined or Domain joined to run them.",
+            JoinProfile.Registered => "Domain checks are hidden on a registered PC. Pick Domain joined to run them.",
+            _ => "Domain checks are hidden on a PC that isn't joined. Pick Domain joined to run them.",
+        };
 
         _btnRun.Visible = _btnRunMenu.Visible = !smb;
         _btnSmbTest.Visible = smb;
@@ -113,8 +119,8 @@ partial class MainForm
         // A tab the mode or profile hides gives way to Results
         bool hidden = _tab switch
         {
-            "gp" => smb || entra,
-            "dns" => smb,
+            "gp" => smb || noDomain,
+            "dns" => smb || NoDnsRegistration(_profile),
             "intune" => smb || _profile == JoinProfile.Domain,
             _ => false,
         };

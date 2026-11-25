@@ -2,7 +2,7 @@
 
 A standalone Windows tool for the two questions behind most "I can't sign in" and "I can't reach the share" tickets: is this PC healthy in Active Directory and Microsoft Entra ID, and where does its connection to a file share break? One exe, no install, nothing written to disk.
 
-[GitHub](https://github.com/darthrater78/ad-diag) · [v2026.10.23-2 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v2026.10.23-2)
+[GitHub](https://github.com/darthrater78/ad-diag) · [v2026.11.25 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v2026.11.25)
 
 ![Active Directory results after a run: eleven groups, each with its verdict](docs/screenshots/results.png)
 
@@ -11,7 +11,7 @@ A standalone Windows tool for the two questions behind most "I can't sign in" an
 ## At a glance
 
 - **Two modes.** The **Test** switch at the top picks **Active Directory** (the PC's domain, Entra ID, Group Policy, Kerberos, DNS, Hello and Intune: eleven groups of checks) or **SMB** (the path from this PC to one file server or share: name, port 445, Kerberos, sign-in, share).
-- **Three profiles.** **Domain joined**, **Microsoft Entra hybrid joined** or **Microsoft Entra joined**, detected at start-up and changeable. The profile decides which groups and checks run, in one fixed order.
+- **Five profiles.** **Domain joined**, **Microsoft Entra hybrid joined**, **Microsoft Entra joined**, **Microsoft Entra registered** (a work account added to Windows, no join) or **Not joined** (a standalone workstation), detected at start-up and changeable. The profile decides which groups and checks run, in one fixed order.
 - **Verdicts with fixes.** Every check ends Passed, Warning, Failed, Info or Skipped, with its detail; the Guide tab has the fix for each, and the SMB test names where it stopped and what to do.
 - **Read only.** Four actions change something, and each asks first: gpupdate, purging Kerberos tickets, registering in DNS, and starting an Intune sync. Nothing is stored, sent anywhere or written to disk unless you save it.
 - **Everything logged.** The Log tab records every run and test, step by step, and with **Debug** every command, query and Windows status code behind it.
@@ -42,7 +42,7 @@ On first launch, Windows SmartScreen may show "Windows protected your PC". That 
 
 ## Testing Active Directory
 
-1. Launch `ad-diag.exe`. It reads how the PC is joined (`dsregcmd /status`) and sets the **Profile**, marked "(detected)". Pick another profile to see what it would check on this PC (for the session only; nothing is saved). See [Profiles](#profiles).
+1. Launch `ad-diag.exe`. It reads how the PC is joined (`dsregcmd /status`) and sets the **Profile**, marked "(detected)". On a PC that isn't joined, the status line also says so, naming the tenant it is registered to, if any. If dsregcmd reports no join state at all, the profile starts on Domain joined, which runs everything, and nothing is marked detected. Pick another profile to see what it would check on this PC (for the session only; nothing is saved). See [Profiles](#profiles).
 2. On the Domain joined and hybrid joined profiles the **Domain** is filled in for you (from `USERDNSDOMAIN`, `dsregcmd /status`, the realm of a cached on-prem Kerberos ticket, or the machine's DNS suffix). **Domain controller (optional)** picks one DC instead of the nearest; **Add domain suffix** adds the domain to a short name. An Entra joined PC has no domain, so its profile hides both fields, the Group Policy tab and the groups that need a domain:
 
    ![Results on an Entra joined PC: only the groups that apply to it](docs/screenshots/results-entra.png)
@@ -92,8 +92,10 @@ The profile decides which groups run, and which checks they make. Pick a profile
 | Domain joined | 1–10 | group 11 Intune and the Intune policies tab (Intune enrolls only Entra or hybrid joined PCs), the Device Auth and Primary Refresh Token rows (group 9) |
 | Microsoft Entra hybrid joined | 1–11 | nothing |
 | Microsoft Entra joined | 8 Dynamic DNS Registration, 9 Entra Seamless Single Sign-On, 10 Credentials & Windows Hello, 11 Intune | groups 1–7, the Domain and DC fields, the Group Policy tab, the Seamless SSO rows (group 9) |
+| Microsoft Entra registered | 9 Entra Seamless Single Sign-On (the registration's rows only), 10 Credentials & Windows Hello, 11 Intune | groups 1–8, the Domain and DC fields, the Group Policy and DNS registration tabs |
+| Not joined | 9 Entra Seamless Single Sign-On (Join Type only), 10 Credentials & Windows Hello, 11 Intune | groups 1–8, the Domain and DC fields, the Group Policy and DNS registration tabs |
 
-Dynamic DNS Registration stays on every profile: behind a ZTNA client an Entra joined PC's registration matters as much as a domain-joined one's.
+Dynamic DNS Registration stays on every profile with a join: behind a ZTNA client an Entra joined PC's registration matters as much as a domain-joined one's. A registered or unjoined PC is in no domain, so it has no AD zone to register its name in.
 
 ### 1. Domain Membership & Identity
 
@@ -177,7 +179,7 @@ Whether this PC signs in to Microsoft 365 and other cloud apps that use Microsof
 
 How the PC is joined decides what is checked. Entra joined and hybrid joined PCs sign in with their Primary Refresh Token, which Edge, Chrome and Office use on Windows; domain-joined PCs use Seamless SSO. On a hybrid joined PC Seamless SSO is only the fallback, for browsers and apps that can't use the token, so while the token is in place a Seamless SSO problem is Info, not a warning, and the verdict reads "Ready for single sign-on through the Primary Refresh Token; the Seamless SSO fallback is not set up":
 
-- **Join Type** — from `dsregcmd /status`: Microsoft Entra hybrid joined, Microsoft Entra joined, domain joined only, or neither (not ready)
+- **Join Type** — from `dsregcmd /status`: Microsoft Entra hybrid joined, Microsoft Entra joined, domain joined only, Microsoft Entra registered (`WorkplaceJoined: YES`, with the tenant), or not joined at all. A PC that isn't joined is Info on the Not joined profile, with the verdict "No single sign-on to check: sign-in is local to this PC"; checked under a profile it doesn't have (a joined one, or Registered on an unregistered PC), it fails
 - **Device Auth** — `DeviceAuthStatus` must be `SUCCESS` (Entra and hybrid joined)
 - **Primary Refresh Token** — `AzureAdPrt` must be `YES` and renewed in the last 14 days, its lifetime. Windows renews it at sign-in, at unlock and when apps ask for a token, so a day or two old is normal. Missing or expired on a hybrid joined PC warns, since Seamless SSO covers for it; on an Entra joined PC it fails
 
@@ -189,6 +191,14 @@ Domain-joined and hybrid joined PCs (Seamless SSO):
 - **Status Bar Scripts** — "Allow updates to status bar via script" in the Local intranet zone; off is Info, since only older clients need it
 
 The zone and its two settings come from the Windows URL security manager (`urlmon`), the component Edge and Chrome ask, so Group Policy, the user's own zone sites and the zone settings apply in the order they do for the browser.
+
+Microsoft Entra registered PCs (a work account added in Settings > Accounts > Access work or school; Windows sign-in stays local):
+
+- **Device Certificate** — the registration's device certificate must be in its dates (`DeviceCertificateValidity`); apps prove the device with it, so an expired one fails
+- **Primary Refresh Token** — Info: Windows sign-in gets none on a registered PC, and apps get tokens for the work account as they ask
+- **Entra Endpoints** — as below, `login.microsoftonline.com` only
+
+The verdict reads "Ready for app sign-in with the work account. Windows sign-in has no single sign-on on a registered PC".
 
 Microsoft Entra joined PCs (no Seamless SSO, so its rows aren't shown):
 
@@ -211,16 +221,16 @@ Key rollover, read from AD (each account's `pwdLastSet`; any domain user can rea
 
 How this user's sign-in credentials are held, on every profile.
 
-- **Windows Hello** — whether Hello for Business is set up for this user (`NgcSet` in `dsregcmd /status`); not set up is Info
+- **Windows Hello** — whether Hello for Business is set up for this user (`NgcSet` in `dsregcmd /status`). When it isn't, the user's Windows Hello keys (`certutil -csp "Microsoft Passport Key Storage Provider" -key`, which only lists them) say what is: a PIN for a local account, a personal Microsoft account, a work account, passkeys, or keys for other apps. Either way it is Info
 - **Hello Trust** — how Hello signs in to on-premises resources: cloud Kerberos trust or certificate trust, set by Group Policy or Intune, or key trust when neither is. On an Entra joined PC with none set, Hello reaches cloud apps only (Info). Shown only when Hello is set up
 - **Sign-in Methods** — PIN, and the fingerprint, face or iris enrolled for this user. Shown only when Hello is set up
-- **TPM** — the TPM's version from TPM Base Services and, on a PC joined to Entra ID, whether the device key is protected by it (`TpmProtected`). No TPM or TPM 1.2 on such a PC, or a device key outside the TPM, warns
+- **TPM** — the TPM's version from TPM Base Services and, on a PC joined or registered to Entra ID, whether the device key is protected by it (`TpmProtected`). No TPM or TPM 1.2 on such a PC, or a device key outside the TPM, warns
 - **Ticket Encryption** — warns when a cached Kerberos ticket uses RC4 instead of AES, naming the services
 - **Saved Credentials** — Windows credentials saved in Credential Manager for servers (`cmdkey /list`, names only, never passwords), which replace single sign-on there and lock the account out once the password changes
 
 ### 11. Intune
 
-Whether this PC is managed by Microsoft Intune (or another MDM), on the Microsoft Entra joined and hybrid joined profiles. The Domain joined profile leaves it out: Intune enrolls only a PC joined to Microsoft Entra ID, so a domain-only PC could only ever read "not enrolled". Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
+Whether this PC is managed by Microsoft Intune (or another MDM), on every profile but Domain joined (a registered PC can be enrolled with its work account, and an unjoined one in MDM alone). The Domain joined profile leaves it out: Intune enrolls only a PC joined to Microsoft Entra ID, so a domain-only PC could only ever read "not enrolled". Read from the registry the Windows MDM client keeps. Whether Intune counts the PC as compliant is decided in the service and not stored on the PC, so it isn't checked.
 
 - **MDM Enrollment** — enrolled, the MDM and the account that enrolled the PC; an enrollment that isn't complete warns. Not enrolled is Info, and the other checks aren't shown. Only an enrollment with an MDM server counts: Windows' own entries there (Local, Deploy and Cloud Authority) and the ConfigMgr bridge are on PCs that aren't in Intune too
 - **Last Sync** — the last successful sync with Intune. A PC that is on syncs about every 8 hours, so over a week warns; a failed attempt since the last success is a note (the next sync retries it)
@@ -252,6 +262,8 @@ The **Profile** changes what the steps check:
 | Cloud Kerberos Trust row | — | Only with Windows Hello set up; missing OnPremTgt warns, since a Hello sign-in then falls back to NTLM | Always; missing OnPremTgt fails, since there's no other way to an on-prem ticket |
 | `_kpasswd._tcp` SRV | Checked | Checked | Not checked |
 | NTLM | Used when Kerberos fails | Used when Kerberos fails | The LAN Manager row adds that a Windows Hello sign-in leaves no password hash for NTLM, so Kerberos must work |
+
+The Microsoft Entra registered and Not joined profiles take the Entra joined column, except that they have no Cloud Kerberos Trust row (only a PC joined to Entra ID gets an on-prem ticket through it) and they check `_kpasswd._tcp` when an on-prem domain is typed.
 
 **Open share**, at the top of the Results tab, opens what the fields name in File Explorer: the share, or with no share the server's list of shares. It runs through `explorer.exe`, so Explorer opens unelevated even when the app is running as Administrator, and Explorer signs in as it always does.
 
@@ -360,6 +372,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 
 Newest first. Dates are when the change was made.
 
+- **v2026.11.25, 2026-11-25:** when Windows Hello for Business isn't set up, the Windows Hello check lists the user's Windows Hello keys with `certutil -csp "Microsoft Passport Key Storage Provider" -key`, from System32 by its full path like every other tool, with fixed arguments. It only lists key names (no key material is exported, and nothing is written); Results shows only what kinds of keys there are, and only the signed-in user's. The raw listing, which names the keys, reaches the Log only with **Debug** on, and stays in memory like the rest of it.
 - **v2026.10.23-2, 2026-10-23:** CI checks the repo's shell scripts (`scripts/ci-changes.sh`, `tools/screenshots/run.sh`) with shellcheck, pinned to a version and the release's checksum.
 - **v2026.10.23-2, 2026-10-23:** the SMB test adds three calls to Windows, all read only and run as the signed-in user: the first step of an SSPI sign-in (`AcquireCredentialsHandle`, `InitializeSecurityContext`, `QueryContextAttributes` in `secur32`), whose token is freed unsent; listing a share's root, capped at 1,000 entries; and a server's share list (`NetShareEnum` in `netapi32`), as Explorer asks for it. All load from System32. The SPN search is a fixed LDAP query into which only a server and domain that match the DNS-name pattern are put; `cmdkey /list` is now read for user names as well as targets. The File server and Share fields are validated before anything runs, and **Open share** passes only that validated path, quoted, to `explorer.exe`.
 - **v2026.10.23, 2026-10-23:** the DNS Client event query also reads each event's named data fields, from the XML Windows itself renders for the event (values arrive escaped, and Windows PowerShell resolves no external entities), so the latest failure can be shown one setting per line; it reads the same System log entries as before.
@@ -444,6 +457,20 @@ Bump `<Version>` in `AdDiag.csproj` and add a `### v<version> — <date>` sectio
 ## Version History
 
 Newest first. Each version's section is its GitHub release notes: the release workflow publishes everything between its heading and the next.
+
+### v2026.11.25 — 2026-11-25
+
+PCs that aren't joined to a domain or Microsoft Entra ID get profiles of their own.
+
+#### Fixed
+- A PC joined to neither was picked as **Domain joined (detected)**, since Domain joined was the fallback. It's now detected for what it is, and a PC whose join can't be read keeps the current profile without "(detected)".
+
+#### New
+- **Microsoft Entra registered** profile, for a PC with a work account added to Windows but not joined. The domain fields and the Group Policy and DNS registration tabs are hidden. The SSO group checks the registration, the new **Device Certificate** row (its valid dates), the TPM key and the Entra endpoints. No Primary Refresh Token at Windows sign-in is a note, not a failure, since a registered PC doesn't get one.
+- **Not joined** profile, for a standalone workstation. Join Type and Readiness are notes rather than failures, and Credentials and Intune still run.
+- The status line says when a PC is registered or not joined, and to which tenant it's registered.
+- Picking a joined profile on a PC that isn't joined, or Microsoft Entra registered on one that isn't registered, fails Join Type and says the profile doesn't apply.
+- **Windows Hello**: when Windows Hello for Business isn't set up, the check reads the user's Windows Hello keys and says what's set up instead (a PIN, a personal Microsoft account, a work account, passkeys), so a PIN sign-in no longer reads as no Windows Hello.
 
 ### v2026.10.23-2 — 2026-10-23
 

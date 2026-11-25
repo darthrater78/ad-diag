@@ -97,6 +97,61 @@ public class CredentialsTests
         Assert.DoesNotContain(group.Tests, t => t.Name is "Hello Trust" or "Sign-in Methods");
     }
 
+    // A local account's PIN, a personal Microsoft account, a passkey and an app's key; another user's key is left out
+    static readonly string HelloKeyStore = $"""
+        Microsoft Passport Key Storage Provider:
+          {Sid}/a8704955-0000-4000-8000-000000000001/{Sid}//uvkey-C12AA6914D51832372A87791933508D7
+          RSA
+
+
+          {Sid}/a8704955-0000-4000-8000-000000000001/FIDO_AUTHENTICATOR//901de5b86ca5875505f8_5364
+          ECDSA_P256
+          RSA
+
+
+          {Sid}/a8704955-0000-4000-8000-000000000001/app.0000//BIO_E9DF75DEE7694EBA
+          RSA
+
+
+          {Sid}/a8704955-0000-4000-8000-000000000001/login.live.com//542e980917c83113
+          RSA
+
+
+          S-1-5-21-1-2-3-1002/b1/login.windows.net//other-user
+          RSA
+
+        CertUtil: -key command completed successfully.
+        """;
+
+    [Fact]
+    public void Hello_NotForBusiness_ReadsTheKeyStore()
+    {
+        var probe = Machine(Dsreg(ngc: "NO"));
+        probe.Tools["certutil -csp"] = HelloKeyStore;
+
+        var entry = Entry(Run(probe), "Windows Hello");
+
+        Assert.Equal(Status.Info, entry.Status);
+        Assert.Equal("Set up for this user: a PIN, a personal Microsoft account, a passkey and a key for another app; none for a work account (NgcSet: NO)", entry.Detail);
+    }
+
+    [Fact]
+    public void Hello_KeyStoreEmpty_SaysPassword()
+    {
+        var probe = Machine(Dsreg(ngc: "NO"));
+        probe.Tools["certutil -csp"] = "Microsoft Passport Key Storage Provider:\nCertUtil: -key command completed successfully.\n";
+
+        Assert.StartsWith("Not set up for this user (NgcSet: NO, no Windows Hello keys)", Entry(Run(probe), "Windows Hello").Detail);
+    }
+
+    [Fact]
+    public void HelloKeys_WorkAccount_AndOnlyTheUsersOwn()
+    {
+        Assert.Equal(new Diagnostics.HelloKeys(false, true, false, 0, 0),
+            Diagnostics.ParseHelloKeys("  S-1-5-21-1-2-3-1002/b1/login.windows.net//k\n", "S-1-5-21-1-2-3-1002"));
+        Assert.True(Diagnostics.ParseHelloKeys(HelloKeyStore, "S-1-5-21-9-9-9-1003").IsEmpty);
+    }
+
     [Fact]
     public void HelloPolicy_Denied_NeedsAdmin()
     {
