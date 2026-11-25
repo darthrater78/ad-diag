@@ -2,7 +2,7 @@
 
 A standalone Windows tool for the two questions behind most "I can't sign in" and "I can't reach the share" tickets: is this PC healthy in Active Directory and Microsoft Entra ID, and where does its connection to a file share break? One exe, no install, nothing written to disk.
 
-[GitHub](https://github.com/darthrater78/ad-diag) · [v2026.10.23-2 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v2026.10.23-2)
+[GitHub](https://github.com/darthrater78/ad-diag) · [v2026.11.25 release notes](https://github.com/darthrater78/ad-diag/releases/tag/v2026.11.25)
 
 ![Active Directory results after a run: eleven groups, each with its verdict](docs/screenshots/results.png)
 
@@ -372,7 +372,7 @@ The diagnostic run is **read-only**. Four actions change something, and each ask
 
 Newest first. Dates are when the change was made.
 
-- **Unreleased, 2026-11-25:** when Windows Hello for Business isn't set up, the Windows Hello check lists the user's Windows Hello keys with `certutil -csp "Microsoft Passport Key Storage Provider" -key`, from System32 by its full path like every other tool, with fixed arguments. It only lists key names (no key material is exported, and nothing is written); Results shows only what kinds of keys there are, and only the signed-in user's. The raw listing, which names the keys, reaches the Log only with **Debug** on, and stays in memory like the rest of it.
+- **v2026.11.25, 2026-11-25:** when Windows Hello for Business isn't set up, the Windows Hello check lists the user's Windows Hello keys with `certutil -csp "Microsoft Passport Key Storage Provider" -key`, from System32 by its full path like every other tool, with fixed arguments. It only lists key names (no key material is exported, and nothing is written); Results shows only what kinds of keys there are, and only the signed-in user's. The raw listing, which names the keys, reaches the Log only with **Debug** on, and stays in memory like the rest of it.
 - **v2026.10.23-2, 2026-10-23:** CI checks the repo's shell scripts (`scripts/ci-changes.sh`, `tools/screenshots/run.sh`) with shellcheck, pinned to a version and the release's checksum.
 - **v2026.10.23-2, 2026-10-23:** the SMB test adds three calls to Windows, all read only and run as the signed-in user: the first step of an SSPI sign-in (`AcquireCredentialsHandle`, `InitializeSecurityContext`, `QueryContextAttributes` in `secur32`), whose token is freed unsent; listing a share's root, capped at 1,000 entries; and a server's share list (`NetShareEnum` in `netapi32`), as Explorer asks for it. All load from System32. The SPN search is a fixed LDAP query into which only a server and domain that match the DNS-name pattern are put; `cmdkey /list` is now read for user names as well as targets. The File server and Share fields are validated before anything runs, and **Open share** passes only that validated path, quoted, to `explorer.exe`.
 - **v2026.10.23, 2026-10-23:** the DNS Client event query also reads each event's named data fields, from the XML Windows itself renders for the event (values arrive escaped, and Windows PowerShell resolves no external entities), so the latest failure can be shown one setting per line; it reads the same System log entries as before.
@@ -457,6 +457,20 @@ Bump `<Version>` in `AdDiag.csproj` and add a `### v<version> — <date>` sectio
 ## Version History
 
 Newest first. Each version's section is its GitHub release notes: the release workflow publishes everything between its heading and the next.
+
+### v2026.11.25 — 2026-11-25
+
+PCs that aren't joined to a domain or Microsoft Entra ID get profiles of their own.
+
+#### Fixed
+- A PC joined to neither was picked as **Domain joined (detected)**, since Domain joined was the fallback. It's now detected for what it is, and a PC whose join can't be read keeps the current profile without "(detected)".
+
+#### New
+- **Microsoft Entra registered** profile, for a PC with a work account added to Windows but not joined. The domain fields and the Group Policy and DNS registration tabs are hidden. The SSO group checks the registration, the new **Device Certificate** row (its valid dates), the TPM key and the Entra endpoints. No Primary Refresh Token at Windows sign-in is a note, not a failure, since a registered PC doesn't get one.
+- **Not joined** profile, for a standalone workstation. Join Type and Readiness are notes rather than failures, and Credentials and Intune still run.
+- The status line says when a PC is registered or not joined, and to which tenant it's registered.
+- Picking a joined profile on a PC that isn't joined, or Microsoft Entra registered on one that isn't registered, fails Join Type and says the profile doesn't apply.
+- **Windows Hello**: when Windows Hello for Business isn't set up, the check reads the user's Windows Hello keys and says what's set up instead (a PIN, a personal Microsoft account, a work account, passkeys), so a PIN sign-in no longer reads as no Windows Hello.
 
 ### v2026.10.23-2 — 2026-10-23
 
